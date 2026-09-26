@@ -51,7 +51,7 @@ func NewChatCmd() *cobra.Command {
 			}
 
 			if model == "" {
-				model = "gemini-2.5-pro"
+				model = "gemini-3.1-pro"
 			}
 
 			// Build messages
@@ -141,7 +141,7 @@ func NewChatCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&prompt, "prompt", "p", "", "input prompt text for the AI model")
-	cmd.Flags().StringVarP(&model, "model", "m", "gemini-2.5-pro", "AI model identifier")
+	cmd.Flags().StringVarP(&model, "model", "m", "gemini-3.1-pro", "AI model identifier")
 	cmd.Flags().BoolVar(&stream, "stream", true, "stream tokens in real-time")
 	cmd.Flags().StringVar(&system, "system", "", "system instruction for the prompt")
 	cmd.Flags().StringVar(&image, "image", "", "path or URL of image attachment")
