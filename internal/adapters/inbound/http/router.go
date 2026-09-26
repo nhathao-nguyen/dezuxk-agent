@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"dezuxk-gateway/internal/adapters/inbound/web"
 	"dezuxk-gateway/internal/config"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
@@ -166,15 +165,6 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		adminCfg = &deps.Config.Admin
 	}
 	adminHandler := NewAdminHandler(deps.SessionRepo, deps.ModelRegistry, deps.Metrics, deps.ResponseCache, adminCfg)
-
-	// Phục vụ Giao diện Embedded Admin Dashboard tại /admin
-	hfs, err := web.GetFileSystem()
-	if err == nil {
-		r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
-			http.Redirect(w, r, "/admin/", http.StatusMovedPermanently)
-		})
-		r.Handle("/admin/*", http.StripPrefix("/admin", http.FileServer(hfs)))
-	}
 
 	// Admin Authentication & Overview APIs
 	r.Post("/v1/admin/auth/login", adminHandler.HandleLogin)
