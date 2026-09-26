@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
@@ -76,6 +77,7 @@ func InitDirectServices(configPath string) (*DirectServices, error) {
 		_ = sqliteRepo.Close()
 		return nil, fmt.Errorf("lỗi khởi tạo ProfileManager: %w", err)
 	}
+	_, _ = profileManager.ScanAndDiscover(context.Background())
 
 	responseCache := services.NewResponseCache(cfg.Cache)
 

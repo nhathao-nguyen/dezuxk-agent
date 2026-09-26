@@ -27,6 +27,11 @@ func NewRootCmd() *cobra.Command {
 	cmd.PersistentFlags().BoolVarP(&Offline, "offline", "d", false, "run in offline/direct database mode")
 	cmd.PersistentFlags().StringVar(&Token, "token", "", "admin token for remote server")
 
+	cmd.AddCommand(NewStartCmd())
+	cmd.AddCommand(NewStatusCmd())
+	cmd.AddCommand(NewProfileCmd())
+	cmd.AddCommand(NewKeyCmd())
+
 	return cmd
 }
 
