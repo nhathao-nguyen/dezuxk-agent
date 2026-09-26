@@ -1,0 +1,13 @@
+# Profiles and Chrome data
+profiles/
+
+# Storage and SQLite database
+storage/
+
+# Binaries
+*.exe
+*.exe~
+dezuxk
+
+# Superpowers SDD workspace
+.superpowers/

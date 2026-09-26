@@ -1,0 +1,391 @@
+package session
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+
+	"dezuxk-gateway/internal/core/domain"
+	"dezuxk-gateway/internal/core/ports"
+)
+
+// SqliteKeyRepository lưu trữ và quản lý Virtual API Keys trong cơ sở dữ liệu SQLite
+type SqliteKeyRepository struct {
+	mu sync.Mutex
+	db *sql.DB
+}
+
+// NewSqliteKeyRepository khởi tạo kho lưu trữ Virtual API Keys
+func NewSqliteKeyRepository(db *sql.DB) (*SqliteKeyRepository, error) {
+	if db == nil {
+		return nil, errors.New("sql.DB không được là nil")
+	}
+
+	repo := &SqliteKeyRepository{
+		db: db,
+	}
+
+	if err := repo.migrate(); err != nil {
+		return nil, fmt.Errorf("không thể khởi tạo bảng virtual_keys: %w", err)
+	}
+
+	return repo, nil
+}
+
+func (r *SqliteKeyRepository) migrate() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS virtual_keys (
+		id TEXT PRIMARY KEY,
+		key_hash TEXT UNIQUE NOT NULL,
+		key_prefix TEXT NOT NULL,
+		name TEXT NOT NULL,
+		role TEXT NOT NULL DEFAULT 'user',
+		rate_limit_rpm INTEGER DEFAULT 60,
+		daily_quota_requests INTEGER DEFAULT 1000,
+		used_today INTEGER DEFAULT 0,
+		last_used_date TEXT DEFAULT '',
+		allowed_models_json TEXT DEFAULT '["*"]',
+		is_active INTEGER DEFAULT 1,
+		expires_at DATETIME,
+		created_at DATETIME NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_virtual_keys_hash ON virtual_keys(key_hash);
+	CREATE INDEX IF NOT EXISTS idx_virtual_keys_active ON virtual_keys(is_active);
+	`
+	_, err := r.db.Exec(schema)
+	return err
+}
+
+// Save lưu một Virtual API Key mới vào SQLite
+func (r *SqliteKeyRepository) Save(ctx context.Context, key *domain.VirtualKey) error {
+	if key == nil {
+		return errors.New("key không được là nil")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	allowedModelsJSON, err := json.Marshal(key.AllowedModels)
+	if err != nil {
+		allowedModelsJSON = []byte(`["*"]`)
+	}
+
+	query := `
+	INSERT INTO virtual_keys (
+		id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
+		used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	isActiveInt := 0
+	if key.IsActive {
+		isActiveInt = 1
+	}
+
+	var expiresAtVal any = nil
+	if key.ExpiresAt != nil {
+		expiresAtVal = key.ExpiresAt.UTC()
+	}
+
+	_, err = r.db.ExecContext(ctx, query,
+		key.ID,
+		key.KeyHash,
+		key.KeyPrefix,
+		key.Name,
+		key.Role,
+		key.RateLimitRPM,
+		key.DailyQuotaRequests,
+		key.UsedToday,
+		key.LastUsedDate,
+		string(allowedModelsJSON),
+		isActiveInt,
+		expiresAtVal,
+		key.CreatedAt.UTC(),
+	)
+	return err
+}
+
+// FindByKeyHash tìm Virtual API Key theo mã băm SHA-256
+func (r *SqliteKeyRepository) FindByKeyHash(ctx context.Context, keyHash string) (*domain.VirtualKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	query := `
+	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
+	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
+	FROM virtual_keys
+	WHERE key_hash = ?
+	LIMIT 1
+	`
+	row := r.db.QueryRowContext(ctx, query, keyHash)
+	return r.scanKey(row)
+}
+
+// FindByID tìm Virtual API Key theo ID
+func (r *SqliteKeyRepository) FindByID(ctx context.Context, id string) (*domain.VirtualKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	query := `
+	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
+	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
+	FROM virtual_keys
+	WHERE id = ?
+	LIMIT 1
+	`
+	row := r.db.QueryRowContext(ctx, query, id)
+	return r.scanKey(row)
+}
+
+// ListActive trả về danh sách các key đang hoạt động (is_active = 1)
+func (r *SqliteKeyRepository) ListActive(ctx context.Context) ([]*domain.VirtualKey, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	query := `
+	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
+	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
+	FROM virtual_keys
+	WHERE is_active = 1
+	ORDER BY created_at DESC
+	`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*domain.VirtualKey
+	for rows.Next() {
+		k, err := r.scanKeyFromRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// Revoke thu hồi Virtual API Key ngay lập tức (is_active = 0)
+func (r *SqliteKeyRepository) Revoke(ctx context.Context, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	res, err := r.db.ExecContext(ctx, "UPDATE virtual_keys SET is_active = 0 WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("không tìm thấy key để thu hồi")
+	}
+	return nil
+}
+
+// ConsumeDailyQuota tiêu thụ 1 lượt quota trong ngày và trả về số quota còn lại (hoặc -1 nếu không giới hạn)
+func (r *SqliteKeyRepository) ConsumeDailyQuota(ctx context.Context, id string, date string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// 1. Kiểm tra trạng thái hiện tại của key
+	var (
+		dailyQuota int
+		usedToday  int
+		lastDate   string
+		isActive   int
+	)
+	err := r.db.QueryRowContext(ctx,
+		"SELECT daily_quota_requests, used_today, last_used_date, is_active FROM virtual_keys WHERE id = ?", id,
+	).Scan(&dailyQuota, &usedToday, &lastDate, &isActive)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, domain.ErrInvalidAPIKey
+		}
+		return 0, err
+	}
+
+	if isActive != 1 {
+		return 0, domain.ErrKeyRevoked
+	}
+
+	// Nếu ngày mới -> reset used_today về 0
+	if lastDate != date {
+		usedToday = 0
+	}
+
+	// Kiểm tra hạn ngạch nếu có giới hạn
+	if dailyQuota > 0 && usedToday >= dailyQuota {
+		return 0, domain.ErrDailyQuotaExceeded
+	}
+
+	// Tiêu thụ lượt
+	newUsedToday := usedToday + 1
+	_, err = r.db.ExecContext(ctx,
+		"UPDATE virtual_keys SET used_today = ?, last_used_date = ? WHERE id = ?",
+		newUsedToday, date, id,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	if dailyQuota <= 0 {
+		return -1, nil
+	}
+
+	remaining := dailyQuota - newUsedToday
+	if remaining < 0 {
+		remaining = 0
+	}
+	return remaining, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error) {
+	var (
+		k           domain.VirtualKey
+		allowedJSON string
+		isActiveInt int
+		expiresAt   sql.NullTime
+	)
+
+	err := row.Scan(
+		&k.ID,
+		&k.KeyHash,
+		&k.KeyPrefix,
+		&k.Name,
+		&k.Role,
+		&k.RateLimitRPM,
+		&k.DailyQuotaRequests,
+		&k.UsedToday,
+		&k.LastUsedDate,
+		&allowedJSON,
+		&isActiveInt,
+		&expiresAt,
+		&k.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, domain.ErrInvalidAPIKey
+		}
+		return nil, err
+	}
+
+	k.IsActive = (isActiveInt == 1)
+	if expiresAt.Valid {
+		t := expiresAt.Time.UTC()
+		k.ExpiresAt = &t
+	}
+
+	k.AllowedModelsJSON = allowedJSON
+	if allowedJSON != "" {
+		_ = json.Unmarshal([]byte(allowedJSON), &k.AllowedModels)
+	}
+	if len(k.AllowedModels) == 0 {
+		k.AllowedModels = []string{"*"}
+	}
+
+	return &k, nil
+}
+
+func (r *SqliteKeyRepository) scanKeyFromRows(rows *sql.Rows) (*domain.VirtualKey, error) {
+	return r.scanKey(rows)
+}
+
+// MemoryKeyRepository lưu trữ Virtual API Keys trong RAM cho kiểm thử nhanh
+type MemoryKeyRepository struct {
+	mu   sync.Mutex
+	keys map[string]*domain.VirtualKey // id -> key
+}
+
+func NewMemoryKeyRepository() *MemoryKeyRepository {
+	return &MemoryKeyRepository{
+		keys: make(map[string]*domain.VirtualKey),
+	}
+}
+
+func (m *MemoryKeyRepository) Save(ctx context.Context, key *domain.VirtualKey) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.keys[key.ID] = key
+	return nil
+}
+
+func (m *MemoryKeyRepository) FindByKeyHash(ctx context.Context, keyHash string) (*domain.VirtualKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, k := range m.keys {
+		if k.KeyHash == keyHash {
+			return k, nil
+		}
+	}
+	return nil, domain.ErrInvalidAPIKey
+}
+
+func (m *MemoryKeyRepository) FindByID(ctx context.Context, id string) (*domain.VirtualKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.keys[id]
+	if !ok {
+		return nil, errors.New("không tìm thấy key")
+	}
+	return k, nil
+}
+
+func (m *MemoryKeyRepository) ListActive(ctx context.Context) ([]*domain.VirtualKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var list []*domain.VirtualKey
+	for _, k := range m.keys {
+		if k.IsActive {
+			list = append(list, k)
+		}
+	}
+	return list, nil
+}
+
+func (m *MemoryKeyRepository) Revoke(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.keys[id]
+	if !ok {
+		return errors.New("không tìm thấy key")
+	}
+	k.IsActive = false
+	return nil
+}
+
+func (m *MemoryKeyRepository) ConsumeDailyQuota(ctx context.Context, id string, date string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.keys[id]
+	if !ok {
+		return 0, domain.ErrInvalidAPIKey
+	}
+	if !k.IsActive {
+		return 0, domain.ErrKeyRevoked
+	}
+	if k.LastUsedDate != date {
+		k.UsedToday = 0
+		k.LastUsedDate = date
+	}
+	if k.DailyQuotaRequests > 0 && k.UsedToday >= k.DailyQuotaRequests {
+		return 0, domain.ErrDailyQuotaExceeded
+	}
+	k.UsedToday++
+	if k.DailyQuotaRequests <= 0 {
+		return -1, nil
+	}
+	return k.DailyQuotaRequests - k.UsedToday, nil
+}
+
+// Đảm bảo implement đúng ports.KeyRepository
+var _ ports.KeyRepository = (*SqliteKeyRepository)(nil)
+var _ ports.KeyRepository = (*MemoryKeyRepository)(nil)

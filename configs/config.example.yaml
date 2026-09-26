@@ -1,0 +1,122 @@
+# Cấu hình Hạ tầng Dezuxk AI Gateway (Mẫu - Hoàn toàn sạch không có Cookie, Model, Tài khoản hay Upstream)
+server:
+  host: "127.0.0.1"
+  port: 8080
+  api_key: ""
+  allowed_origins:
+    - "*"
+  read_timeout: 300s
+  write_timeout: 300s
+  upstream_short_timeout: 20s
+  upstream_stream_timeout: 300s
+  max_header_bytes: 65536
+  enable_request_log: true
+  rate_limit:
+    max_requests: 120
+    window_seconds: 60
+  trusted_proxies:
+    - "127.0.0.1"
+    - "::1"
+
+# Cơ sở dữ liệu SQLite lưu trữ phiên bền vững
+storage:
+  database_path: "./storage/gateway.db"
+
+# Chu kỳ đối soát hợp đồng định kỳ (NzlxgGoldenJob)
+golden_job:
+  lab_account_prefix: "lab"
+  interval: 5m
+
+# Worker làm mới định kỳ giữ phiên sống (Proactive Session Keep-Alive)
+keep_alive:
+  enabled: true
+  interval: 4h
+
+# Bảo mật kho bí mật (Secret Vault AES-256-GCM)
+security:
+  master_key: "" # Để trống để đọc từ biến môi trường DEZUXK_MASTER_KEY
+
+# Công tắc operation. false thì facade trả "operation đang tắt" và không gọi máy chủ gốc.
+# Khóa thiếu nghĩa là bật.
+operations:
+  flow_get_credits: true
+  chat_completions: true
+  images_generations: true
+  videos_generations: true
+
+# Quản lý Profile Chrome riêng biệt cho từng tài khoản Google
+profiles:
+  base_dir: "./profiles"
+  chrome_binary: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+  cdp_port_start: 9222
+
+# Bộ nhớ đệm tài nguyên truyền thông
+media:
+  storage_dir: "./storage/media"
+  base_url: "http://localhost:8080"
+  max_disk_gb: 15
+  retention_days: 7
+
+# Cấu hình tính năng Vision Đa phương thức (Multimodal Input / Vision)
+vision:
+  enabled: true
+  max_image_size_bytes: 10485760 # 10MB tối đa mỗi ảnh
+  allowed_mime_types:
+    - "image/jpeg"
+    - "image/png"
+    - "image/webp"
+    - "image/gif"
+  http_download_timeout: 30s
+  upload_timeout: 60s
+  upload_method: "scotty" # "scotty" (Google Push Resumable Upload) hoặc "inline" (Data URL)
+
+# Bộ đếm Token và Hạch toán OpenAI Usage Accounting
+tokens:
+  encoding: "cl100k_base" # "cl100k_base", "p50k_base", hoặc "estimation"
+  prompt_token_ratio: 0.25 # Số token ước tính trên mỗi ký tự (hoặc 4 ký tự/token)
+  completion_token_ratio: 0.25
+  image_tokens_per_tile: 258 # Chi phí token chuẩn cho mỗi ảnh/tile (chuẩn OpenAI Vision)
+
+# Cơ chế Chuyển đổi Dự phòng Tự động (Next-Account Failover)
+failover:
+  max_attempts: 3
+  cooling_duration: 60s
+
+# Cấu hình Google Flow (Hạn ngạch & Chi phí tín dụng động theo cấu hình hạ tầng)
+flow:
+  project_title_prefix: "Studio"
+  credit_costs:
+    veo_quality: 100
+    veo_fast: 20
+    veo_lite: 10
+    abra_imagen: 4
+    upsample_4k: 50
+    video_extend_4s: 20
+    video_extend_6s: 30
+    musicfx: 5
+
+# Tùy chỉnh / Ghi đè URL và cấu hình RPC (cho phép cập nhật khi Google đổi URL pattern mà không cần build lại code)
+rpcs:
+  StreamGenerate:
+    path_pattern: "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?rt=c"
+    target_host: "https://gemini.google.com"
+  nzlxg:
+    path_pattern: "/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=nzlxg"
+    target_host: "https://flow.google.com"
+
+# Tầng Bộ nhớ đệm Phản hồi Thông minh (In-Memory Response Caching)
+cache:
+  enabled: true
+  max_entries: 10000
+  ttl_seconds: 3600
+  methods:
+    - "chat"
+    - "credits"
+
+# Quản trị viên & Giao diện Dashboard nhúng
+admin:
+  enabled: true
+  username: "admin"
+  password: "dezuxk_admin_secret_pass"
+  session_token: "dezuxk_secure_admin_session_token_2026"
+

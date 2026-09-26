@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dezuxk AI Gateway - Bảng Quản Trị Hệ Thống</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚀</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <span class="brand-badge">PHASE 3</span>
+      <span class="brand-title">Dezuxk AI Gateway</span>
+    </div>
+    <div class="header-status">
+      <div class="server-pill">
+        <span class="dot green"></span>
+        <span>Gateway Daemon Online</span>
+      </div>
+      <button class="btn btn-sm" onclick="window.logout()">Đăng xuất</button>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <div class="tabs-bar">
+    <button class="tab-btn active" data-tab="accounts">
+      👥 Account Pool (<span id="stat-accounts-count">0</span>)
+    </button>
+    <button class="tab-btn" data-tab="metrics">
+      📊 Realtime Metrics & Cache
+    </button>
+    <button class="tab-btn" data-tab="models">
+      ⚡ Cụm GPU Online (HTrJv/yBhWQ)
+    </button>
+    <button class="tab-btn" data-tab="drift">
+      🚨 Contract Drift & Alerts (<span id="stat-drift">0</span>)
+    </button>
+  </div>
+
+  <!-- Main Content -->
+  <main>
+    <!-- Top Metric Cards -->
+    <div class="metrics-grid">
+      <div class="metric-card cyan">
+        <div class="metric-header">Realtime RPM</div>
+        <div class="metric-val" id="stat-rpm">0</div>
+        <div class="metric-sub">Cửa sổ trượt 60s</div>
+      </div>
+      <div class="metric-card green">
+        <div class="metric-header">Tổng Yêu Cầu Xử Lý</div>
+        <div class="metric-val" id="stat-total-reqs">0</div>
+        <div class="metric-sub">Kể từ khi bật Gateway</div>
+      </div>
+      <div class="metric-card purple">
+        <div class="metric-header">Cache Hit Ratio <span class="badge-fast">&lt;5ms</span></div>
+        <div class="metric-val" id="stat-cache-ratio">0.0%</div>
+        <div class="metric-sub" id="stat-cache-detail">Hits: 0 | Misses: 0</div>
+      </div>
+    </div>
+
+    <!-- Tab 1: Account Pool -->
+    <section id="tab-accounts" class="tab-pane active">
+      <div class="table-card">
+        <div class="table-card-header">
+          <div>
+            <h3 style="font-size:1.15rem;font-weight:700;">Giám Sát Hồ Sơ Tài Khoản Google</h3>
+            <p style="font-size:0.85rem;color:var(--text-muted);margin-top:0.25rem;">
+              Điều khiển Chrome 1-Click mở profile thực tế trên máy và đồng bộ Cookie CDP trực tiếp vào Vault.
+            </p>
+          </div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Profile & Email</th>
+                <th>Phân Hạng</th>
+                <th>Trạng Thái</th>
+                <th>Proxy Đang Gán</th>
+                <th>Flow Credits</th>
+                <th>Dịch Vụ Khả Dụng</th>
+                <th>Hành Động 1-Click</th>
+              </tr>
+            </thead>
+            <tbody id="accounts-tbody">
+              <tr>
+                <td colspan="7" style="text-align:center;padding:2rem;color:var(--text-dim);">
+                  Đang tải dữ liệu hồ sơ tài khoản...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 2: Metrics & Cache Performance -->
+    <section id="tab-metrics" class="tab-pane">
+      <div class="charts-grid">
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div class="chart-card-title">Biểu đồ Requests Per Minute (60s gần nhất)</div>
+          </div>
+          <div class="canvas-container">
+            <canvas id="rpmChart"></canvas>
+          </div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-card-header">
+            <div class="chart-card-title">Bộ Nhớ Đệm Phản Hồi (In-Memory Cache)</div>
+          </div>
+          <div style="font-size:0.9rem;line-height:1.6;color:var(--text-muted);">
+            <p>⚡ <strong>Thuật toán băm:</strong> SHA-256 từ <code>model + messages + temperature + system_prompt</code>.</p>
+            <p style="margin-top:0.5rem;">🚀 <strong>Tốc độ phản hồi:</strong> &lt; 5ms từ RAM với header <code>X-Cache: HIT</code>.</p>
+            <p style="margin-top:0.5rem;">🛡️ <strong>Chính sách:</strong> LRU Eviction &amp; TTL tự động hết hạn, bảo toàn hạn ngạch tài khoản Google.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 3: Models & GPU Cluster -->
+    <section id="tab-models" class="tab-pane">
+      <div class="table-card">
+        <div class="table-card-header">
+          <h3 style="font-size:1.15rem;font-weight:700;">Danh Mục Mô Hình &amp; Trạng Thái GPU Online</h3>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Model ID</th>
+                <th>Tên Hiển Thị</th>
+                <th>Dịch Vụ Đích</th>
+                <th>Backend Model ID (yBhWQ)</th>
+                <th>Trạng Thái Khả Dụng</th>
+              </tr>
+            </thead>
+            <tbody id="models-tbody">
+              <tr>
+                <td colspan="5" style="text-align:center;padding:2rem;color:var(--text-dim);">
+                  Đang tải ma trận mô hình...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab 4: Drift & Alerts -->
+    <section id="tab-drift" class="tab-pane">
+
+      <div class="table-card">
+        <div class="table-card-header">
+          <h3 style="font-size:1.15rem;font-weight:700;">Đối Soát Hợp Đồng &amp; Cảnh Báo Hệ Thống</h3>
+        </div>
+        <div id="alerts-container">
+          <div style="text-align:center;padding:2rem;color:var(--text-dim);">
+            Đang tải dữ liệu cảnh báo...
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal: Proxy Config -->
+  <div id="proxy-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">Cấu hình Proxy Nhanh</h3>
+        <button class="close-btn close-modal">&times;</button>
+      </div>
+      <form id="proxy-form">
+        <input type="hidden" id="proxy-profile-id">
+        <div class="form-group">
+          <label class="form-label" for="proxy-url">Địa chỉ Proxy (HTTP hoặc SOCKS5):</label>
+          <input type="text" id="proxy-url" class="form-input" placeholder="http://user:pass@1.2.3.4:8080 hoặc socks5://1.2.3.4:1080">
+          <div class="form-hint">Để trống nếu muốn tài khoản này kết nối Direct (không qua proxy). Dữ liệu được mã hóa AES-256-GCM lưu vào Secret Vault.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn close-modal">Hủy</button>
+          <button type="submit" class="btn btn-primary">Lưu Vào Vault</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: Admin Login -->
+  <div id="login-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 class="modal-title">Xác Thực Quản Trị Viên</h3>
+      </div>
+      <form id="login-form">
+        <div class="form-group">
+          <label class="form-label" for="login-token">Admin Session Token (hoặc nhập User/Pass bên dưới):</label>
+          <input type="password" id="login-token" class="form-input" placeholder="Nhập Session Token từ config.yaml">
+        </div>
+        <div style="text-align:center;color:var(--text-dim);font-size:0.8rem;margin:0.75rem 0;">— HOẶC ĐĂNG NHẬP BẰNG TÀI KHOẢN —</div>
+        <div class="form-group">
+          <label class="form-label" for="login-user">Tên Đăng Nhập:</label>
+          <input type="text" id="login-user" class="form-input" placeholder="admin">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="login-pass">Mật Khẩu:</label>
+          <input type="password" id="login-pass" class="form-input" placeholder="••••••••">
+        </div>
+        <div class="modal-footer">
+          <button type="submit" class="btn btn-primary" style="width:100%;">Đăng Nhập Dashboard</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
