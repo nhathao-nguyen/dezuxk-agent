@@ -80,10 +80,10 @@ func GetExecutionContext(cmd *cobra.Command) (*ExecutionContext, error) {
 		}, nil
 	}
 
-	// Auto-detect target server URL if not specified
+	// Auto-detect target server URL and auth token if not specified
+	cfg, cfgErr := config.LoadConfig(configPath)
 	if serverURL == "" {
-		cfg, err := config.LoadConfig(configPath)
-		if err == nil && cfg.Server.Port > 0 {
+		if cfgErr == nil && cfg.Server.Port > 0 {
 			host := cfg.Server.Host
 			if host == "" {
 				host = "127.0.0.1"
@@ -91,6 +91,14 @@ func GetExecutionContext(cmd *cobra.Command) (*ExecutionContext, error) {
 			serverURL = fmt.Sprintf("http://%s:%d", host, cfg.Server.Port)
 		} else {
 			serverURL = "http://127.0.0.1:8080"
+		}
+	}
+
+	if token == "" && cfgErr == nil {
+		if cfg.Admin.GetSessionToken() != "" {
+			token = cfg.Admin.GetSessionToken()
+		} else if cfg.Server.APIKey != "" {
+			token = cfg.Server.APIKey
 		}
 	}
 

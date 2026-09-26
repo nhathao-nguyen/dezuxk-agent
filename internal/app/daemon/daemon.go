@@ -101,7 +101,11 @@ func Run(configPath string, portOverride int) error {
 	} else {
 		keyRepo = session.NewMemoryKeyRepository()
 	}
-	keyService := services.NewKeyService(keyRepo, cfg.Server.APIKey)
+	masterAdminKey := cfg.Server.APIKey
+	if masterAdminKey == "" && cfg.Admin.IsEnabled() {
+		masterAdminKey = cfg.Admin.GetSessionToken()
+	}
+	keyService := services.NewKeyService(keyRepo, masterAdminKey)
 
 	metrics := domain.NewContractMetrics()
 

@@ -43,10 +43,23 @@ func NewStatusCmd() *cobra.Command {
 
 				overview, err := execCtx.Client.GetOverview(ctx)
 				if err != nil {
-					return fmt.Errorf("failed to get status from server: %w", err)
-				}
-
-				if models, ok := overview["models"].([]any); ok {
+					// Fallback to public /health endpoint
+					health, healthErr := execCtx.Client.GetHealth(ctx)
+					if healthErr != nil {
+						return fmt.Errorf("failed to get status from server: %w", err)
+					}
+					status.ServerStatus = "Online"
+					if s, ok := health["status"].(string); ok {
+						status.ServerStatus = fmt.Sprintf("Online (%s)", s)
+					}
+					if am, ok := health["models_active"].(float64); ok {
+						status.ActiveModels = int(am)
+					}
+					if al, ok := health["alerts"].([]any); ok {
+						status.PendingAlerts = len(al)
+					}
+				} else {
+					if models, ok := overview["models"].([]any); ok {
 					status.ActiveModels = len(models)
 				} else if modelsMap, ok := overview["models"].([]map[string]any); ok {
 					status.ActiveModels = len(modelsMap)
@@ -77,7 +90,8 @@ func NewStatusCmd() *cobra.Command {
 				} else if alertsMap, ok := overview["alerts"].([]map[string]any); ok {
 					status.PendingAlerts = len(alertsMap)
 				}
-			} else {
+			}
+		} else {
 				status.ServerStatus = "Offline"
 				status.Address = execCtx.ConfigPath
 

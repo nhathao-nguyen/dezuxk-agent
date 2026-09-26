@@ -77,6 +77,7 @@ func (c *GatewayClient) doJSON(ctx context.Context, method, path string, body an
 	req.Header.Set("Content-Type", "application/json")
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.AddCookie(&http.Cookie{Name: "dezuxk_admin_token", Value: c.Token})
 	}
 
 	client := c.HTTPClient
@@ -120,6 +121,19 @@ func toMapSlice(val any) []map[string]any {
 		return slice
 	}
 	return result
+}
+
+// GetHealth returns public health and metric status from the gateway.
+func (c *GatewayClient) GetHealth(ctx context.Context) (map[string]any, error) {
+	respBytes, err := c.doJSON(ctx, http.MethodGet, "/health", nil)
+	if err != nil {
+		return nil, err
+	}
+	var res map[string]any
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse health response: %w", err)
+	}
+	return res, nil
 }
 
 // GetOverview returns server operational status and statistics.

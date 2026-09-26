@@ -71,7 +71,11 @@ func InitDirectServices(configPath string) (*DirectServices, error) {
 		_ = sqliteRepo.Close()
 		return nil, fmt.Errorf("không thể khởi tạo SqliteKeyRepository: %w", err)
 	}
-	keyService := services.NewKeyService(keyRepo, cfg.Server.APIKey)
+	masterAdminKey := cfg.Server.APIKey
+	if masterAdminKey == "" && cfg.Admin.IsEnabled() {
+		masterAdminKey = cfg.Admin.GetSessionToken()
+	}
+	keyService := services.NewKeyService(keyRepo, masterAdminKey)
 
 	metrics := domain.NewContractMetrics()
 	upstreamTransport := google.NewGoogleTransportAdapter(cfg)
