@@ -31,6 +31,11 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(NewStatusCmd())
 	cmd.AddCommand(NewProfileCmd())
 	cmd.AddCommand(NewKeyCmd())
+	cmd.AddCommand(NewChatCmd())
+	cmd.AddCommand(NewFlowCmd())
+	cmd.AddCommand(NewGeminiCmd())
+	cmd.AddCommand(NewCacheCmd())
+	cmd.AddCommand(NewAlertsCmd())
 
 	return cmd
 }

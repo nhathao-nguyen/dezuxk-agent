@@ -15,13 +15,18 @@ import (
 
 // DirectServices encapsulates direct DB, Vault, and Domain services for offline CLI operations.
 type DirectServices struct {
-	Config         *config.Config
-	SessionRepo    ports.SessionRepository
-	Vault          *session.Vault
-	ProfileManager ports.ProfileUseCase
-	KeyService     ports.KeyUseCase
-	ModelRegistry  *domain.ModelRegistry
-	ResponseCache  *services.ResponseCache
+	Config               *config.Config
+	SessionRepo          ports.SessionRepository
+	Vault                *session.Vault
+	ProfileManager       ports.ProfileUseCase
+	KeyService           ports.KeyUseCase
+	ModelRegistry        *domain.ModelRegistry
+	ResponseCache        *services.ResponseCache
+	ChatService          ports.ChatUseCase
+	FlowService          ports.FlowUseCase
+	FlowCreditService    ports.FlowCreditUseCase
+	GeminiHistoryService ports.GeminiHistoryUseCase
+	GeminiQuotaService   ports.GeminiQuotaUseCase
 
 	sqliteRepo *session.SqliteSessionRepository
 }
@@ -81,15 +86,27 @@ func InitDirectServices(configPath string) (*DirectServices, error) {
 
 	responseCache := services.NewResponseCache(cfg.Cache)
 
+	wire := google.NewWireAdapter(rpcRegistry)
+	chatService := services.NewChatService(modelRegistry, sqliteRepo, upstreamTransport, wire, metrics)
+	flowService := services.NewMediaService(modelRegistry, sqliteRepo, upstreamTransport, wire, flowClient, profileManager, metrics)
+	flowCreditService := services.NewFlowCreditService(sqliteRepo, flowClient, metrics)
+	geminiHistoryService := services.NewGeminiHistoryService(sqliteRepo, upstreamTransport, rpcRegistry, metrics)
+	geminiQuotaService := services.NewGeminiQuotaService(sqliteRepo, upstreamTransport, rpcRegistry)
+
 	return &DirectServices{
-		Config:         cfg,
-		SessionRepo:    sqliteRepo,
-		Vault:          vault,
-		ProfileManager: profileManager,
-		KeyService:     keyService,
-		ModelRegistry:  modelRegistry,
-		ResponseCache:  responseCache,
-		sqliteRepo:     sqliteRepo,
+		Config:               cfg,
+		SessionRepo:          sqliteRepo,
+		Vault:                vault,
+		ProfileManager:       profileManager,
+		KeyService:           keyService,
+		ModelRegistry:        modelRegistry,
+		ResponseCache:        responseCache,
+		ChatService:          chatService,
+		FlowService:          flowService,
+		FlowCreditService:    flowCreditService,
+		GeminiHistoryService: geminiHistoryService,
+		GeminiQuotaService:   geminiQuotaService,
+		sqliteRepo:           sqliteRepo,
 	}, nil
 }
 

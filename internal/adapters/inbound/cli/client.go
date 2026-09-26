@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"dezuxk-gateway/internal/core/domain"
 )
 
 // ProbeDaemon checks if the gateway daemon is alive and ready by calling GET /ready.
@@ -320,3 +323,254 @@ func (c *GatewayClient) ClearAlerts(ctx context.Context, accountID string) error
 	_, err := c.doJSON(ctx, http.MethodPost, path, nil)
 	return err
 }
+
+// StreamChat streams completion tokens in real-time.
+func (c *GatewayClient) StreamChat(ctx context.Context, req domain.OpenAIChatRequest, onDelta func(token string) error) error {
+	req.Stream = true
+	b, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal chat request: %w", err)
+	}
+
+	reqURL := fmt.Sprintf("%s/v1/chat/completions", c.BaseURL)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(b))
+	if err != nil {
+		return fmt.Errorf("failed to create http request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 120 * time.Second}
+	}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("chat request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		dataStr := strings.TrimSpace(line[5:])
+		if dataStr == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(dataStr), &chunk); err == nil {
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+				if err := onDelta(chunk.Choices[0].Delta.Content); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+// SendChat sends a non-streaming chat request and returns the full response.
+func (c *GatewayClient) SendChat(ctx context.Context, req domain.OpenAIChatRequest) (*domain.OpenAIChatResponse, error) {
+	req.Stream = false
+	respBytes, err := c.doJSON(ctx, http.MethodPost, "/v1/chat/completions", req)
+	if err != nil {
+		return nil, err
+	}
+	var res domain.OpenAIChatResponse
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		return nil, fmt.Errorf("failed to parse chat response: %w", err)
+	}
+	return &res, nil
+}
+
+// GetCacheStats retrieves response cache metrics from the gateway overview.
+func (c *GatewayClient) GetCacheStats(ctx context.Context) (map[string]any, error) {
+	overview, err := c.GetOverview(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if cacheMap, ok := overview["cache"].(map[string]any); ok {
+		return cacheMap, nil
+	}
+	return map[string]any{}, nil
+}
+
+// PurgeCache purges the in-memory response cache on the gateway.
+func (c *GatewayClient) PurgeCache(ctx context.Context) error {
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/admin/cache/purge", nil)
+	if err != nil {
+		_, err = c.doJSON(ctx, http.MethodPost, "/v1/cache/purge", nil)
+	}
+	return err
+}
+
+// ListFlowProjects retrieves projects from Flow Studio.
+func (c *GatewayClient) ListFlowProjects(ctx context.Context) ([]map[string]any, error) {
+	respBytes, err := c.doJSON(ctx, http.MethodGet, "/v1/flow/projects", nil)
+	if err != nil {
+		return nil, err
+	}
+	var res map[string]any
+	if err := json.Unmarshal(respBytes, &res); err == nil {
+		if data, ok := res["data"]; ok {
+			return toMapSlice(data), nil
+		}
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(respBytes, &list); err == nil {
+		return list, nil
+	}
+	return nil, nil
+}
+
+// CreateFlowProject creates a new Flow Studio project.
+func (c *GatewayClient) CreateFlowProject(ctx context.Context, title string) (map[string]any, error) {
+	body := map[string]any{"title": title}
+	respBytes, err := c.doJSON(ctx, http.MethodPost, "/v1/flow/projects", body)
+	if err != nil {
+		return nil, err
+	}
+	var res map[string]any
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		return nil, err
+	}
+	if data, ok := res["data"].(map[string]any); ok {
+		return data, nil
+	}
+	return res, nil
+}
+
+// TrashFlowProject moves a project to trash.
+func (c *GatewayClient) TrashFlowProject(ctx context.Context, id string) error {
+	path := fmt.Sprintf("/v1/flow/projects/%s", url.PathEscape(id))
+	_, err := c.doJSON(ctx, http.MethodDelete, path, nil)
+	return err
+}
+
+// RestoreFlowProject restores a project from trash.
+func (c *GatewayClient) RestoreFlowProject(ctx context.Context, id string) error {
+	path := fmt.Sprintf("/v1/flow/trash/%s/restore", url.PathEscape(id))
+	_, err := c.doJSON(ctx, http.MethodPost, path, nil)
+	return err
+}
+
+// DeleteFlowProject permanently deletes a project.
+func (c *GatewayClient) DeleteFlowProject(ctx context.Context, id string) error {
+	path := fmt.Sprintf("/v1/flow/trash/%s", url.PathEscape(id))
+	_, err := c.doJSON(ctx, http.MethodDelete, path, nil)
+	return err
+}
+
+// ListFlowVoices lists voice personas.
+func (c *GatewayClient) ListFlowVoices(ctx context.Context) ([]map[string]any, error) {
+	respBytes, err := c.doJSON(ctx, http.MethodGet, "/v1/flow/voices", nil)
+	if err != nil {
+		return nil, err
+	}
+	var res map[string]any
+	if err := json.Unmarshal(respBytes, &res); err == nil {
+		if data, ok := res["data"]; ok {
+			return toMapSlice(data), nil
+		}
+	}
+	var list []map[string]any
+	if err := json.Unmarshal(respBytes, &list); err == nil {
+		return list, nil
+	}
+	return nil, nil
+}
+
+// GenerateFlowAudio generates audio via MusicFX.
+func (c *GatewayClient) GenerateFlowAudio(ctx context.Context, prompt string, duration int) (map[string]any, error) {
+	body := map[string]any{
+		"prompt":                  prompt,
+		"target_duration_seconds": duration,
+	}
+	respBytes, err := c.doJSON(ctx, http.MethodPost, "/v1/flow/audio/generate", body)
+	if err != nil {
+		return nil, err
+	}
+	var res map[string]any
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		return nil, err
+	}
+	if data, ok := res["data"].(map[string]any); ok {
+		return data, nil
+	}
+	return res, nil
+}
+
+// ListGeminiConversations lists conversations from Gemini history.
+func (c *GatewayClient) ListGeminiConversations(ctx context.Context, limit int) ([]map[string]any, error) {
+	path := "/v1/gemini/conversations"
+	if limit > 0 {
+		path = fmt.Sprintf("%s?limit=%d", path, limit)
+	}
+	respBytes, err := c.doJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var res map[string]any
+	if err := json.Unmarshal(respBytes, &res); err == nil {
+		if data, ok := res["data"].(map[string]any); ok {
+			if convs, ok := data["conversations"]; ok {
+				return toMapSlice(convs), nil
+			}
+		}
+		if convs, ok := res["conversations"]; ok {
+			return toMapSlice(convs), nil
+		}
+	}
+	return nil, nil
+}
+
+// GetGeminiConversation retrieves conversation details.
+func (c *GatewayClient) GetGeminiConversation(ctx context.Context, id string) (map[string]any, error) {
+	path := fmt.Sprintf("/v1/gemini/conversations/%s", url.PathEscape(id))
+	respBytes, err := c.doJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var res map[string]any
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		return nil, err
+	}
+	if data, ok := res["data"].(map[string]any); ok {
+		return data, nil
+	}
+	return res, nil
+}
+
+// RenameGeminiConversation renames a conversation.
+func (c *GatewayClient) RenameGeminiConversation(ctx context.Context, id, title string) error {
+	path := fmt.Sprintf("/v1/gemini/conversations/%s/rename", url.PathEscape(id))
+	body := map[string]any{"title": title}
+	_, err := c.doJSON(ctx, http.MethodPost, path, body)
+	return err
+}
+
+// DeleteGeminiConversation deletes a conversation.
+func (c *GatewayClient) DeleteGeminiConversation(ctx context.Context, id string) error {
+	path := fmt.Sprintf("/v1/gemini/conversations/%s", url.PathEscape(id))
+	_, err := c.doJSON(ctx, http.MethodDelete, path, nil)
+	return err
+}
+
