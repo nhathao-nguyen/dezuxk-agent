@@ -1,18 +1,13 @@
 package main
 
 import (
-	"flag"
-	"log"
+	"os"
 
-	"dezuxk-gateway/internal/app/daemon"
+	"dezuxk-gateway/internal/adapters/inbound/cli"
 )
 
 func main() {
-	configPath := flag.String("config", "configs/config.yaml", "Path to config YAML file")
-	portOverride := flag.Int("port", 0, "Port override (optional)")
-	flag.Parse()
-
-	if err := daemon.Run(*configPath, *portOverride); err != nil {
-		log.Fatalf("[FATAL] Gateway daemon stopped with error: %v", err)
+	if err := cli.Execute(); err != nil {
+		os.Exit(1)
 	}
 }
