@@ -139,3 +139,7 @@ func (j *GeminiChatGoldenJob) emitAlert(report ChatGoldenReport) {
 		j.alertNotify(report)
 	}
 }
+
+func isLabAccount(accountID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(accountID)), "lab")
+}

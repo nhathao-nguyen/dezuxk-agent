@@ -42,10 +42,7 @@ type AccountSummary struct {
 	Tier         string `json:"tier"`
 	IsHealthy    bool   `json:"is_healthy"`
 	Proxy        string `json:"proxy"`
-	FlowStatus   string `json:"flow_status"`
 	GeminiStatus string `json:"gemini_status"`
-	Credits      int    `json:"credits"`
-	HasFlow      bool   `json:"has_flow"`
 	HasGemini    bool   `json:"has_gemini"`
 	LastRefresh  string `json:"last_refresh"`
 }
@@ -67,10 +64,8 @@ func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 			}
 
 			proxyVal := acc.GetProxy()
-			hasFlow := false
 			hasGemini := false
 			if acc.Jar != nil {
-				hasFlow = acc.Jar.HasKey("OSID")
 				hasGemini = acc.Jar.HasKey("__Secure-1PSID")
 			}
 
@@ -80,10 +75,7 @@ func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 				Tier:         tierStr,
 				IsHealthy:    acc.IsHealthy,
 				Proxy:        proxyVal,
-				FlowStatus:   string(acc.ServiceState(domain.ServiceFlow)),
 				GeminiStatus: string(acc.ServiceState(domain.ServiceGemini)),
-				Credits:      acc.CreditsBalance,
-				HasFlow:      hasFlow,
 				HasGemini:    hasGemini,
 				LastRefresh:  acc.LastRefresh.Format(time.RFC3339),
 			})

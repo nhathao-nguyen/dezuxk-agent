@@ -12,6 +12,25 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 )
 
+type mockTransport struct {
+	doRequestFunc func(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind, method string, path string, body io.Reader, contentType string) (*http.Response, error)
+}
+
+func (m *mockTransport) DoRequest(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind, method string, path string, body io.Reader, contentType string) (*http.Response, error) {
+	if m.doRequestFunc != nil {
+		return m.doRequestFunc(ctx, account, service, method, path, body, contentType)
+	}
+	return nil, nil
+}
+
+func (m *mockTransport) BoundShort(ctx context.Context) (context.Context, context.CancelFunc) {
+	return ctx, func() {}
+}
+
+func (m *mockTransport) BoundStream(ctx context.Context) (context.Context, context.CancelFunc) {
+	return ctx, func() {}
+}
+
 func TestGeminiChatGoldenJob_VectorPass(t *testing.T) {
 	mockChunk := `)]}'
 

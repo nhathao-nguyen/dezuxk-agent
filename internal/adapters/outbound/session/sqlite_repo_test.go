@@ -35,15 +35,13 @@ func TestSqliteSessionRepository_CRUD_Persistence(t *testing.T) {
 
 	// 1. Lưu tài khoản
 	acc := &domain.ManagedAccount{
-		ID:             "user-1",
-		Email:          "user1@gmail.com",
-		Jar:            domain.NewCookieJar(map[string]string{"__Secure-1PSID": "cookie1", "OSID": "flowcookie1"}),
-		FlowSNlM0e:     "sn-flow-1",
-		GeminiSNlM0e:   "sn-gemini-1",
-		CreditsBalance: 500,
-		Tier:           2,
-		IsHealthy:      true,
-		LastRefresh:    time.Now(),
+		ID:           "user-1",
+		Email:        "user1@gmail.com",
+		Jar:          domain.NewCookieJar(map[string]string{"__Secure-1PSID": "cookie1"}),
+		GeminiSNlM0e: "sn-gemini-1",
+		Tier:         2,
+		IsHealthy:    true,
+		LastRefresh:  time.Now(),
 	}
 
 	if err := repo.Save(ctx, acc); err != nil {
@@ -55,7 +53,7 @@ func TestSqliteSessionRepository_CRUD_Persistence(t *testing.T) {
 	if err != nil || found == nil {
 		t.Fatalf("FindByID failed: %v", err)
 	}
-	if found.Email != "user1@gmail.com" || found.CreditsBalance != 500 {
+	if found.Email != "user1@gmail.com" {
 		t.Errorf("Unexpected account data: %+v", found)
 	}
 

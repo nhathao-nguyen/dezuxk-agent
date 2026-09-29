@@ -20,7 +20,6 @@ type Config struct {
 	Vision     VisionConfig                 `yaml:"vision"`
 	Tokens     TokensConfig                 `yaml:"tokens"`
 	Failover   FailoverConfig               `yaml:"failover"`
-	Flow       FlowConfig                   `yaml:"flow"`
 	Storage    StorageConfig                `yaml:"storage"`
 	GoldenJob  GoldenJobConfig              `yaml:"golden_job"`
 	KeepAlive  KeepAliveConfig              `yaml:"keep_alive"`
@@ -31,33 +30,18 @@ type Config struct {
 	Rpcs       map[string]RpcOverrideConfig `yaml:"rpcs"`
 }
 
-
 // Operations là công tắc từng operation nội bộ. Khóa thiếu nghĩa là bật.
 type Operations struct {
-	FlowGetCredits    *bool `yaml:"flow_get_credits"`
-	ChatCompletions   *bool `yaml:"chat_completions"`
-	ImagesGenerations *bool `yaml:"images_generations"`
-	VideosGenerations *bool `yaml:"videos_generations"`
+	ChatCompletions *bool `yaml:"chat_completions"`
 }
 
 func (o Operations) Enabled(operation string) bool {
-	var flag *bool
-	switch operation {
-	case "flow.get_credits":
-		flag = o.FlowGetCredits
-	case "chat.completions":
-		flag = o.ChatCompletions
-	case "images.generations":
-		flag = o.ImagesGenerations
-	case "videos.generations":
-		flag = o.VideosGenerations
-	default:
-		return true
+	if operation == "chat.completions" {
+		if o.ChatCompletions != nil {
+			return *o.ChatCompletions
+		}
 	}
-	if flag == nil {
-		return true
-	}
-	return *flag
+	return true
 }
 
 type ServerConfig struct {
@@ -216,11 +200,6 @@ func (f FailoverConfig) GetCoolingDuration() time.Duration {
 		return f.CoolingDuration
 	}
 	return 60 * time.Second
-}
-
-type FlowConfig struct {
-	ProjectTitlePrefix string         `yaml:"project_title_prefix"`
-	CreditCosts        map[string]int `yaml:"credit_costs"`
 }
 
 type StorageConfig struct {
@@ -388,8 +367,6 @@ type RpcOverrideConfig struct {
 	RequiresAt  *bool  `yaml:"requires_at"`
 	Description string `yaml:"description"`
 }
-
-
 
 // LoadConfig đọc file cấu hình hạ tầng thuần túy. Nếu lỗi là dừng ngay, không fallback.
 func LoadConfig(path string) (*Config, error) {

@@ -141,5 +141,3 @@ func TestParseEnvelopeChunk_GeneratedImages(t *testing.T) {
 		t.Errorf("expected markdown image in Text, got %q", meta.Text)
 	}
 }
-
-

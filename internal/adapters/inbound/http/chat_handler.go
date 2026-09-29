@@ -33,7 +33,6 @@ func (h *ChatHandler) SetCache(c *services.ResponseCache) {
 	h.cache = c
 }
 
-
 func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.modelRegistry.Count() == 0 {
 		writeChatError(w, r, h.metrics, domain.Unauthenticated(domain.OpChatCompletions, "", domain.ServiceGemini, "chưa có phiên Gemini sẵn sàng").WithPublicStatus(http.StatusServiceUnavailable), false)
@@ -124,4 +123,3 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(payload)
 }
-

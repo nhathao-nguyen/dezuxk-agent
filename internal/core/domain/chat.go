@@ -256,18 +256,44 @@ func FlattenMessages(messages []OpenAIMessage) (system string, prompt string) {
 	var systemParts []string
 	var dialogParts []string
 
+	lastUserIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			lastUserIdx = i
+			break
+		}
+	}
+
 	for i, m := range messages {
 		switch m.Role {
 		case "system":
-			systemParts = append(systemParts, m.Content)
+			if strings.TrimSpace(m.Content) != "" {
+				systemParts = append(systemParts, m.Content)
+			}
 		case "user":
-			if i == len(messages)-1 {
+			if i == lastUserIdx {
 				prompt = m.Content
-			} else {
+			} else if strings.TrimSpace(m.Content) != "" {
 				dialogParts = append(dialogParts, "User: "+m.Content)
 			}
 		case "assistant":
-			dialogParts = append(dialogParts, "Assistant: "+m.Content)
+			if strings.TrimSpace(m.Content) != "" {
+				dialogParts = append(dialogParts, "Assistant: "+m.Content)
+			}
+		default:
+			if strings.TrimSpace(m.Content) != "" {
+				dialogParts = append(dialogParts, m.Role+": "+m.Content)
+			}
+		}
+	}
+
+	// Fallback nếu không có message nào role user
+	if prompt == "" && len(messages) > 0 {
+		for i := len(messages) - 1; i >= 0; i-- {
+			if messages[i].Role != "system" && strings.TrimSpace(messages[i].Content) != "" {
+				prompt = messages[i].Content
+				break
+			}
 		}
 	}
 

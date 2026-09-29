@@ -29,11 +29,10 @@ func TestAdminOverview_Success(t *testing.T) {
 			IsActive:      true,
 		},
 		{
-			ID:                "veo-2.0",
-			DisplayName:       "Veo 2.0 Video",
-			TargetService:     domain.ServiceFlow,
-			InternalBackendID: "veo-2.0-backend",
-			IsActive:          true,
+			ID:            "gemini-3.1-pro",
+			DisplayName:   "Gemini 3.1 Pro",
+			TargetService: domain.ServiceGemini,
+			IsActive:      true,
 		},
 	})
 
@@ -49,18 +48,15 @@ func TestAdminOverview_Success(t *testing.T) {
 
 	sessionRepo := session.NewMemorySessionRepository(nil)
 	acc := &domain.ManagedAccount{
-		ID:             "profile_test_1",
-		Email:          "test@example.com",
-		ProxyURL:       "http://127.0.0.1:8888",
-		CreditsBalance: 1200,
-		IsHealthy:      true,
-		Tier:           3,
-		LastRefresh:    time.Now(),
+		ID:          "profile_test_1",
+		Email:       "test@example.com",
+		ProxyURL:    "http://127.0.0.1:8888",
+		IsHealthy:   true,
+		Tier:        3,
+		LastRefresh: time.Now(),
 	}
-	acc.CommitServiceState(domain.ServiceFlow, domain.StateReady)
 	acc.CommitServiceState(domain.ServiceGemini, domain.StateReady)
 	_ = sessionRepo.Save(context.Background(), acc)
-
 
 	adminHandler := NewAdminHandler(sessionRepo, mr, metrics, respCache, nil)
 
@@ -88,9 +84,6 @@ func TestAdminOverview_Success(t *testing.T) {
 	}
 	if accMap["tier"] != "Ultra" {
 		t.Errorf("expected tier Ultra, got %v", accMap["tier"])
-	}
-	if accMap["credits"] != float64(1200) {
-		t.Errorf("expected credits 1200, got %v", accMap["credits"])
 	}
 
 	// Kiểm tra metrics

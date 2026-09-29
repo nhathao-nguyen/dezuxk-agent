@@ -74,8 +74,12 @@ func (m *multiAccountSessionRepo) ReleaseWriteLease(account *domain.ManagedAccou
 	account.ReleaseWriteLease(service)
 }
 
-func (m *multiAccountSessionRepo) ListAll(ctx context.Context) []*domain.ManagedAccount           { return m.accounts }
-func (m *multiAccountSessionRepo) Save(ctx context.Context, account *domain.ManagedAccount) error { return nil }
+func (m *multiAccountSessionRepo) ListAll(ctx context.Context) []*domain.ManagedAccount {
+	return m.accounts
+}
+func (m *multiAccountSessionRepo) Save(ctx context.Context, account *domain.ManagedAccount) error {
+	return nil
+}
 func (m *multiAccountSessionRepo) FindByID(ctx context.Context, id string) (*domain.ManagedAccount, error) {
 	for _, acc := range m.accounts {
 		if acc.ID == id {
@@ -90,9 +94,9 @@ func (m *multiAccountSessionRepo) RefreshDerived(ctx context.Context, account *d
 func (m *multiAccountSessionRepo) Invalidate(account *domain.ManagedAccount, service domain.ServiceKind) {
 	_ = account.MoveService(service, domain.StateInvalid)
 }
-func (m *multiAccountSessionRepo) GetAlerts() []domain.SessionAlert  { return nil }
+func (m *multiAccountSessionRepo) GetAlerts() []domain.SessionAlert   { return nil }
 func (m *multiAccountSessionRepo) AddAlert(alert domain.SessionAlert) {}
-func (m *multiAccountSessionRepo) ClearAlerts(accountID string)      {}
+func (m *multiAccountSessionRepo) ClearAlerts(accountID string)       {}
 
 type dynamicTransport struct {
 	mu      sync.Mutex
@@ -120,10 +124,10 @@ func (d *dynamicTransport) DoRequest(ctx context.Context, account *domain.Manage
 }
 
 type recordingCodec struct {
-	mu          sync.Mutex
-	lastBuilder domain.GeminiPayloadBuilder
+	mu           sync.Mutex
+	lastBuilder  domain.GeminiPayloadBuilder
 	streamDeltas []string
-	replyText   string
+	replyText    string
 }
 
 func (r *recordingCodec) MaterializeChat(account *domain.ManagedAccount, payload domain.GeminiPayloadBuilder) (domain.OutboundAttempt, error) {
@@ -160,13 +164,6 @@ func (r *recordingCodec) DematerializeChat(ctx context.Context, resp *http.Respo
 		ResponseID:     "r_test_123",
 		ChoiceID:       "rc_test_123",
 	}, nil
-}
-
-func (r *recordingCodec) MaterializeFlowMedia(account *domain.ManagedAccount, input domain.FlowMediaInput) (domain.OutboundAttempt, error) {
-	return domain.OutboundAttempt{}, nil
-}
-func (r *recordingCodec) DematerializeFlowMedia(resp *http.Response, metrics *domain.ContractMetrics) (domain.MediaExtract, error) {
-	return domain.MediaExtract{}, nil
 }
 
 // 1. Kiểm thử Multimodal Vision (Base64 Inline & SCOTTY)
@@ -583,13 +580,6 @@ func (f *failingStreamCodec) DematerializeChat(ctx context.Context, resp *http.R
 	}
 	// Đứt kết nối giữa chừng sau khi client đã nhận 1 chunk
 	return domain.GeminiReply{}, domain.CodecTransport(domain.OriginStreamGenerate, domain.ServiceGemini, fmt.Errorf("connection reset by peer mid-stream"))
-}
-
-func (f *failingStreamCodec) MaterializeFlowMedia(account *domain.ManagedAccount, input domain.FlowMediaInput) (domain.OutboundAttempt, error) {
-	return domain.OutboundAttempt{}, nil
-}
-func (f *failingStreamCodec) DematerializeFlowMedia(resp *http.Response, metrics *domain.ContractMetrics) (domain.MediaExtract, error) {
-	return domain.MediaExtract{}, nil
 }
 
 func TestChatService_NextAccountFailover_StreamAfterFlush_NoReplay(t *testing.T) {

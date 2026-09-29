@@ -14,17 +14,8 @@ func TestLoadConfig_YamlWithOperations(t *testing.T) {
 		t.Fatalf("failed to load configs/config.yaml: %v", err)
 	}
 
-	if !cfg.Operations.Enabled("flow.get_credits") {
-		t.Error("expected flow.get_credits to be enabled")
-	}
 	if !cfg.Operations.Enabled("chat.completions") {
 		t.Error("expected chat.completions to be enabled")
-	}
-	if cfg.Operations.Enabled("images.generations") {
-		t.Error("expected images.generations to be disabled")
-	}
-	if cfg.Operations.Enabled("videos.generations") {
-		t.Error("expected videos.generations to be disabled")
 	}
 
 	// Test Vision config
@@ -73,9 +64,6 @@ func TestLoadConfig_YamlWithOperations(t *testing.T) {
 	if !cfg.Cache.SupportsMethod("chat") {
 		t.Error("expected cache to support method 'chat'")
 	}
-	if !cfg.Cache.SupportsMethod("credits") {
-		t.Error("expected cache to support method 'credits'")
-	}
 	if cfg.Cache.SupportsMethod("unsupported_method") {
 		t.Error("expected cache not to support 'unsupported_method'")
 	}
@@ -94,4 +82,3 @@ func TestLoadConfig_YamlWithOperations(t *testing.T) {
 		t.Error("expected admin session_token to be non-empty")
 	}
 }
-

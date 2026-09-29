@@ -49,34 +49,6 @@ func writeOperationError(w http.ResponseWriter, r *http.Request, metrics *domain
 	})
 }
 
-func writeFlowError(w http.ResponseWriter, r *http.Request, metrics *domain.ContractMetrics, err error) {
-	writeOperationError(w, r, metrics, err, domain.OpFlowGetCredits, domain.ServiceFlow)
-}
-
-func writeFlowCredits(w http.ResponseWriter, r *http.Request, accountID string, balance domain.FlowCreditBalance) {
-	meta := map[string]any{
-		"operation":       domain.OpFlowGetCredits,
-		"retryable":       false,
-		"unmapped_fields": balance.UnmappedFields,
-		"spec_version":    balance.SpecVersion,
-		"debug": map[string]any{
-			"origin_operation": domain.OriginNzlxg,
-		},
-	}
-	if id := middleware.GetReqID(r.Context()); id != "" {
-		meta["correlation_id"] = id
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"data": map[string]any{
-			"account_id":    accountID,
-			"total_credits": balance.Amount,
-		},
-		"error": nil,
-		"meta":  meta,
-	})
-}
-
 func errorMeta(r *http.Request, ge *domain.GatewayError) map[string]any {
 	meta := map[string]any{
 		"operation": ge.Operation,

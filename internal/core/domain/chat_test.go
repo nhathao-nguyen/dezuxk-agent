@@ -82,16 +82,21 @@ func TestDefaultRpcRegistry(t *testing.T) {
 
 	expectedRPCs := []string{
 		"StreamGenerate",
-		"nzlxg",
-		"cPZSdc",
-		"HTrJv",
-		"yBhWQ",
-		"csbIsb",
-		"jHPbke",
-		"ngNC2",
-		"Zzl0ze",
-		"uW3g7e",
-		"StreamChat",
+		"batchexecute_gemini",
+		"usage",
+		"I4z33b",
+		"MaZiqc",
+		"cZOhpc",
+		"PCck7e",
+		"VxUbXb",
+		"uP80Sb",
+		"wEb32b",
+		"tVk3Sc",
+		"sA4a8",
+		"H8s0fe",
+		"whPPme",
+		"GPRiHf",
+		"upload_handshake",
 	}
 
 	for _, rpcID := range expectedRPCs {
@@ -205,3 +210,33 @@ func TestGeminiPayloadBuilder_Attachments(t *testing.T) {
 	}
 }
 
+func TestFlattenMessages(t *testing.T) {
+	// Trường hợp 1: Chuẩn OpenAI user -> assistant -> user
+	messages1 := []domain.OpenAIMessage{
+		{Role: "system", Content: "You are an AI assistant"},
+		{Role: "user", Content: "Hello"},
+		{Role: "assistant", Content: "Hi, how can I help you?"},
+		{Role: "user", Content: "What is 1+1?"},
+	}
+	sys, prompt := domain.FlattenMessages(messages1)
+	if sys != "You are an AI assistant" {
+		t.Errorf("expected system message to match, got %q", sys)
+	}
+	if !strings.Contains(prompt, "What is 1+1?") {
+		t.Errorf("expected prompt to contain last user message, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Hello") || !strings.Contains(prompt, "Hi, how can I help you?") {
+		t.Errorf("expected history context in prompt, got %q", prompt)
+	}
+
+	// Trường hợp 2: Tin nhắn cuối không phải user (assistant prefill)
+	messages2 := []domain.OpenAIMessage{
+		{Role: "system", Content: "Be concise"},
+		{Role: "user", Content: "Translate to Vietnamese: Apple"},
+		{Role: "assistant", Content: "Quả"},
+	}
+	_, prompt2 := domain.FlattenMessages(messages2)
+	if !strings.Contains(prompt2, "Translate to Vietnamese: Apple") {
+		t.Errorf("expected prompt2 to fallback to previous user message, got %q", prompt2)
+	}
+}

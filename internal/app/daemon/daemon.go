@@ -111,10 +111,9 @@ func Run(configPath string, portOverride int) error {
 
 	// 4. Khởi tạo Outbound Adapters
 	upstreamTransport := google.NewGoogleTransportAdapter(cfg)
-	flowClient := google.NewFlowClientAdapter(upstreamTransport, rpcRegistry, metrics)
 
 	// 5. Khởi tạo Profile Manager (Mỗi tài khoản Google 1 folder riêng, lưu cookies & cấu hình)
-	profileManager, err := session.NewProfileManager(cfg, sessionRepo, modelRegistry, tokenExtractor, flowClient, vault)
+	profileManager, err := session.NewProfileManager(cfg, sessionRepo, modelRegistry, tokenExtractor, vault)
 	if err != nil {
 		return fmt.Errorf("lỗi khởi tạo Profile Manager: %w", err)
 	}
@@ -172,17 +171,6 @@ func Run(configPath string, portOverride int) error {
 	log.Printf("[Failover] Kích hoạt Next-Account Failover (Max Attempts: %d, Cooldown: %v)",
 		cfg.Failover.GetMaxAttempts(), cfg.Failover.GetCoolingDuration())
 
-	mediaService := services.NewMediaService(modelRegistry, sessionRepo, upstreamTransport, wire, flowClient, profileManager, metrics)
-	if mediaStorage != nil {
-		mediaService.SetStorage(mediaStorage)
-	}
-	mediaService.SetCreditCosts(domain.NewFlowCreditCostRegistry(cfg.Flow.CreditCosts))
-	if cfg.Flow.ProjectTitlePrefix != "" {
-		mediaService.SetProjectTitlePrefix(cfg.Flow.ProjectTitlePrefix)
-	}
-
-	flowCreditService := services.NewFlowCreditService(sessionRepo, flowClient, metrics)
-
 	// Khởi tạo In-Memory Response Caching (Giai đoạn 3: Phản hồi < 5ms)
 	responseCache := services.NewResponseCache(cfg.Cache)
 	if cfg.Cache.IsEnabled() {
@@ -203,33 +191,29 @@ func Run(configPath string, portOverride int) error {
 	rateLimiter := adaptersHTTP.NewIPRateLimiter(maxReqs, time.Duration(windowSecs)*time.Second, cfg.Server.TrustedProxies)
 
 	httpRouter := adaptersHTTP.BuildRouter(adaptersHTTP.RouterDependencies{
-		Config:                 cfg,
-		ModelRegistry:          modelRegistry,
-		ChatUseCase:            chatService,
-		ProfileUseCase:         profileManager,
-		FlowCreditUseCase:      flowCreditService,
-		MediaUseCase:           mediaService,
-		FlowUseCase:            mediaService,
-		MediaStorage:           mediaStorage,
-		Metrics:                metrics,
-		SessionRepo:            sessionRepo,
-		RateLimiter:            rateLimiter,
-		GeminiHistoryUseCase:   geminiHistoryService,
-		GeminiQuotaUseCase:     geminiQuotaService,
-		GeminiCanvasUseCase:    geminiCanvasService,
-		GeminiUploadUseCase:    geminiUploadService,
-		GeminiFeedbackUseCase:  geminiFeedbackService,
-		KeyUseCase:             keyService,
-		AlertDispatcher:        alertDispatcher,
-		ResponseCache:          responseCache,
+		Config:                cfg,
+		ModelRegistry:         modelRegistry,
+		ChatUseCase:           chatService,
+		ProfileUseCase:        profileManager,
+		MediaStorage:          mediaStorage,
+		Metrics:               metrics,
+		SessionRepo:           sessionRepo,
+		RateLimiter:           rateLimiter,
+		GeminiHistoryUseCase:  geminiHistoryService,
+		GeminiQuotaUseCase:    geminiQuotaService,
+		GeminiCanvasUseCase:   geminiCanvasService,
+		GeminiUploadUseCase:   geminiUploadService,
+		GeminiFeedbackUseCase: geminiFeedbackService,
+		KeyUseCase:            keyService,
+		AlertDispatcher:       alertDispatcher,
+		ResponseCache:         responseCache,
 	})
 
-	// 8. Khởi động NzlxgGoldenJob, Proactive Session Keep-Alive Worker và đồng bộ động ma trận mô hình
+	// 8. Khởi động GeminiChatGoldenJob và Proactive Session Keep-Alive Worker
 	goldenCtx, goldenCancel := context.WithCancel(context.Background())
 	defer goldenCancel()
-	startNzlxgGoldenRunner(goldenCtx, flowClient, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
-	startProactiveKeepAliveRunner(goldenCtx, sessionRepo, flowClient, geminiQuotaService, cfg.KeepAlive)
-	startFlowModelMatrixSyncRunner(goldenCtx, flowClient, sessionRepo, modelRegistry)
+	startGeminiChatGoldenRunner(goldenCtx, wire, upstreamTransport, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
+	startProactiveKeepAliveRunner(goldenCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpServer := &http.Server{
@@ -243,7 +227,7 @@ func Run(configPath string, portOverride int) error {
 	// 9. Chạy Server trong Goroutine
 	go func() {
 		log.Printf("[Server] Dezuxk Gateway đang lắng nghe tại: http://%s", serverAddr)
-		log.Printf("[Server] Admin Dashboard UI: http://%s/admin", serverAddr)
+		log.Printf("[Server] Admin Overview API: http://%s/v1/admin/overview", serverAddr)
 		log.Printf("[Server] OpenAI API Base: http://%s/v1", serverAddr)
 		log.Printf("[Server] Profiles API:   http://%s/v1/profiles", serverAddr)
 
@@ -270,10 +254,11 @@ func Run(configPath string, portOverride int) error {
 	return nil
 }
 
-// startNzlxgGoldenRunner vận hành chu kỳ đối soát hợp đồng nzlxg định kỳ trên tài khoản lab
-func startNzlxgGoldenRunner(
+// startGeminiChatGoldenRunner vận hành chu kỳ đối soát hợp đồng StreamGenerate định kỳ trên tài khoản lab
+func startGeminiChatGoldenRunner(
 	ctx context.Context,
-	client ports.FlowClient,
+	wire ports.WireCodec,
+	transport ports.UpstreamGoogleTransport,
 	repo ports.SessionRepository,
 	metrics *domain.ContractMetrics,
 	cfg config.GoldenJobConfig,
@@ -294,26 +279,26 @@ func startNzlxgGoldenRunner(
 		labPrefix = "lab"
 	}
 
-	job := google.NewNzlxgGoldenJob(client, metrics, func(report google.GoldenReport) {
+	job := google.NewGeminiChatGoldenJob(wire, transport, metrics, func(report google.ChatGoldenReport) {
 		if report.DriftDetected {
-			log.Printf("[Golden Job Alert] SCHEMA DRIFT nzlxg: %s (unmapped=%d)", report.AlertMessage, report.UnmappedFields)
+			log.Printf("[Golden Job Alert] SCHEMA DRIFT StreamGenerate: %s", report.AlertMessage)
 			if alertDispatcher != nil {
 				alertDispatcher.Dispatch(domain.AlertPayload{
 					AccountID:      report.AccountID,
-					ErrorType:      "Schema Drift Detected (nzlxg)",
-					Service:        domain.ServiceFlow,
-					Reason:         fmt.Sprintf("Hợp đồng nzlxg phát hiện Schema Drift (unmapped_fields = %d): %s", report.UnmappedFields, report.AlertMessage),
+					ErrorType:      "Schema Drift Detected (StreamGenerate)",
+					Service:        domain.ServiceGemini,
+					Reason:         fmt.Sprintf("Hợp đồng StreamGenerate phát hiện Schema Drift: %s", report.AlertMessage),
 					ActionRequired: "Vui lòng mở Google Chrome đối soát lại CDP qua /v1/profiles/" + report.AccountID + "/sync và cập nhật baseline spec",
 					Timestamp:      time.Now(),
 				})
 			}
 		} else if !report.Passed {
-			log.Printf("[Golden Job Alert] CONTRACT FAIL nzlxg: %s", report.AlertMessage)
+			log.Printf("[Golden Job Alert] CONTRACT FAIL StreamGenerate: %s", report.AlertMessage)
 			if alertDispatcher != nil {
 				alertDispatcher.Dispatch(domain.AlertPayload{
 					AccountID:      report.AccountID,
-					ErrorType:      "Contract Failure (nzlxg)",
-					Service:        domain.ServiceFlow,
+					ErrorType:      "Contract Failure (StreamGenerate)",
+					Service:        domain.ServiceGemini,
 					Reason:         report.AlertMessage,
 					ActionRequired: "Vui lòng mở Google Chrome kiểm tra lại trạng thái session qua /v1/profiles/" + report.AccountID + "/launch",
 					Timestamp:      time.Now(),
@@ -340,28 +325,27 @@ func startNzlxgGoldenRunner(
 					}
 				}
 				if labAccount == nil {
-					log.Printf("[Golden Job Standby] Chưa có tài khoản lab (ID chứa '%s'). Bỏ qua đối soát nzlxg để đảm bảo an toàn tài khoản người dùng.", labPrefix)
+					log.Printf("[Golden Job Standby] Chưa có tài khoản lab (ID chứa '%s'). Bỏ qua đối soát StreamGenerate để đảm bảo an toàn tài khoản người dùng.", labPrefix)
 					continue
 				}
-				log.Printf("[Golden Job] Bắt đầu đối soát hợp đồng nzlxg trên tài khoản lab: %s", labAccount.ID)
-				report, err := job.Run(ctx, labAccount)
+				log.Printf("[Golden Job] Bắt đầu đối soát hợp đồng StreamGenerate trên tài khoản lab: %s", labAccount.ID)
+				report, err := job.Run(ctx, labAccount, "ping")
 				if err != nil {
 					log.Printf("[Golden Job Error] Thất bại trên tài khoản lab %s: %v", labAccount.ID, err)
 				} else if report.DriftDetected {
-					log.Printf("[Golden Job Warning] Drift detected trên %s: unmapped=%d", labAccount.ID, report.UnmappedFields)
+					log.Printf("[Golden Job Warning] Drift detected trên %s: %s", labAccount.ID, report.AlertMessage)
 				} else {
-					log.Printf("[Golden Job Success] Đối soát nzlxg thành công trên %s: balance=%d unmapped=%d", labAccount.ID, report.Amount, report.UnmappedFields)
+					log.Printf("[Golden Job Success] Đối soát StreamGenerate thành công trên %s (passed=%v)", labAccount.ID, report.Passed)
 				}
 			}
 		}
 	}()
 }
 
-// startProactiveKeepAliveRunner chạy worker ngầm định kỳ gửi request đọc nhẹ (/usage, nzlxg) để duy trì tính tươi mới của __Secure-1PSIDTS
+// startProactiveKeepAliveRunner chạy worker ngầm định kỳ gửi request đọc nhẹ (/usage) để duy trì tính tươi mới của __Secure-1PSIDTS
 func startProactiveKeepAliveRunner(
 	ctx context.Context,
 	repo ports.SessionRepository,
-	flowClient ports.FlowClient,
 	geminiQuota ports.GeminiQuotaUseCase,
 	cfg config.KeepAliveConfig,
 ) {
@@ -388,7 +372,7 @@ func startProactiveKeepAliveRunner(
 				continue
 			}
 
-			// 1. Duy trì Gemini session (__Secure-1PSIDTS) qua endpoint /usage
+			// Duy trì Gemini session (__Secure-1PSIDTS) qua endpoint /usage
 			if acc.ServiceReady(domain.ServiceGemini) && geminiQuota != nil {
 				quotaCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 				_, err := geminiQuota.GetQuotaForAccount(quotaCtx, acc)
@@ -397,20 +381,6 @@ func startProactiveKeepAliveRunner(
 					log.Printf("[Session Keep-Alive Warning] Gemini /usage keep-alive thất bại trên %s: %v", acc.ID, err)
 				} else {
 					log.Printf("[Session Keep-Alive] Gemini /usage keep-alive thành công trên %s. __Secure-1PSIDTS đã được làm tươi.", acc.ID)
-					_ = repo.Save(ctx, acc)
-				}
-			}
-
-			// 2. Duy trì Flow session qua nzlxg
-			if acc.ServiceReady(domain.ServiceFlow) && flowClient != nil {
-				flowCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-				balance, err := flowClient.GetCreditsBalance(flowCtx, acc)
-				cancel()
-				if err != nil {
-					log.Printf("[Session Keep-Alive Warning] Flow nzlxg keep-alive thất bại trên %s: %v", acc.ID, err)
-				} else {
-					acc.CreditsBalance = balance.Amount
-					log.Printf("[Session Keep-Alive] Flow nzlxg keep-alive thành công trên %s (balance=%d). Cookies đã được cập nhật.", acc.ID, balance.Amount)
 					_ = repo.Save(ctx, acc)
 				}
 			}
@@ -426,47 +396,6 @@ func startProactiveKeepAliveRunner(
 				return
 			case <-ticker.C:
 				runKeepAlive()
-			}
-		}
-	}()
-}
-
-// startFlowModelMatrixSyncRunner định kỳ gọi HTrJv và yBhWQ cập nhật trạng thái online/offline của cụm GPU mô hình Flow vào ModelRegistry
-func startFlowModelMatrixSyncRunner(ctx context.Context, client ports.FlowClient, repo ports.SessionRepository, registry *domain.ModelRegistry) {
-	syncModels := func() {
-		accounts := repo.ListAll(ctx)
-		var flowAcc *domain.ManagedAccount
-		for _, acc := range accounts {
-			if acc.IsHealthy && acc.ServiceReady(domain.ServiceFlow) {
-				flowAcc = acc
-				break
-			}
-		}
-		if flowAcc == nil {
-			return
-		}
-		activeMap, err := client.GetActiveModels(ctx, flowAcc)
-		if err != nil {
-			log.Printf("[Model Registry Sync Warning] Lỗi đồng bộ ma trận mô hình Flow (HTrJv/yBhWQ): %v", err)
-			return
-		}
-		if len(activeMap) > 0 {
-			registry.UpdateBackendStatus(domain.ServiceFlow, activeMap)
-			log.Printf("[Model Registry Sync] Đã cập nhật ma trận mô hình Flow qua HTrJv/yBhWQ: %d mô hình online", len(activeMap))
-		}
-	}
-
-	go syncModels()
-
-	ticker := time.NewTicker(3 * time.Minute)
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				syncModels()
 			}
 		}
 	}()

@@ -18,17 +18,14 @@ import (
 )
 
 type RouterDependencies struct {
-	Config            *config.Config
-	ModelRegistry     *domain.ModelRegistry
-	ChatUseCase       ports.ChatUseCase
-	ProfileUseCase    ports.ProfileUseCase
-	FlowCreditUseCase ports.FlowCreditUseCase
-	MediaUseCase      ports.MediaUseCase
-	FlowUseCase       ports.FlowUseCase
-	MediaStorage      ports.MediaRepository
-	Metrics           *domain.ContractMetrics
-	SessionRepo       ports.SessionRepository
-	RateLimiter       *IPRateLimiter
+	Config                *config.Config
+	ModelRegistry         *domain.ModelRegistry
+	ChatUseCase           ports.ChatUseCase
+	ProfileUseCase        ports.ProfileUseCase
+	MediaStorage          ports.MediaRepository
+	Metrics               *domain.ContractMetrics
+	SessionRepo           ports.SessionRepository
+	RateLimiter           *IPRateLimiter
 	GeminiHistoryUseCase  ports.GeminiHistoryUseCase
 	GeminiUploadUseCase   ports.GeminiUploadUseCase
 	GeminiCanvasUseCase   ports.GeminiCanvasUseCase
@@ -39,7 +36,6 @@ type RouterDependencies struct {
 	AlertDispatcher ports.AlertDispatcher
 	ResponseCache   *services.ResponseCache
 }
-
 
 func BuildRouter(deps RouterDependencies) http.Handler {
 	r := chi.NewRouter()
@@ -152,13 +148,6 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 	if deps.ProfileUseCase != nil {
 		profileHandler = NewProfileHandler(deps.ProfileUseCase)
 	}
-	var flowHandler *FlowHandler
-	if deps.FlowCreditUseCase != nil {
-		flowHandler = NewFlowHandler(deps.FlowCreditUseCase, deps.Metrics)
-		if deps.ResponseCache != nil {
-			flowHandler.SetCache(deps.ResponseCache)
-		}
-	}
 
 	var adminCfg *config.AdminConfig
 	if deps.Config != nil {
@@ -214,18 +203,6 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			v1.Post("/chat/completions", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleChatCompletions))
 		}
 
-		// Flow Credits (đọc số dư Flow với envelope data/error/meta)
-		if flowHandler != nil {
-			v1.Get("/flow/credits", gateOperation(deps, domain.OpFlowGetCredits, domain.ServiceFlow, false, flowHandler.HandleGetCredits))
-		}
-
-		// Media Generations (gated qua config flag)
-		if deps.MediaUseCase != nil {
-			mediaHandler := NewMediaHandler(deps.MediaUseCase, deps.Metrics)
-			v1.Post("/images/generations", gateOperation(deps, domain.OpImages, domain.ServiceFlow, false, mediaHandler.HandleImage))
-			v1.Post("/videos/generations", gateOperation(deps, domain.OpVideos, domain.ServiceFlow, false, mediaHandler.HandleVideo))
-		}
-
 		// Profile Management (Quản lý Profile cục bộ)
 		if profileHandler != nil {
 			v1.Get("/profiles", profileHandler.HandleListProfiles)
@@ -268,28 +245,6 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				v1.Post("/gemini/canvas/{id}/delta", geminiHandler.HandleUpdateCanvasDelta)
 				v1.Post("/gemini/canvas/{id}/publish", geminiHandler.HandlePublishCanvas)
 			}
-		}
-
-		// Flow Studio Endpoints (Quản lý dự án UpteDb, tB6q8, dK3x9, rS4y1, mrlkwd, Nối dài video, Audio, Voices, Gallery)
-		var flowUC ports.FlowUseCase
-		if deps.FlowUseCase != nil {
-			flowUC = deps.FlowUseCase
-		} else if f, ok := deps.MediaUseCase.(ports.FlowUseCase); ok {
-			flowUC = f
-		}
-		if flowUC != nil {
-			studioHandler := NewFlowStudioHandler(flowUC, deps.Metrics)
-			v1.Post("/flow/videos/extend", studioHandler.HandleExtendVideo)
-			v1.Post("/flow/videos/upsample-4k", studioHandler.HandleUpsample4K)
-			v1.Post("/flow/audio/generate", studioHandler.HandleGenerateAudio)
-			v1.Get("/flow/voices", studioHandler.HandleListVoices)
-			v1.Get("/flow/projects", studioHandler.HandleListProjects)
-			v1.Post("/flow/projects", studioHandler.HandleCreateProject)
-			v1.Delete("/flow/projects/{id}", studioHandler.HandleTrashProject)
-			v1.Get("/flow/trash", studioHandler.HandleListTrash)
-			v1.Post("/flow/trash/{id}/restore", studioHandler.HandleRestoreProject)
-			v1.Delete("/flow/trash/{id}", studioHandler.HandleDeleteProject)
-			v1.Get("/flow/gallery", studioHandler.HandleListMediaGallery)
 		}
 
 		// Alerts API

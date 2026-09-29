@@ -36,9 +36,9 @@ func main() {
 	sessionRepo := session.NewMemorySessionRepository(google.NewDerivedSecretRefresher(tokenExtractor))
 	metrics := domain.NewContractMetrics()
 	upstreamTransport := google.NewGoogleTransportAdapter(cfg)
-	flowClient := google.NewFlowClientAdapter(upstreamTransport, rpcRegistry, metrics)
+	vault := session.NewVault(session.ResolveMasterKey(cfg.Security.MasterKey))
 
-	profileManager, err := session.NewProfileManager(cfg, sessionRepo, modelRegistry, tokenExtractor, flowClient)
+	profileManager, err := session.NewProfileManager(cfg, sessionRepo, modelRegistry, tokenExtractor, vault)
 	if err != nil {
 		log.Fatalf("❌ Lỗi khởi tạo ProfileManager: %v", err)
 	}

@@ -60,11 +60,6 @@ type KeyRepository interface {
 	ConsumeDailyQuota(ctx context.Context, id string, date string) (int, error)
 }
 
-// FlowProjectRecorder ghi project id Flow vào session đang lưu. Không ghi log secret.
-type FlowProjectRecorder interface {
-	RememberFlowProject(accountID, projectID string) error
-}
-
 // DerivedSecretRefresher xoay bí mật dẫn xuất (SNlM0e) của một service. Không login lại.
 type DerivedSecretRefresher interface {
 	RefreshDerivedSecret(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind) error
@@ -86,24 +81,8 @@ type TokenExtractor interface {
 	ExtractTokens(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind) (snlm0e string, cfb2h string, err error)
 }
 
-// WireCodec pack và unpack StreamGenerate / StreamChat. Lỗi trả về là codec, chưa mang tên operation nội bộ.
+// WireCodec pack và unpack StreamGenerate. Lỗi trả về là codec, chưa mang tên operation nội bộ.
 type WireCodec interface {
 	MaterializeChat(account *domain.ManagedAccount, payload domain.GeminiPayloadBuilder) (domain.OutboundAttempt, error)
 	DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error)
-	MaterializeFlowMedia(account *domain.ManagedAccount, input domain.FlowMediaInput) (domain.OutboundAttempt, error)
-	DematerializeFlowMedia(resp *http.Response, metrics *domain.ContractMetrics) (domain.MediaExtract, error)
-}
-
-// FlowClient giao diện gọi các RPC của Google Flow
-type FlowClient interface {
-	GetCreditsBalance(ctx context.Context, account *domain.ManagedAccount) (domain.FlowCreditBalance, error)
-	RegisterSessionLock(ctx context.Context, account *domain.ManagedAccount, projectUUID string) error
-	CreateProject(ctx context.Context, account *domain.ManagedAccount, title string) (projectUUID string, err error)
-	ListProjects(ctx context.Context, account *domain.ManagedAccount) ([]domain.FlowProject, error)
-	MoveProjectToTrash(ctx context.Context, account *domain.ManagedAccount, projectUUID string) error
-	ListTrash(ctx context.Context, account *domain.ManagedAccount) ([]domain.FlowTrashProject, error)
-	RestoreProject(ctx context.Context, account *domain.ManagedAccount, projectUUID string) error
-	DeleteProjectPermanently(ctx context.Context, account *domain.ManagedAccount, projectUUID string) error
-	GetActiveModels(ctx context.Context, account *domain.ManagedAccount) (map[string]bool, error)
-	ListVoicePersonas(ctx context.Context, account *domain.ManagedAccount, projectUUID string) ([]domain.VoicePersona, error)
 }

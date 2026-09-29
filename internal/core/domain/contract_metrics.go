@@ -111,8 +111,6 @@ func (m *ContractMetrics) GetRPMHistory() []int {
 	return res
 }
 
-
-
 // Bind trả một cửa sổ đếm gắn tên operation. Parser gọi AddSchema trên cửa sổ này.
 func (m *ContractMetrics) Bind(operation string) *ContractMetrics {
 	if m == nil || m.state == nil || operation == "" {
@@ -234,7 +232,6 @@ func (m *ContractMetrics) Snapshot() ContractSnapshot {
 		Operations:       operations,
 	}
 }
-
 
 func (c *opCounter) snapshot() OperationMetrics {
 	return OperationMetrics{

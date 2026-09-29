@@ -30,7 +30,6 @@ func (c *callCountingChatUseCase) ExecuteChatStream(ctx context.Context, req *do
 	return nil
 }
 
-
 func TestChatHandler_CacheHitAndMiss(t *testing.T) {
 	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
 	metrics := domain.NewContractMetrics()
@@ -135,72 +134,5 @@ func TestChatHandler_CacheHitAndMiss(t *testing.T) {
 	}
 	if mockCU.callCount != 2 {
 		t.Errorf("expected callCount to increment to 2, got %d", mockCU.callCount)
-	}
-}
-
-type mockFlowCreditUseCase struct {
-	callCount int
-	accountID string
-	balance   int
-}
-
-func (m *mockFlowCreditUseCase) GetCredits(ctx context.Context) (string, domain.FlowCreditBalance, error) {
-	m.callCount++
-	return m.accountID, domain.FlowCreditBalance{Amount: m.balance}, nil
-}
-
-
-func TestFlowHandler_CacheHitAndMiss(t *testing.T) {
-	mockCredit := &mockFlowCreditUseCase{
-		accountID: "flow_user_123",
-		balance:   1050,
-	}
-	metrics := domain.NewContractMetrics()
-
-	enabled := true
-	cfg := config.CacheConfig{
-		Enabled:    &enabled,
-		MaxEntries: 100,
-		TTLSeconds: 60,
-		Methods:    []string{"credits"},
-	}
-	respCache := services.NewResponseCache(cfg)
-
-	handler := adaptersHTTP.NewFlowHandler(mockCredit, metrics)
-	handler.SetCache(respCache)
-
-	// Lần 1: MISS
-	req1 := httptest.NewRequest(http.MethodGet, "/v1/flow/credits", nil)
-	w1 := httptest.NewRecorder()
-	handler.HandleGetCredits(w1, req1)
-
-	if w1.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK, got %d", w1.Code)
-	}
-	if w1.Header().Get("X-Cache") != "MISS" {
-		t.Errorf("expected X-Cache: MISS on first credits call, got %s", w1.Header().Get("X-Cache"))
-	}
-	if mockCredit.callCount != 1 {
-		t.Errorf("expected 1 call to creditUseCase, got %d", mockCredit.callCount)
-	}
-
-	// Lần 2: HIT (<5ms)
-	start := time.Now()
-	req2 := httptest.NewRequest(http.MethodGet, "/v1/flow/credits", nil)
-	w2 := httptest.NewRecorder()
-	handler.HandleGetCredits(w2, req2)
-	latency := time.Since(start)
-
-	if w2.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK on cached credits call, got %d", w2.Code)
-	}
-	if w2.Header().Get("X-Cache") != "HIT" {
-		t.Errorf("expected X-Cache: HIT on second credits call, got %s", w2.Header().Get("X-Cache"))
-	}
-	if latency >= 5*time.Millisecond {
-		t.Errorf("expected cache hit latency < 5ms, got %v", latency)
-	}
-	if mockCredit.callCount != 1 {
-		t.Errorf("expected creditUseCase NOT to be called on cache hit, callCount=%d", mockCredit.callCount)
 	}
 }

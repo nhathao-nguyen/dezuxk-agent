@@ -1,4 +1,4 @@
-# Danh mục mô hình Google Gemini & Google Flow (Động hóa qua YAML)
+# Danh mục mô hình Google Gemini (Động hóa qua YAML)
 # Khởi động sạch: Chỉ khi tài khoản đăng nhập có quyền dịch vụ tương ứng, các mô hình này mới được kích hoạt.
 
 gemini_models:
@@ -30,73 +30,4 @@ gemini_models:
     internal_backend_id: "3.1 Pro"
     model_tier_code: 3
     credit_cost_per_unit: 0
-    is_active: true
-
-flow_models:
-  - id: "veo-3.1-quality"
-    display_name: "Veo 3.1 - Cinematic Quality"
-    target_service: "flow"
-    capabilities:
-      - "video"
-    internal_backend_id: "veo_3_1_quality"
-    model_tier_code: 2
-    credit_cost_per_unit: 100
-    supported_durations:
-      - 4
-      - 6
-      - 8
-      - 10
-    supported_aspects:
-      - "16:9"
-      - "9:16"
-    is_active: true
-
-  - id: "veo-3.1-fast"
-    display_name: "Veo 3.1 - Fast Video"
-    target_service: "flow"
-    capabilities:
-      - "video"
-    internal_backend_id: "veo_3_1_fast"
-    model_tier_code: 2
-    credit_cost_per_unit: 20
-    supported_durations:
-      - 4
-      - 6
-      - 8
-    supported_aspects:
-      - "16:9"
-      - "9:16"
-    is_active: true
-
-  - id: "veo-3.1-lite"
-    display_name: "Veo 3.1 - Lite Video"
-    target_service: "flow"
-    capabilities:
-      - "video"
-    internal_backend_id: "veo_3_1_lite"
-    model_tier_code: 2
-    credit_cost_per_unit: 10
-    supported_durations:
-      - 4
-      - 6
-      - 8
-    supported_aspects:
-      - "16:9"
-      - "9:16"
-    is_active: true
-
-  - id: "abra-imagen-3"
-    display_name: "Abra Studio / Imagen 3"
-    target_service: "flow"
-    capabilities:
-      - "image"
-    internal_backend_id: "abra"
-    model_tier_code: 2
-    credit_cost_per_unit: 7
-    supported_aspects:
-      - "1:1"
-      - "16:9"
-      - "9:16"
-      - "4:3"
-      - "3:4"
     is_active: true

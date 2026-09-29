@@ -256,10 +256,3 @@ func GenerateChatCacheKey(model string, messages []domain.OpenAIMessage, tempera
 	hash := sha256.Sum256([]byte(b.String()))
 	return fmt.Sprintf("chat:%x", hash)
 }
-
-// GenerateCreditsCacheKey tính toán khóa băm SHA-256 cho số dư tín dụng Flow
-func GenerateCreditsCacheKey(accountID string) string {
-	raw := fmt.Sprintf("credits|%s", strings.TrimSpace(accountID))
-	hash := sha256.Sum256([]byte(raw))
-	return fmt.Sprintf("credits:%x", hash)
-}

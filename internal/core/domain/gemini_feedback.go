@@ -11,7 +11,7 @@ type FeedbackRequest struct {
 	ConversationID string `json:"conversation_id"`
 	ResponseID     string `json:"response_id"`
 	ChoiceID       string `json:"choice_id"`
-	Rating         int    `json:"rating"`           // 1: Thích (Thumbs Up), 2: Không thích (Thumbs Down)
+	Rating         int    `json:"rating"`            // 1: Thích (Thumbs Up), 2: Không thích (Thumbs Down)
 	Reasons        []int  `json:"reasons,omitempty"` // 1: Sai số liệu, 2: Không làm theo hướng dẫn, 3: Xúc phạm, 4: Không hữu ích, 5: Từ chối vô cớ, 6: Lặp từ
 	Comment        string `json:"comment,omitempty"`
 	Locale         string `json:"locale,omitempty"`

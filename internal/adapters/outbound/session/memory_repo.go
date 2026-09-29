@@ -86,9 +86,6 @@ func (r *MemorySessionRepository) promote(account *domain.ManagedAccount) {
 	if account == nil || !account.IsHealthy || account.Jar == nil {
 		return
 	}
-	if account.Jar.HasKey("OSID") {
-		r.promoteService(account, domain.ServiceFlow)
-	}
 	if account.Jar.HasKey("__Secure-1PSID") {
 		r.promoteService(account, domain.ServiceGemini)
 	}
@@ -127,31 +124,15 @@ func (r *MemorySessionRepository) hasServiceCookie(acc *domain.ManagedAccount, s
 	if acc == nil || acc.Jar == nil {
 		return false
 	}
-	if service == domain.ServiceFlow {
-		return acc.Jar.HasKey("OSID")
-	}
-	if service == domain.ServiceGemini {
-		return acc.Jar.HasKey("__Secure-1PSID")
-	}
-	return false
+	return acc.Jar.HasKey("__Secure-1PSID")
 }
 
 func (r *MemorySessionRepository) usable(acc *domain.ManagedAccount, service domain.ServiceKind, minCredits int) bool {
 	if acc == nil || !acc.ServiceReady(service) {
 		return false
 	}
-	if service == domain.ServiceFlow {
-		if acc.Jar == nil || !acc.Jar.HasKey("OSID") {
-			return false
-		}
-		if minCredits > 0 && acc.CreditsBalance < minCredits {
-			return false
-		}
-	}
-	if service == domain.ServiceGemini {
-		if acc.Jar == nil || !acc.Jar.HasKey("__Secure-1PSID") {
-			return false
-		}
+	if acc.Jar == nil || !acc.Jar.HasKey("__Secure-1PSID") {
+		return false
 	}
 	return true
 }

@@ -425,14 +425,32 @@ func extractGroundingMetadata(candidate []interface{}) *domain.GroundingMetadata
 }
 
 func mediaURLsIn(v any) []string {
-	extract, err := domain.ExtractMediaDocument(mustJSON(v))
-	if err != nil || extract.URL == "" {
-		return nil
+	var urls []string
+	walkMedia(v, &urls)
+	return urls
+}
+
+func walkMedia(v any, urls *[]string) {
+	if v == nil {
+		return
 	}
-	if extract.URL == "" {
-		return nil
+	switch val := v.(type) {
+	case string:
+		if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
+			lower := strings.ToLower(val)
+			if strings.Contains(lower, "googleusercontent.com") || strings.Contains(lower, "storage.googleapis.com") {
+				*urls = append(*urls, val)
+			}
+		}
+	case []any:
+		for _, item := range val {
+			walkMedia(item, urls)
+		}
+	case map[string]any:
+		for _, item := range val {
+			walkMedia(item, urls)
+		}
 	}
-	return []string{extract.URL}
 }
 
 func mustJSON(v any) string {

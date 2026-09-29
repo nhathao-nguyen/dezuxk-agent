@@ -26,10 +26,9 @@ func TestProfileProxyAndVaultEncryption(t *testing.T) {
 
 	repo := NewMemorySessionRepository(nil)
 	models := domain.NewModelRegistry(nil)
-	flow := &scanFlow{}
 	extractor := &scanExtractor{}
 
-	pm, err := NewProfileManager(cfg, repo, models, extractor, flow, vault)
+	pm, err := NewProfileManager(cfg, repo, models, extractor, vault)
 	if err != nil {
 		t.Fatalf("NewProfileManager failed: %v", err)
 	}
@@ -50,8 +49,6 @@ func TestProfileProxyAndVaultEncryption(t *testing.T) {
 	cookies := map[string]string{
 		"__Secure-1PSID":   "test-psid",
 		"__Secure-1PSIDTS": "test-psidts",
-		"OSID":             "test-osid",
-		"__Secure-OSID":    "test-secure-osid",
 		"SNlM0e":           "test-snlm0e",
 	}
 
@@ -93,7 +90,7 @@ func TestProfileProxyAndVaultEncryption(t *testing.T) {
 	// 4. Test ScanAndDiscover with a fresh ProfileManager to verify decryption at startup
 	repo2 := NewMemorySessionRepository(nil)
 	models2 := domain.NewModelRegistry(nil)
-	pm2, err := NewProfileManager(cfg, repo2, models2, extractor, flow, vault)
+	pm2, err := NewProfileManager(cfg, repo2, models2, extractor, vault)
 	if err != nil {
 		t.Fatalf("NewProfileManager 2 failed: %v", err)
 	}
@@ -120,7 +117,7 @@ func TestProfileProxyAndVaultEncryption(t *testing.T) {
 		t.Fatalf("expected restored account proxy %s, got %s", proxyURL, acc2.GetProxy())
 	}
 
-	if !acc2.Jar.HasKey("__Secure-1PSID") || !acc2.Jar.HasKey("OSID") {
+	if !acc2.Jar.HasKey("__Secure-1PSID") {
 		t.Fatalf("decrypted cookie jar missing keys: %v", acc2.Jar.GetAll())
 	}
 

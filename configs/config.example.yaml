@@ -22,7 +22,7 @@ server:
 storage:
   database_path: "./storage/gateway.db"
 
-# Chu kỳ đối soát hợp đồng định kỳ (NzlxgGoldenJob)
+# Chu kỳ đối soát hợp đồng định kỳ (GeminiChatGoldenJob)
 golden_job:
   lab_account_prefix: "lab"
   interval: 5m
@@ -39,10 +39,7 @@ security:
 # Công tắc operation. false thì facade trả "operation đang tắt" và không gọi máy chủ gốc.
 # Khóa thiếu nghĩa là bật.
 operations:
-  flow_get_credits: true
   chat_completions: true
-  images_generations: true
-  videos_generations: true
 
 # Quản lý Profile Chrome riêng biệt cho từng tài khoản Google
 profiles:
@@ -82,27 +79,11 @@ failover:
   max_attempts: 3
   cooling_duration: 60s
 
-# Cấu hình Google Flow (Hạn ngạch & Chi phí tín dụng động theo cấu hình hạ tầng)
-flow:
-  project_title_prefix: "Studio"
-  credit_costs:
-    veo_quality: 100
-    veo_fast: 20
-    veo_lite: 10
-    abra_imagen: 4
-    upsample_4k: 50
-    video_extend_4s: 20
-    video_extend_6s: 30
-    musicfx: 5
-
 # Tùy chỉnh / Ghi đè URL và cấu hình RPC (cho phép cập nhật khi Google đổi URL pattern mà không cần build lại code)
 rpcs:
   StreamGenerate:
     path_pattern: "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?rt=c"
     target_host: "https://gemini.google.com"
-  nzlxg:
-    path_pattern: "/_/AiSandboxAngularFrontend/data/batchexecute?rpcids=nzlxg"
-    target_host: "https://flow.google.com"
 
 # Tầng Bộ nhớ đệm Phản hồi Thông minh (In-Memory Response Caching)
 cache:
@@ -111,7 +92,6 @@ cache:
   ttl_seconds: 3600
   methods:
     - "chat"
-    - "credits"
 
 # Quản trị viên & Giao diện Dashboard nhúng
 admin:

@@ -11,10 +11,10 @@ import (
 
 // QuotaInfo biểu diễn thông tin hạn mức điện toán của tài khoản Gemini
 type QuotaInfo struct {
-	Quota5h     float64 `json:"quota_5h"`     // Tỷ lệ % đã dùng trong 5 giờ (0 - 100)
-	QuotaWeekly float64 `json:"quota_weekly"` // Tỷ lệ % đã dùng trong tuần (0 - 100)
-	RPMLimit    int     `json:"rpm_limit"`    // Giới hạn request mỗi phút
-	ResetTime5h string  `json:"reset_time_5h"`// Thời gian hoàn trả dung lượng ISO-8601
+	Quota5h     float64 `json:"quota_5h"`      // Tỷ lệ % đã dùng trong 5 giờ (0 - 100)
+	QuotaWeekly float64 `json:"quota_weekly"`  // Tỷ lệ % đã dùng trong tuần (0 - 100)
+	RPMLimit    int     `json:"rpm_limit"`     // Giới hạn request mỗi phút
+	ResetTime5h string  `json:"reset_time_5h"` // Thời gian hoàn trả dung lượng ISO-8601
 	RawResponse string  `json:"raw_response,omitempty"`
 }
 

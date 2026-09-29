@@ -45,16 +45,6 @@ func TestResponseCache_KeyGeneration(t *testing.T) {
 	if len(key1) < 64 {
 		t.Errorf("expected key to contain SHA-256 hash, length was %d", len(key1))
 	}
-
-	creditsKey1 := services.GenerateCreditsCacheKey("profile_user1")
-	creditsKey2 := services.GenerateCreditsCacheKey("profile_user1")
-	creditsKey3 := services.GenerateCreditsCacheKey("profile_user2")
-	if creditsKey1 != creditsKey2 {
-		t.Errorf("expected identical credits keys for same account, got %s vs %s", creditsKey1, creditsKey2)
-	}
-	if creditsKey1 == creditsKey3 {
-		t.Error("expected different credits keys for different accounts")
-	}
 }
 
 func TestResponseCache_SetAndGet(t *testing.T) {
@@ -63,7 +53,7 @@ func TestResponseCache_SetAndGet(t *testing.T) {
 		Enabled:    &enabled,
 		MaxEntries: 100,
 		TTLSeconds: 60,
-		Methods:    []string{"chat", "credits"},
+		Methods:    []string{"chat"},
 	}
 
 	cache := services.NewResponseCache(cfg)

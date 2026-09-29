@@ -33,10 +33,8 @@ func testAccount() *domain.ManagedAccount {
 	return &domain.ManagedAccount{
 		ID:           "lab",
 		IsHealthy:    true,
-		FlowSNlM0e:   "flow-at",
 		GeminiSNlM0e: "gemini-at",
 		Jar: domain.NewCookieJar(map[string]string{
-			"OSID":           "osid",
 			"__Secure-1PSID": "psid",
 		}),
 	}
@@ -54,12 +52,12 @@ func TestRefreshDerived_SingleFlight(t *testing.T) {
 
 	leaderErr := make(chan error, 1)
 	go func() {
-		leaderErr <- repo.RefreshDerived(context.Background(), account, domain.ServiceFlow)
+		leaderErr <- repo.RefreshDerived(context.Background(), account, domain.ServiceGemini)
 	}()
 	<-entered
 
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	waitErr := repo.RefreshDerived(ctx, account, domain.ServiceFlow)
+	waitErr := repo.RefreshDerived(ctx, account, domain.ServiceGemini)
 	cancel()
 	if refresher.calls.Load() != 1 {
 		t.Fatalf("refresher calls while leader held = %d", refresher.calls.Load())
@@ -71,19 +69,17 @@ func TestRefreshDerived_SingleFlight(t *testing.T) {
 
 	close(hold)
 	if err := <-leaderErr; err != nil {
-		t.Fatal(err)
+		t.Fatalf("leader = %v", err)
 	}
-	if refresher.calls.Load() != 1 {
-		t.Fatalf("refresher calls = %d", refresher.calls.Load())
-	}
-	if state, _ := account.ServiceSnapshot(domain.ServiceFlow); state != domain.StateReady {
-		t.Fatalf("state = %s", state)
+	if state, _ := account.ServiceSnapshot(domain.ServiceGemini); state != domain.StateReady {
+		t.Fatalf("session state after refresh = %s", state)
 	}
 }
 
-func TestGetAvailable_WaitsOutRefresh(t *testing.T) {
+func TestGetAvailable_WaitsOnRefreshingSession(t *testing.T) {
+	entered := make(chan struct{})
 	hold := make(chan struct{})
-	refresher := &scriptedRefresher{hold: hold}
+	refresher := &scriptedRefresher{enter: entered, hold: hold}
 	repo := NewMemorySessionRepository(refresher)
 	account := testAccount()
 	if err := repo.Save(context.Background(), account); err != nil {
@@ -92,84 +88,85 @@ func TestGetAvailable_WaitsOutRefresh(t *testing.T) {
 
 	refreshDone := make(chan error, 1)
 	go func() {
-		refreshDone <- repo.RefreshDerived(context.Background(), account, domain.ServiceFlow)
+		refreshDone <- repo.RefreshDerived(context.Background(), account, domain.ServiceGemini)
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for account.ServiceState(domain.ServiceFlow) != domain.StateRefreshing {
-		if time.Now().After(deadline) {
-			t.Fatal("refresh did not start")
-		}
-		time.Sleep(time.Millisecond)
+	<-entered
+
+	for account.ServiceState(domain.ServiceGemini) != domain.StateRefreshing {
+		time.Sleep(10 * time.Millisecond)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	_, err := repo.GetAvailable(ctx, domain.ServiceFlow, 0)
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := repo.GetAvailable(ctx, domain.ServiceGemini, 0)
 	if err == nil {
-		t.Fatal("GetAvailable returned a session that is still refreshing")
+		t.Fatal("expected timeout while session is refreshing")
 	}
 
 	close(hold)
 	if err := <-refreshDone; err != nil {
-		t.Fatal(err)
+		t.Fatalf("refresh error: %v", err)
 	}
-	got, err := repo.GetAvailable(context.Background(), domain.ServiceFlow, 0)
+
+	got, err := repo.GetAvailable(context.Background(), domain.ServiceGemini, 0)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("GetAvailable error: %v", err)
+	}
+	if got.ID != account.ID {
+		t.Fatalf("expected account %s, got %s", account.ID, got.ID)
 	}
 	repo.Release(got, nil)
 }
 
-func TestRefreshDerived_InvalidDoesNotLoop(t *testing.T) {
+func TestRefreshDerived_ExpiredInvalidatesSession(t *testing.T) {
 	refresher := &scriptedRefresher{
-		err: domain.Expired(domain.OpSession, domain.OriginHandshake, domain.ServiceFlow, "phiên gốc hết hạn"),
+		err: domain.Expired(domain.OpSession, domain.OriginHandshake, domain.ServiceGemini, "phiên gốc hết hạn"),
 	}
 	repo := NewMemorySessionRepository(refresher)
 	account := testAccount()
 	if err := repo.Save(context.Background(), account); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RefreshDerived(context.Background(), account, domain.ServiceFlow); err == nil {
-		t.Fatal("expected refresh failure")
+
+	if err := repo.RefreshDerived(context.Background(), account, domain.ServiceGemini); err == nil {
+		t.Fatal("expected expired error")
 	}
-	if err := repo.RefreshDerived(context.Background(), account, domain.ServiceFlow); err == nil {
-		t.Fatal("expected invalid session to stay failed")
+	if err := repo.RefreshDerived(context.Background(), account, domain.ServiceGemini); err == nil {
+		t.Fatal("second call should still fail")
 	}
 	if refresher.calls.Load() != 1 {
-		t.Fatalf("refresher calls = %d", refresher.calls.Load())
+		t.Fatalf("calls after invalidation = %d", refresher.calls.Load())
 	}
-	if state, _ := account.ServiceSnapshot(domain.ServiceFlow); state != domain.StateInvalid {
-		t.Fatalf("state = %s", state)
-	}
-	if err := repo.Save(context.Background(), account); err != nil {
-		t.Fatal(err)
-	}
-	if state, _ := account.ServiceSnapshot(domain.ServiceFlow); state != domain.StateInvalid {
-		t.Fatal("saving the same account must not revive an invalid session")
+	if state, _ := account.ServiceSnapshot(domain.ServiceGemini); state != domain.StateInvalid {
+		t.Fatalf("session state after invalidation = %s", state)
 	}
 
 	replacement := testAccount()
 	if err := repo.Save(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
-	if state, _ := replacement.ServiceSnapshot(domain.ServiceFlow); state != domain.StateReady {
-		t.Fatalf("replacement state = %s", state)
+	if state, _ := account.ServiceSnapshot(domain.ServiceGemini); state != domain.StateInvalid {
+		t.Fatalf("account state after replacement save = %s", state)
+	}
+	if state, _ := replacement.ServiceSnapshot(domain.ServiceGemini); state != domain.StateReady {
+		t.Fatalf("replacement state after save = %s", state)
 	}
 }
 
-func TestRefreshDerived_NetworkFailureKeepsReady(t *testing.T) {
+func TestRefreshDerived_TransportErrorCoolsSession(t *testing.T) {
 	refresher := &scriptedRefresher{
-		err: domain.ClassifyTransport(domain.OpSession, domain.OriginHandshake, domain.ServiceFlow, context.DeadlineExceeded),
+		err: domain.ClassifyTransport(domain.OpSession, domain.OriginHandshake, domain.ServiceGemini, context.DeadlineExceeded),
 	}
 	repo := NewMemorySessionRepository(refresher)
 	account := testAccount()
 	if err := repo.Save(context.Background(), account); err != nil {
 		t.Fatal(err)
 	}
-	if err := repo.RefreshDerived(context.Background(), account, domain.ServiceFlow); err == nil {
-		t.Fatal("expected transport failure")
+
+	if err := repo.RefreshDerived(context.Background(), account, domain.ServiceGemini); err == nil {
+		t.Fatal("expected timeout error")
 	}
-	state, cooldown := account.ServiceSnapshot(domain.ServiceFlow)
+	state, cooldown := account.ServiceSnapshot(domain.ServiceGemini)
 	if state != domain.StateReady {
 		t.Fatalf("state = %s", state)
 	}
@@ -184,27 +181,22 @@ func TestRelease_ClassifiesWithoutCoolingSchema(t *testing.T) {
 	if err := repo.Save(context.Background(), account); err != nil {
 		t.Fatal(err)
 	}
-	repo.Release(account, domain.SchemaUnexpected(domain.OpFlowGetCredits, domain.OriginNzlxg, domain.ServiceFlow, "phản hồi số dư không đúng hợp đồng"))
-	state, cooldown := account.ServiceSnapshot(domain.ServiceFlow)
+	repo.Release(account, domain.SchemaUnexpected(domain.OpChatCompletions, domain.OriginStreamGenerate, domain.ServiceGemini, "phản hồi không đúng hợp đồng"))
+	state, cooldown := account.ServiceSnapshot(domain.ServiceGemini)
 	if state != domain.StateReady || !cooldown.IsZero() {
 		t.Fatalf("schema release changed session: %s %s", state, cooldown)
 	}
 
-	repo.Release(account, domain.ClassifyUpstreamStatus(domain.OpFlowGetCredits, domain.OriginNzlxg, 429, true, domain.ServiceFlow))
-	state, cooldown = account.ServiceSnapshot(domain.ServiceFlow)
+	repo.Release(account, domain.ClassifyUpstreamStatus(domain.OpChatCompletions, domain.OriginStreamGenerate, 429, true, domain.ServiceGemini))
+	state, cooldown = account.ServiceSnapshot(domain.ServiceGemini)
 	if state != domain.StateReady || !cooldown.After(time.Now()) {
 		t.Fatalf("rate limit release = %s %s", state, cooldown)
 	}
-	_, err := repo.GetAvailable(context.Background(), domain.ServiceFlow, 0)
+	_, err := repo.GetAvailable(context.Background(), domain.ServiceGemini, 0)
 	ge, ok := domain.AsGatewayError(err)
 	if !ok || ge.Class != domain.ClassRateLimited {
-		t.Fatalf("cooled flow session error = %v", err)
+		t.Fatalf("cooled gemini session error = %v", err)
 	}
-	got, err := repo.GetAvailable(context.Background(), domain.ServiceGemini, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repo.Release(got, nil)
 }
 
 func TestNilRefresherMarksInvalidOnce(t *testing.T) {
@@ -219,9 +211,6 @@ func TestNilRefresherMarksInvalidOnce(t *testing.T) {
 	if account.ServiceState(domain.ServiceGemini) != domain.StateInvalid {
 		t.Fatal("gemini should be invalid")
 	}
-	if account.ServiceState(domain.ServiceFlow) != domain.StateReady {
-		t.Fatal("flow should stay ready")
-	}
 }
 
 func TestRetryAfterRefresh_SecondExpiryInvalidates(t *testing.T) {
@@ -231,9 +220,9 @@ func TestRetryAfterRefresh_SecondExpiryInvalidates(t *testing.T) {
 	if err := repo.Save(context.Background(), account); err != nil {
 		t.Fatal(err)
 	}
-	err := RetryAfterRefresh(context.Background(), repo, account, domain.ServiceFlow, func() error {
+	err := RetryAfterRefresh(context.Background(), repo, account, domain.ServiceGemini, func() error {
 		calls.Add(1)
-		return domain.Expired(domain.OpFlowGetCredits, domain.OriginNzlxg, domain.ServiceFlow, "phiên gốc hết hạn")
+		return domain.Expired(domain.OpChatCompletions, domain.OriginStreamGenerate, domain.ServiceGemini, "phiên gốc hết hạn")
 	})
 	if err == nil {
 		t.Fatal("expected expiry")
@@ -241,7 +230,7 @@ func TestRetryAfterRefresh_SecondExpiryInvalidates(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("calls = %d", calls.Load())
 	}
-	if account.ServiceState(domain.ServiceFlow) != domain.StateInvalid {
-		t.Fatalf("state = %s", account.ServiceState(domain.ServiceFlow))
+	if account.ServiceState(domain.ServiceGemini) != domain.StateInvalid {
+		t.Fatalf("state = %s", account.ServiceState(domain.ServiceGemini))
 	}
 }

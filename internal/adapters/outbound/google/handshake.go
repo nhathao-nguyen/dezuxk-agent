@@ -79,16 +79,7 @@ func (e *TokenExtractorAdapter) ExtractTokens(ctx context.Context, account *doma
 	ctx, cancel := e.bound(ctx)
 	defer cancel()
 
-	var targetURL string
-	var isFlow bool
-
-	if service == domain.ServiceFlow {
-		targetURL = e.flowHost + "/"
-		isFlow = true
-	} else {
-		targetURL = e.geminiHost + "/app"
-		isFlow = false
-	}
+	targetURL := e.geminiHost + "/app"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
@@ -100,7 +91,7 @@ func (e *TokenExtractorAdapter) ExtractTokens(ctx context.Context, account *doma
 		ua = account.UserAgent
 	}
 	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Cookie", account.Jar.GetCookieHeader(isFlow))
+	req.Header.Set("Cookie", account.Jar.GetCookieHeader())
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	client := e.getClient(account)

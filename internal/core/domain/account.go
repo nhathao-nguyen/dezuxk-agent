@@ -39,8 +39,8 @@ func (cj *CookieJar) IngestResponseCookies(cookies []*http.Cookie) bool {
 	return updated
 }
 
-// GetCookieHeader xuất chuỗi Header Cookie phân lập theo Service Target
-func (cj *CookieJar) GetCookieHeader(isFlow bool) string {
+// GetCookieHeader xuất chuỗi Header Cookie cho Gemini
+func (cj *CookieJar) GetCookieHeader(isFlow ...bool) string {
 	cj.mu.RLock()
 	defer cj.mu.RUnlock()
 
@@ -49,8 +49,8 @@ func (cj *CookieJar) GetCookieHeader(isFlow bool) string {
 		if val == "" || name == "SNlM0e" || name == "cfb2h" {
 			continue
 		}
-		// Chỉ đưa OSID và __Secure-OSID vào request Flow
-		if (name == "OSID" || name == "__Secure-OSID") && !isFlow {
+		// Bỏ OSID và __Secure-OSID nếu không yêu cầu
+		if (name == "OSID" || name == "__Secure-OSID") && (len(isFlow) == 0 || !isFlow[0]) {
 			continue
 		}
 		if sb.Len() > 0 {
@@ -86,25 +86,20 @@ func (cj *CookieJar) GetAll() map[string]string {
 	return res
 }
 
-// ManagedAccount đại diện cho một danh tính người dùng Google
+// ManagedAccount đại diện cho một danh tính người dùng Google Gemini
 type ManagedAccount struct {
-	ID               string
-	Email            string
-	Jar              *CookieJar
-	FlowSNlM0e       string
-	GeminiSNlM0e     string
-	FlowProjectID    string
-	FlowSessionToken string
-	UserAgent        string
-	CreditsBalance   int
-	Tier             int // 1: Free, 2: Pro
-	ProxyURL         string
-	InFlightReqs     int64
-	IsHealthy        bool
-	LastRefresh      time.Time
+	ID           string
+	Email        string
+	Jar          *CookieJar
+	GeminiSNlM0e string
+	UserAgent    string
+	Tier         int // 1: Free, 2: Pro
+	ProxyURL     string
+	InFlightReqs int64
+	IsHealthy    bool
+	LastRefresh  time.Time
 
 	mu         sync.RWMutex
-	flowGate   serviceGate
 	geminiGate serviceGate
 }
 
@@ -127,18 +122,15 @@ func (a *ManagedAccount) SetProxy(proxyURL string) {
 }
 
 func (a *ManagedAccount) IsAvailable() bool {
-	return a.ServiceReady(ServiceGemini) || a.ServiceReady(ServiceFlow)
+	return a.ServiceReady(ServiceGemini)
 }
 
-func (a *ManagedAccount) GetAtToken(service ServiceKind) string {
+func (a *ManagedAccount) GetAtToken(service ...ServiceKind) string {
 	if a == nil {
 		return ""
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if service == ServiceFlow {
-		return a.FlowSNlM0e
-	}
 	return a.GeminiSNlM0e
 }
 
@@ -148,38 +140,7 @@ func (a *ManagedAccount) SetAtToken(service ServiceKind, token string) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if service == ServiceFlow {
-		a.FlowSNlM0e = token
-		return
-	}
 	a.GeminiSNlM0e = token
-}
-
-func (a *ManagedAccount) GetFlowMediaSecrets() (projectID, sessionToken string) {
-	if a == nil {
-		return "", ""
-	}
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.FlowProjectID, a.FlowSessionToken
-}
-
-func (a *ManagedAccount) SetFlowProjectID(projectID string) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	a.FlowProjectID = projectID
-	a.mu.Unlock()
-}
-
-func (a *ManagedAccount) SetFlowSessionToken(token string) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	a.FlowSessionToken = token
-	a.mu.Unlock()
 }
 
 func (cj *CookieJar) ToMap() map[string]string {

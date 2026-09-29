@@ -20,12 +20,12 @@ import (
 
 // SqliteSessionRepository triển khai ports.SessionRepository bền vững với cơ sở dữ liệu SQLite cục bộ (WAL mode)
 type SqliteSessionRepository struct {
-	mu         sync.Mutex
-	db         *sql.DB
-	accounts   map[string]*domain.ManagedAccount
-	order      []string
-	cursor     int
-	refreshing map[refreshKey]*refreshFlight
+	mu              sync.Mutex
+	db              *sql.DB
+	accounts        map[string]*domain.ManagedAccount
+	order           []string
+	cursor          int
+	refreshing      map[refreshKey]*refreshFlight
 	refresher       ports.DerivedSecretRefresher
 	alerts          []domain.SessionAlert
 	vault           *Vault
@@ -184,19 +184,15 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 		}
 
 		acc := &domain.ManagedAccount{
-			ID:               id,
-			Email:            email,
-			Jar:              domain.NewCookieJar(cookieMap),
-			FlowSNlM0e:       flowSN,
-			GeminiSNlM0e:     geminiSN,
-			FlowProjectID:    projectID,
-			FlowSessionToken: sessToken,
-			UserAgent:        ua,
-			ProxyURL:         proxy,
-			CreditsBalance:   credits,
-			Tier:             tier,
-			IsHealthy:        healthyInt == 1,
-			LastRefresh:      updatedAt,
+			ID:           id,
+			Email:        email,
+			Jar:          domain.NewCookieJar(cookieMap),
+			GeminiSNlM0e: geminiSN,
+			UserAgent:    ua,
+			ProxyURL:     proxy,
+			Tier:         tier,
+			IsHealthy:    healthyInt == 1,
+			LastRefresh:  updatedAt,
 		}
 
 		r.accounts[id] = acc
@@ -275,8 +271,8 @@ func (r *SqliteSessionRepository) Save(ctx context.Context, account *domain.Mana
 		updated_at = excluded.updated_at;
 	`
 	_, err := r.db.ExecContext(ctx, query,
-		account.ID, account.Email, cookiesStored, account.FlowSNlM0e, account.GeminiSNlM0e,
-		account.FlowProjectID, account.FlowSessionToken, account.UserAgent, account.ProxyURL, account.CreditsBalance,
+		account.ID, account.Email, cookiesStored, "", account.GeminiSNlM0e,
+		"", "", account.UserAgent, account.ProxyURL, 0,
 		account.Tier, healthyInt, time.Now(),
 	)
 	return err
@@ -285,9 +281,6 @@ func (r *SqliteSessionRepository) Save(ctx context.Context, account *domain.Mana
 func (r *SqliteSessionRepository) promote(account *domain.ManagedAccount) {
 	if account == nil || !account.IsHealthy || account.Jar == nil {
 		return
-	}
-	if account.Jar.HasKey("OSID") {
-		r.promoteService(account, domain.ServiceFlow)
 	}
 	if account.Jar.HasKey("__Secure-1PSID") {
 		r.promoteService(account, domain.ServiceGemini)
@@ -327,31 +320,15 @@ func (r *SqliteSessionRepository) hasServiceCookie(acc *domain.ManagedAccount, s
 	if acc == nil || acc.Jar == nil {
 		return false
 	}
-	if service == domain.ServiceFlow {
-		return acc.Jar.HasKey("OSID")
-	}
-	if service == domain.ServiceGemini {
-		return acc.Jar.HasKey("__Secure-1PSID")
-	}
-	return false
+	return acc.Jar.HasKey("__Secure-1PSID")
 }
 
 func (r *SqliteSessionRepository) usable(acc *domain.ManagedAccount, service domain.ServiceKind, minCredits int) bool {
 	if acc == nil || !acc.ServiceReady(service) {
 		return false
 	}
-	if service == domain.ServiceFlow {
-		if acc.Jar == nil || !acc.Jar.HasKey("OSID") {
-			return false
-		}
-		if minCredits > 0 && acc.CreditsBalance < minCredits {
-			return false
-		}
-	}
-	if service == domain.ServiceGemini {
-		if acc.Jar == nil || !acc.Jar.HasKey("__Secure-1PSID") {
-			return false
-		}
+	if acc.Jar == nil || !acc.Jar.HasKey("__Secure-1PSID") {
+		return false
 	}
 	return true
 }

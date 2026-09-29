@@ -177,4 +177,3 @@ func TestDeleteConversationRequestAndResponse(t *testing.T) {
 		t.Errorf("ParseDeleteConversationResponse thất bại: %v", err)
 	}
 }
-

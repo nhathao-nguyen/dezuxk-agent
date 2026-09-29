@@ -9,10 +9,10 @@ import (
 
 func TestMoveService_RejectsIllegalJump(t *testing.T) {
 	account := &domain.ManagedAccount{}
-	if err := account.MoveService(domain.ServiceFlow, domain.StateQuarantined); err == nil {
+	if err := account.MoveService(domain.ServiceGemini, domain.StateQuarantined); err == nil {
 		t.Fatal("empty to quarantined must fail")
 	}
-	state, _ := account.ServiceSnapshot(domain.ServiceFlow)
+	state, _ := account.ServiceSnapshot(domain.ServiceGemini)
 	if state != domain.StateEmpty {
 		t.Fatalf("state = %s", state)
 	}
@@ -20,40 +20,34 @@ func TestMoveService_RejectsIllegalJump(t *testing.T) {
 
 func TestMoveService_RefreshCycle(t *testing.T) {
 	account := &domain.ManagedAccount{IsHealthy: true}
-	if err := account.MoveService(domain.ServiceFlow, domain.StateReady); err != nil {
-		t.Fatal(err)
-	}
-	if err := account.MoveService(domain.ServiceFlow, domain.StateRefreshing); err != nil {
-		t.Fatal(err)
-	}
-	if account.ServiceReady(domain.ServiceFlow) {
-		t.Fatal("refreshing session must not be ready")
-	}
-	if err := account.MoveService(domain.ServiceFlow, domain.StateInvalid); err != nil {
-		t.Fatal(err)
-	}
 	if err := account.MoveService(domain.ServiceGemini, domain.StateReady); err != nil {
 		t.Fatal(err)
 	}
-	if account.ServiceState(domain.ServiceFlow) != domain.StateInvalid {
-		t.Fatal("flow state changed while moving gemini")
+	if err := account.MoveService(domain.ServiceGemini, domain.StateRefreshing); err != nil {
+		t.Fatal(err)
+	}
+	if account.ServiceReady(domain.ServiceGemini) {
+		t.Fatal("refreshing session must not be ready")
+	}
+	if err := account.MoveService(domain.ServiceGemini, domain.StateInvalid); err != nil {
+		t.Fatal(err)
+	}
+	if account.ServiceState(domain.ServiceGemini) != domain.StateInvalid {
+		t.Fatal("gemini state should be invalid")
 	}
 }
 
-func TestTryWriteLease_FlowDoesNotBlockGemini(t *testing.T) {
+func TestTryWriteLease(t *testing.T) {
 	account := &domain.ManagedAccount{ID: "lab"}
-	if !account.TryWriteLease(domain.ServiceFlow) {
-		t.Fatal("first flow lease")
-	}
-	if account.TryWriteLease(domain.ServiceFlow) {
-		t.Fatal("second flow lease")
-	}
 	if !account.TryWriteLease(domain.ServiceGemini) {
-		t.Fatal("gemini lease is a different key")
+		t.Fatal("first gemini lease")
 	}
-	account.ReleaseWriteLease(domain.ServiceFlow)
-	if !account.TryWriteLease(domain.ServiceFlow) {
-		t.Fatal("flow lease after release")
+	if account.TryWriteLease(domain.ServiceGemini) {
+		t.Fatal("second gemini lease must fail while locked")
+	}
+	account.ReleaseWriteLease(domain.ServiceGemini)
+	if !account.TryWriteLease(domain.ServiceGemini) {
+		t.Fatal("gemini lease after release")
 	}
 }
 
@@ -90,4 +84,3 @@ func TestMoveService_CoolingCycle(t *testing.T) {
 		t.Fatalf("expected auto-transition to ready, got %s", account.ServiceState(domain.ServiceGemini))
 	}
 }
-

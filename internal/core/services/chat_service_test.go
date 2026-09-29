@@ -46,9 +46,9 @@ func (m *mockSessionRepo) TryWriteLease(account *domain.ManagedAccount, service 
 }
 func (m *mockSessionRepo) ReleaseWriteLease(account *domain.ManagedAccount, service domain.ServiceKind) {
 }
-func (m *mockSessionRepo) GetAlerts() []domain.SessionAlert { return nil }
+func (m *mockSessionRepo) GetAlerts() []domain.SessionAlert   { return nil }
 func (m *mockSessionRepo) AddAlert(alert domain.SessionAlert) {}
-func (m *mockSessionRepo) ClearAlerts(accountID string)     {}
+func (m *mockSessionRepo) ClearAlerts(accountID string)       {}
 
 type secretTransport struct{}
 
@@ -66,14 +66,14 @@ func (secretTransport) DoRequest(ctx context.Context, account *domain.ManagedAcc
 	}, nil
 }
 
-func TestChatService_RejectFlowModelInChat(t *testing.T) {
-	mr := domain.NewModelRegistry(domain.GetFlowCatalog())
+func TestChatService_RejectUnknownModelInChat(t *testing.T) {
+	mr := domain.NewModelRegistry(nil)
 	sr := &mockSessionRepo{}
 
 	chatService := services.NewChatService(mr, sr, nil, nil, nil)
 
 	req := &domain.OpenAIChatRequest{
-		Model: "veo-3.1-quality",
+		Model: "unknown-model",
 		Messages: []domain.OpenAIMessage{
 			{Role: "user", Content: "Hello"},
 		},
@@ -81,7 +81,7 @@ func TestChatService_RejectFlowModelInChat(t *testing.T) {
 
 	_, err := chatService.ExecuteChatSync(context.Background(), req)
 	if err == nil {
-		t.Fatal("expected error when sending Flow model to Chat completions, got nil")
+		t.Fatal("expected error when sending unknown model to Chat completions, got nil")
 	}
 }
 
@@ -256,12 +256,6 @@ func (mediaChatCodec) DematerializeChat(ctx context.Context, resp *http.Response
 		MediaURLs:      []string{"https://lh3.googleusercontent.com/rd-gg-dl/cat123"},
 		ConversationID: "c_123",
 	}, nil
-}
-func (mediaChatCodec) MaterializeFlowMedia(account *domain.ManagedAccount, input domain.FlowMediaInput) (domain.OutboundAttempt, error) {
-	return domain.OutboundAttempt{}, nil
-}
-func (mediaChatCodec) DematerializeFlowMedia(resp *http.Response, metrics *domain.ContractMetrics) (domain.MediaExtract, error) {
-	return domain.MediaExtract{}, nil
 }
 
 func TestChatService_CachesMediaURLs(t *testing.T) {

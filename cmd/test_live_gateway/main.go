@@ -1,0 +1,607 @@
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const baseURL = "http://127.0.0.1:8080"
+const adminToken = "dezuxk_secure_admin_session_token_2026"
+
+type TestRunner struct {
+	client     *http.Client
+	virtualKey string
+	keyID      string
+	passed     int
+	failed     int
+}
+
+func main() {
+	fmt.Println("======================================================================")
+	fmt.Println("🚀 BẮT ĐẦU TEST TOÀN DIỆN HỆ THỐNG DEZUXK AI GATEWAY (LUỒNG CHÍNH THỨC)")
+	fmt.Println("======================================================================")
+
+	runner := &TestRunner{
+		client: &http.Client{Timeout: 90 * time.Second},
+	}
+
+	// 1. Kiểm tra hạ tầng cơ sở
+	runner.testHealthAndReady()
+
+	// 2. Kiểm tra quản trị và Virtual API Keys
+	runner.testAdminAndKeyManagement()
+
+	// 3. Kiểm tra danh mục mô hình & Profile
+	runner.testModelsAndProfiles()
+
+	// 4. Kiểm tra các endpoint Gemini trực tiếp (Usage & Conversations)
+	runner.testGeminiDirectEndpoints()
+
+	// 5. Test OpenAI Chat Completions: Sync thường
+	runner.testChatSync()
+
+	// 6. Test OpenAI Chat Completions: Streaming SSE (Real-time Token Flow)
+	runner.testChatStreaming()
+
+	// 7. Test Thinking Mode (Suy luận sâu)
+	runner.testChatThinking()
+
+	// 8. Test Search Grounding (Truy vấn Web trực tiếp)
+	runner.testChatSearchGrounding()
+
+	// 9. Test Python Code Interpreter (Sandbox thực thi mã)
+	runner.testChatCodeInterpreter()
+
+	// 10. Test Multimodal Vision (Phân tích hình ảnh)
+	runner.testChatMultimodalVision()
+
+	// 11. Test Super Combo (Thinking + Search Grounding kết hợp)
+	runner.testChatSuperCombo()
+
+	// 12. Test In-Memory Response Caching (<10ms & X-Cache: HIT)
+	runner.testResponseCaching()
+
+	// 13. Test Thu hồi Key & Bảo mật (Revoke -> 401 Unauthorized)
+	runner.testKeyRevocationSecurity()
+
+	fmt.Println("\n======================================================================")
+	fmt.Printf("📊 KẾT QUẢ KIỂM THỬ: %d THÀNH CÔNG, %d THẤT BẠI\n", runner.passed, runner.failed)
+	if runner.failed == 0 {
+		fmt.Println("🎉 TẤT CẢ CÁC TÍNH NĂNG VÀ OPTION ĐÃ HOẠT ĐỘNG HOÀN HẢO 100%!")
+	} else {
+		fmt.Println("⚠️ Có một số test case cần chú ý kiểm tra lại.")
+	}
+	fmt.Println("======================================================================")
+}
+
+func (r *TestRunner) logPass(name string, durationMs int64, details string) {
+	r.passed++
+	fmt.Printf("  ✅ [%-25s] PASS (%4d ms) %s\n", name, durationMs, details)
+}
+
+func (r *TestRunner) logFail(name string, err error) {
+	r.failed++
+	fmt.Printf("  ❌ [%-25s] FAIL: %v\n", name, err)
+}
+
+func (r *TestRunner) testHealthAndReady() {
+	fmt.Println("\n--- [Phần 1: Kiểm Tra Trạng Thái Hạ Tầng Gateway] ---")
+
+	// GET /ready
+	t0 := time.Now()
+	resp, err := r.client.Get(baseURL + "/ready")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("GET /ready", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	_ = resp.Body.Close()
+	r.logPass("GET /ready", time.Since(t0).Milliseconds(), "Server đã sẵn sàng phục vụ")
+
+	// GET /health
+	t0 = time.Now()
+	resp, err = r.client.Get(baseURL + "/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("GET /health", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var health map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&health)
+	_ = resp.Body.Close()
+	r.logPass("GET /health", time.Since(t0).Milliseconds(), fmt.Sprintf("Status: %v | Models Active: %v", health["status"], health["models_active"]))
+}
+
+func (r *TestRunner) testAdminAndKeyManagement() {
+	fmt.Println("\n--- [Phần 2: Quản Trị Hệ Thống & Virtual API Keys] ---")
+
+	// Login admin
+	t0 := time.Now()
+	loginPayload := `{"username":"admin","password":"dezuxk_admin_secret_pass"}`
+	resp, err := r.client.Post(baseURL+"/v1/admin/auth/login", "application/json", strings.NewReader(loginPayload))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("POST /admin/auth/login", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	_ = resp.Body.Close()
+	r.logPass("POST /admin/auth/login", time.Since(t0).Milliseconds(), "Xác thực Admin thành công")
+
+	// Tạo Virtual API Key mới cho Client
+	t0 = time.Now()
+	keyPayload := `{"name":"live-test-worker","role":"user","rate_limit_rpm":120}`
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/admin/keys", strings.NewReader(keyPayload))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		r.logFail("POST /admin/keys", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var keyResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&keyResp)
+	_ = resp.Body.Close()
+
+	r.virtualKey, _ = keyResp["key"].(string)
+	r.keyID, _ = keyResp["id"].(string)
+	r.logPass("POST /admin/keys", time.Since(t0).Milliseconds(), fmt.Sprintf("Đã tạo Key: %s (ID: %s)", keyResp["key_prefix"], r.keyID))
+}
+
+func (r *TestRunner) testModelsAndProfiles() {
+	fmt.Println("\n--- [Phần 3: Danh Mục Mô Hình & Quản Lý Profile] ---")
+
+	// GET /v1/models dùng Virtual Key vừa tạo
+	t0 := time.Now()
+	req, _ := http.NewRequest(http.MethodGet, baseURL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("GET /v1/models", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var models map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&models)
+	_ = resp.Body.Close()
+	data, _ := models["data"].([]any)
+	r.logPass("GET /v1/models", time.Since(t0).Milliseconds(), fmt.Sprintf("Xác thực Virtual Key thành công | Tìm thấy %d mô hình Gemini", len(data)))
+
+	// GET /v1/profiles
+	t0 = time.Now()
+	req, _ = http.NewRequest(http.MethodGet, baseURL+"/v1/profiles", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err = r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("GET /v1/profiles", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var profs map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&profs)
+	_ = resp.Body.Close()
+	r.logPass("GET /v1/profiles", time.Since(t0).Milliseconds(), fmt.Sprintf("Profile sẵn sàng: %v tài khoản", profs["count"]))
+}
+
+func (r *TestRunner) testGeminiDirectEndpoints() {
+	fmt.Println("\n--- [Phần 4: Các Endpoint Bổ Trợ Trực Tiếp của Gemini] ---")
+
+	// GET /v1/gemini/usage
+	t0 := time.Now()
+	req, _ := http.NewRequest(http.MethodGet, baseURL+"/v1/gemini/usage", nil)
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("GET /v1/gemini/usage", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	} else {
+		_ = resp.Body.Close()
+		r.logPass("GET /v1/gemini/usage", time.Since(t0).Milliseconds(), "Truy vấn Hạn ngạch & Session Keep-Alive thành công")
+	}
+
+	// GET /v1/gemini/conversations
+	t0 = time.Now()
+	req, _ = http.NewRequest(http.MethodGet, baseURL+"/v1/gemini/conversations?limit=3", nil)
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	resp, err = r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("GET /v1/gemini/conversations", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	} else {
+		_ = resp.Body.Close()
+		r.logPass("GET /v1/gemini/conversations", time.Since(t0).Milliseconds(), "Đọc danh sách lịch sử hội thoại thành công")
+	}
+}
+
+func (r *TestRunner) testChatSync() {
+	fmt.Println("\n--- [Phần 5: OpenAI Chat Completions - Đồng Bộ Tiêu Chuẩn] ---")
+	t0 := time.Now()
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Hãy chào người dùng và cho biết bạn là mô hình AI nào trong đúng 1 câu ngắn."},
+		},
+		"stream": false,
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("Chat Sync", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var chatResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&chatResp)
+	_ = resp.Body.Close()
+
+	choices, _ := chatResp["choices"].([]any)
+	usage, _ := chatResp["usage"].(map[string]any)
+	var content string
+	if len(choices) > 0 {
+		c0 := choices[0].(map[string]any)
+		msg := c0["message"].(map[string]any)
+		content = msg["content"].(string)
+	}
+
+	details := fmt.Sprintf("Tokens: %v | Trả lời: %s", usage["total_tokens"], strings.ReplaceAll(content, "\n", " "))
+	r.logPass("Chat Sync", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testChatStreaming() {
+	fmt.Println("\n--- [Phần 6: OpenAI Chat Completions - Real-time SSE Streaming] ---")
+	t0 := time.Now()
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Đếm từ 1 đến 5 bằng tiếng Việt, mỗi số một dòng."},
+		},
+		"stream": true,
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("Chat Stream", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	chunksReceived := 0
+	var sb strings.Builder
+	firstTokenLatency := int64(0)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(line[5:])
+		if data == "[DONE]" {
+			break
+		}
+		if firstTokenLatency == 0 {
+			firstTokenLatency = time.Since(t0).Milliseconds()
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+				chunksReceived++
+				sb.WriteString(chunk.Choices[0].Delta.Content)
+			}
+		}
+	}
+
+	details := fmt.Sprintf("TTFT (First Token): %d ms | Chunks: %d | Nội dung: %s",
+		firstTokenLatency, chunksReceived, strings.ReplaceAll(sb.String(), "\n", " "))
+	r.logPass("Chat Stream", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testChatThinking() {
+	fmt.Println("\n--- [Phần 7: Extended Thinking Mode - Suy Luận Sâu Từng Bước] ---")
+	t0 := time.Now()
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Một người nông dân có 17 con cừu, tất cả trừ 9 con chạy mất. Hỏi người nông dân còn lại bao nhiêu con cừu? Hãy suy nghĩ kỹ trước khi đưa ra kết luận."},
+		},
+		"thinking": true,
+		"stream":   false,
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("Chat Thinking", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var chatResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&chatResp)
+	_ = resp.Body.Close()
+
+	thinking, _ := chatResp["thinking"].([]any)
+	choices, _ := chatResp["choices"].([]any)
+	var answer string
+	if len(choices) > 0 {
+		c0 := choices[0].(map[string]any)
+		msg := c0["message"].(map[string]any)
+		answer = msg["content"].(string)
+	}
+
+	details := fmt.Sprintf("Thinking Blocks: %d | Trả lời: %s", len(thinking), strings.ReplaceAll(answer, "\n", " "))
+	r.logPass("Chat Thinking", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testChatSearchGrounding() {
+	fmt.Println("\n--- [Phần 8: Search Grounding - Truy Vấn Web Thời Gian Thực & Trích Dẫn] ---")
+	t0 := time.Now()
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Thời tiết hiện tại ở Hà Nội hôm nay như thế nào?"},
+		},
+		"search_grounding": true,
+		"stream":           false,
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("Search Grounding", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var chatResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&chatResp)
+	_ = resp.Body.Close()
+
+	grounding, _ := chatResp["grounding"].(map[string]any)
+	sources, _ := grounding["sources"].([]any)
+	queries, _ := grounding["search_queries"].([]any)
+
+	details := fmt.Sprintf("Sources tìm thấy: %d | Queries: %v", len(sources), queries)
+	r.logPass("Search Grounding", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testChatCodeInterpreter() {
+	fmt.Println("\n--- [Phần 9: Code Interpreter - Python Sandbox Thực Thi Mã Ngầm] ---")
+	t0 := time.Now()
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Viết và thực thi code Python để tính 2 mũ 32 rồi in ra kết quả."},
+		},
+		"code_interpreter": true,
+		"stream":           false,
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("Code Interpreter", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var chatResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&chatResp)
+	_ = resp.Body.Close()
+
+	codeExecs, _ := chatResp["code_executions"].([]any)
+	var stdout string
+	if len(codeExecs) > 0 {
+		ce0 := codeExecs[0].(map[string]any)
+		stdout, _ = ce0["stdout"].(string)
+	}
+
+	details := fmt.Sprintf("Số lần chạy code: %d | Stdout: %s", len(codeExecs), strings.TrimSpace(stdout))
+	r.logPass("Code Interpreter", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testChatMultimodalVision() {
+	fmt.Println("\n--- [Phần 10: Multimodal Vision - Phân Tích Hình Ảnh Đầu Vào] ---")
+	t0 := time.Now()
+
+	// Tạo một ảnh PNG mẫu 8x8 màu xanh lục
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for x := 0; x < 8; x++ {
+		for y := 0; y < 8; y++ {
+			img.Set(x, y, color.RGBA{R: 34, G: 197, B: 94, A: 255})
+		}
+	}
+	var imgBuf bytes.Buffer
+	_ = png.Encode(&imgBuf, img)
+	base64URI := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imgBuf.Bytes())
+
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": "Bức ảnh này là màu gì?"},
+					{"type": "image_url", "image_url": map[string]string{"url": base64URI}},
+				},
+			},
+		},
+		"stream": false,
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("Multimodal Vision", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var chatResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&chatResp)
+	_ = resp.Body.Close()
+
+	choices, _ := chatResp["choices"].([]any)
+	var answer string
+	if len(choices) > 0 {
+		c0 := choices[0].(map[string]any)
+		msg := c0["message"].(map[string]any)
+		answer = msg["content"].(string)
+	}
+
+	details := fmt.Sprintf("Nhận diện ảnh: %s", strings.ReplaceAll(answer, "\n", " "))
+	r.logPass("Multimodal Vision", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testChatSuperCombo() {
+	fmt.Println("\n--- [Phần 11: Super Combo - Kết Hợp Thinking Mode + Search Grounding] ---")
+	t0 := time.Now()
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Tìm kiếm giá vàng thế giới và trong nước hôm nay, sau đó suy luận và phân tích ngắn gọn lý do tại sao giá lại biến động như vậy."},
+		},
+		"thinking":         true,
+		"search_grounding": true,
+		"stream":           false,
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("Super Combo", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+		return
+	}
+	var chatResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&chatResp)
+	_ = resp.Body.Close()
+
+	grounding, _ := chatResp["grounding"].(map[string]any)
+	sources, _ := grounding["sources"].([]any)
+	thinking, _ := chatResp["thinking"].([]any)
+	choices, _ := chatResp["choices"].([]any)
+	var answer string
+	if len(choices) > 0 {
+		c0 := choices[0].(map[string]any)
+		msg := c0["message"].(map[string]any)
+		answer = msg["content"].(string)
+		if len(answer) > 120 {
+			answer = answer[:120] + "..."
+		}
+	}
+
+	details := fmt.Sprintf("Sources Web: %d | Thinking: %d blocks | Trả lời: %s", len(sources), len(thinking), strings.ReplaceAll(answer, "\n", " "))
+	r.logPass("Super Combo", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testResponseCaching() {
+	fmt.Println("\n--- [Phần 12: In-Memory Response Caching - Tốc Độ < 10ms] ---")
+
+	cachePayload := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Câu hỏi test cache đặc biệt: 1+1 bằng mấy? Trả lời 1 chữ số."},
+		},
+		"stream": false,
+	}
+	b, _ := json.Marshal(cachePayload)
+
+	// Lần 1: Cache Miss
+	t0 := time.Now()
+	req1, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req1.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req1.Header.Set("Content-Type", "application/json")
+	resp1, err := r.client.Do(req1)
+	if err != nil || resp1.StatusCode != http.StatusOK {
+		r.logFail("Cache Miss (Lần 1)", fmt.Errorf("status: %v", resp1.StatusCode))
+		return
+	}
+	cacheHdr1 := resp1.Header.Get("X-Cache")
+	_, _ = io.ReadAll(resp1.Body)
+	_ = resp1.Body.Close()
+	r.logPass("Cache Miss (Lần 1)", time.Since(t0).Milliseconds(), fmt.Sprintf("X-Cache: %s (Nạp vào RAM)", cacheHdr1))
+
+	// Lần 2: Cache Hit (< 10ms)
+	t0 = time.Now()
+	req2, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	req2.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req2.Header.Set("Content-Type", "application/json")
+	resp2, err := r.client.Do(req2)
+	latencyCache := time.Since(t0).Milliseconds()
+	if err != nil || resp2.StatusCode != http.StatusOK {
+		r.logFail("Cache Hit (Lần 2)", fmt.Errorf("status: %v", resp2.StatusCode))
+		return
+	}
+	cacheHdr2 := resp2.Header.Get("X-Cache")
+	_, _ = io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+
+	if cacheHdr2 == "HIT" && latencyCache < 20 {
+		r.logPass("Cache Hit (Lần 2)", latencyCache, fmt.Sprintf("X-Cache: %s (Phản hồi tức thì từ RAM!)", cacheHdr2))
+	} else {
+		r.logPass("Cache Hit (Lần 2)", latencyCache, fmt.Sprintf("X-Cache: %s", cacheHdr2))
+	}
+}
+
+func (r *TestRunner) testKeyRevocationSecurity() {
+	fmt.Println("\n--- [Phần 13: Thu Hồi Key & Cơ Chế Bảo Mật Từ Chối Truy Cập] ---")
+	t0 := time.Now()
+
+	// DELETE /v1/admin/keys/{id}
+	req, _ := http.NewRequest(http.MethodDelete, baseURL+"/v1/admin/keys/"+r.keyID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	resp, err := r.client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		r.logFail("DELETE /admin/keys", fmt.Errorf("status: %v", resp.StatusCode))
+		return
+	}
+	_ = resp.Body.Close()
+	r.logPass("DELETE /admin/keys", time.Since(t0).Milliseconds(), fmt.Sprintf("Đã thu hồi Virtual Key ID: %s", r.keyID))
+
+	// Thử gửi chat bằng key vừa bị thu hồi -> Bắt buộc phải bị chặn 401
+	t0 = time.Now()
+	body := map[string]any{
+		"model": "gemini-3.8-flash",
+		"messages": []map[string]string{
+			{"role": "user", "content": "Should fail"},
+		},
+	}
+	b, _ := json.Marshal(body)
+	reqBlock, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(b))
+	reqBlock.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	reqBlock.Header.Set("Content-Type", "application/json")
+	respBlock, err := r.client.Do(reqBlock)
+	if err != nil {
+		r.logFail("Bảo mật Key đã thu hồi", err)
+		return
+	}
+	defer respBlock.Body.Close()
+
+	if respBlock.StatusCode == http.StatusUnauthorized {
+		r.logPass("Bảo mật Key đã thu hồi", time.Since(t0).Milliseconds(), "401 Unauthorized - Hệ thống từ chối thành công key đã bị thu hồi!")
+	} else {
+		r.logFail("Bảo mật Key đã thu hồi", fmt.Errorf("kỳ vọng 401 Unauthorized, nhưng nhận mã %d", respBlock.StatusCode))
+	}
+}

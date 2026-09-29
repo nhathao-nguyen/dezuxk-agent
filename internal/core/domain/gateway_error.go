@@ -52,9 +52,9 @@ const (
 	OriginHistoryRename   = "PCck7e"
 	OriginHistoryDelete   = "VxUbXb"
 	OriginHistoryBranch   = "wEb32b"
-	OriginPinholeAdd       = "kF8z7b"
-	OriginPinholeConnect   = "jE2m9c"
-	OriginPinholeDelete    = "dL5p2"
+	OriginPinholeAdd      = "kF8z7b"
+	OriginPinholeConnect  = "jE2m9c"
+	OriginPinholeDelete   = "dL5p2"
 	OriginHandshake       = "handshake"
 	FlowCreditSpecVersion = "2026-09-23"
 )

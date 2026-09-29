@@ -176,11 +176,11 @@ func TestWebhookAlertDispatcher_Generic(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.WebhookAlertConfig{
-		Enabled:         boolPtr(true),
-		Provider:        "generic",
-		URL:             server.URL,
-		MaxRetries:      1,
-		RetryBackoff:    10 * time.Millisecond,
+		Enabled:      boolPtr(true),
+		Provider:     "generic",
+		URL:          server.URL,
+		MaxRetries:   1,
+		RetryBackoff: 10 * time.Millisecond,
 	}
 
 	d := NewWebhookAlertDispatcher(cfg)

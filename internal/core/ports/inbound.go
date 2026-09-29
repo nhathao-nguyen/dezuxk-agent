@@ -22,47 +22,6 @@ type ChatUseCase interface {
 	) (*domain.OpenAIChatResponse, error)
 }
 
-// VideoUseCase giao diện xử lý các tác vụ Veo Video trên Google Flow
-type VideoUseCase interface {
-	GenerateVideo(
-		ctx context.Context,
-		req *domain.VideoGenerationRequest,
-		onProgress func(event domain.VideoProgressEvent),
-	) (*domain.VideoProgressEvent, error)
-
-	ExtendVideo(
-		ctx context.Context,
-		req *domain.VideoExtensionRequest,
-	) (*domain.VideoProgressEvent, error)
-
-	Upsample4K(
-		ctx context.Context,
-		req *domain.Upsample4KRequest,
-	) (*domain.VideoProgressEvent, error)
-}
-
-// MediaUseCase tạo ảnh và video sau khi request đã qua hợp đồng nội bộ.
-type MediaUseCase interface {
-	GenerateImage(ctx context.Context, req *domain.ImageGenerationRequest) (*domain.ImageGenerationResult, error)
-	GenerateVideo(ctx context.Context, req *domain.VideoGenerationRequest) (*domain.VideoGenerationResult, error)
-}
-
-// FlowUseCase cung cấp toàn bộ các năng lực sáng tạo đa phương tiện của Google Flow
-type FlowUseCase interface {
-	MediaUseCase
-	ExtendVideo(ctx context.Context, req *domain.VideoExtensionRequest) (*domain.VideoGenerationResult, error)
-	UpsampleVideo4K(ctx context.Context, req *domain.Upsample4KRequest) (*domain.Upsample4KResponse, error)
-	GenerateAudio(ctx context.Context, req domain.FlowMusicRequest) (*domain.FlowMusicResponse, error)
-	ListVoicePersonas(ctx context.Context) ([]domain.VoicePersona, error)
-	ListProjects(ctx context.Context) ([]domain.FlowProject, error)
-	CreateProject(ctx context.Context, title string) (string, error)
-	MoveProjectToTrash(ctx context.Context, projectID string) error
-	ListTrash(ctx context.Context) ([]domain.FlowTrashProject, error)
-	RestoreProject(ctx context.Context, projectID string) error
-	DeleteProjectPermanently(ctx context.Context, projectID string) error
-	ListMediaGallery(ctx context.Context, kind domain.MediaKind) ([]*domain.MediaAsset, error)
-}
-
 // ModelUseCase giao diện tra cứu danh mục mô hình
 type ModelUseCase interface {
 	ListModels(ctx context.Context) []domain.ModelDescriptor
@@ -111,11 +70,6 @@ type GeminiFeedbackUseCase interface {
 	SendFeedback(ctx context.Context, req *domain.FeedbackRequest) error
 }
 
-// FlowCreditUseCase giao diện đọc số dư Flow
-type FlowCreditUseCase interface {
-	GetCredits(ctx context.Context) (accountID string, balance domain.FlowCreditBalance, err error)
-}
-
 // ProfileUseCase giao diện quản lý profile cục bộ
 type ProfileUseCase interface {
 	ListActiveProfiles() []*domain.Profile
@@ -126,7 +80,6 @@ type ProfileUseCase interface {
 	SyncCookiesFromCDP(ctx context.Context, profileID string) (*domain.ManagedAccount, error)
 	IngestLiveCookies(ctx context.Context, profileID, email string, cookies map[string]string, userAgent string) (*domain.ManagedAccount, error)
 	IngestLiveCookiesWithProxy(ctx context.Context, profileID, email string, cookies map[string]string, userAgent string, proxy string) (*domain.ManagedAccount, error)
-	ReadProfileCredits(ctx context.Context, profileID string) (int, error)
 	SetProfileQuota(profileID string, quota string)
 }
 
@@ -138,4 +91,3 @@ type KeyUseCase interface {
 	ValidateKey(ctx context.Context, rawKey string, targetModel string) (*domain.VirtualKey, error)
 	ConsumeQuota(ctx context.Context, keyID string) (int, error)
 }
-

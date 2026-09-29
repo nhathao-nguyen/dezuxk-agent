@@ -31,7 +31,7 @@ type ConversationTree struct {
 
 // AccountTierInfo biểu diễn thông tin hạn mức và cấp độ tài khoản từ RPC I4z33b
 type AccountTierInfo struct {
-	TierCode          string   `json:"tier_code"`          // FREE_USER, GOOGLE_ONE_AI_PREMIUM, WORKSPACE_ENTERPRISE
+	TierCode          string   `json:"tier_code"`           // FREE_USER, GOOGLE_ONE_AI_PREMIUM, WORKSPACE_ENTERPRISE
 	ContextWindowSize int64    `json:"context_window_size"` // e.g. 1000000
 	Capabilities      []string `json:"capabilities"`
 	RawPayload        string   `json:"raw_payload,omitempty"`

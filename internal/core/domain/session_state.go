@@ -25,9 +25,6 @@ type serviceGate struct {
 }
 
 func (a *ManagedAccount) gatePtr(service ServiceKind) *serviceGate {
-	if service == ServiceFlow {
-		return &a.flowGate
-	}
 	return &a.geminiGate
 }
 

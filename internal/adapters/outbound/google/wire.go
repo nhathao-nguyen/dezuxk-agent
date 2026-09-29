@@ -51,28 +51,3 @@ func (w *WireAdapter) DematerializeChat(ctx context.Context, resp *http.Response
 	}
 	return ReadGeminiStream(ctx, resp.Body, metrics, onDelta)
 }
-
-func (w *WireAdapter) MaterializeFlowMedia(account *domain.ManagedAccount, input domain.FlowMediaInput) (domain.OutboundAttempt, error) {
-	if account == nil || account.GetAtToken(domain.ServiceFlow) == "" {
-		return domain.OutboundAttempt{}, domain.CodecExpired(domain.OriginStreamChat, domain.ServiceFlow, "phiên chưa có bí mật dẫn xuất")
-	}
-	body, err := w.marshaller.EncodeStreamGenerate(domain.BuildFlowMediaInner(input), account.GetAtToken(domain.ServiceFlow))
-	if err != nil {
-		return domain.OutboundAttempt{}, domain.CodecRejected(domain.OriginStreamChat, domain.ServiceFlow, "không đóng gói được yêu cầu media")
-	}
-	rpc, err := w.rpcs.MustFind("StreamChat")
-	if err != nil {
-		return domain.OutboundAttempt{}, domain.CodecRejected(domain.OriginStreamChat, domain.ServiceFlow, "không có đường dẫn media")
-	}
-	return domain.OutboundAttempt{Path: rpc.PathPattern, Body: body, ContentType: formContentType, TargetHost: rpc.TargetHost}, nil
-}
-
-func (w *WireAdapter) DematerializeFlowMedia(resp *http.Response, metrics *domain.ContractMetrics) (domain.MediaExtract, error) {
-	if resp == nil || resp.Body == nil {
-		return domain.MediaExtract{}, domain.CodecRejected(domain.OriginStreamChat, domain.ServiceFlow, "không có phản hồi media")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return domain.MediaExtract{}, StatusError(resp, domain.OriginStreamChat, false, domain.ServiceFlow)
-	}
-	return ReadFlowMedia(resp.Body, metrics)
-}
