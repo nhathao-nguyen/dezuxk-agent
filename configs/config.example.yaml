@@ -36,6 +36,18 @@ keep_alive:
 security:
   master_key: "" # Để trống để đọc từ biến môi trường DEZUXK_MASTER_KEY
 
+# Hệ thống cảnh báo tự động qua Webhook (Telegram / Discord / Slack / Generic)
+alerts:
+  webhook:
+    enabled: false
+    provider: "telegram" # "telegram" | "discord" | "slack" | "generic"
+    url: ""
+    token: ""
+    chat_id: ""
+    message_template: "[DEZUXK ALERT] {error_type} | Tài khoản: {account_id} | Chi tiết: {reason} | Hướng dẫn: Vui lòng mở Chrome để đồng bộ lại CDP qua /v1/profiles/{account_id}/launch hoặc /v1/profiles/{account_id}/sync"
+    max_retries: 3
+    retry_backoff: 1s
+
 # Công tắc operation. false thì facade trả "operation đang tắt" và không gọi máy chủ gốc.
 # Khóa thiếu nghĩa là bật.
 operations:
