@@ -226,8 +226,16 @@ func (c *ResponseCache) Stats() CacheStats {
 }
 
 // GenerateChatCacheKey tính toán khóa băm SHA-256 từ các tham số hội thoại
-// Thuật toán: model + messages + temperature + system_prompt
-func GenerateChatCacheKey(model string, messages []domain.OpenAIMessage, temperature float64, systemPrompt string) string {
+// Thuật toán: model + messages + temperature + system_prompt + thinking + grounding + code_interpreter
+func GenerateChatCacheKey(
+	model string,
+	messages []domain.OpenAIMessage,
+	temperature float64,
+	systemPrompt string,
+	thinking bool,
+	grounding bool,
+	codeInterpreter bool,
+) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(model))
 	b.WriteString("|")
@@ -235,6 +243,7 @@ func GenerateChatCacheKey(model string, messages []domain.OpenAIMessage, tempera
 	b.WriteString("|")
 	b.WriteString(fmt.Sprintf("%.4f", temperature))
 	b.WriteString("|")
+	b.WriteString(fmt.Sprintf("th:%v|gr:%v|ci:%v|", thinking, grounding, codeInterpreter))
 
 	for _, m := range messages {
 		b.WriteString(strings.TrimSpace(m.Role))

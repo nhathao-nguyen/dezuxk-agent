@@ -44,6 +44,7 @@ type GoogleTransportAdapter struct {
 
 	proxyMu      sync.RWMutex
 	proxyClients map[string]*http.Client
+	proxyAccess  map[string]time.Time
 }
 
 func NewGoogleTransportAdapter(cfg *config.Config) ports.UpstreamGoogleTransport {
@@ -82,6 +83,7 @@ func NewGoogleTransportAdapter(cfg *config.Config) ports.UpstreamGoogleTransport
 		shortTimeout:  short,
 		streamTimeout: stream,
 		proxyClients:  make(map[string]*http.Client),
+		proxyAccess:   make(map[string]time.Time),
 	}
 }
 
@@ -210,13 +212,41 @@ func (a *GoogleTransportAdapter) getClient(account *domain.ManagedAccount) *http
 	c, ok := a.proxyClients[proxyStr]
 	a.proxyMu.RUnlock()
 	if ok {
+		a.proxyMu.Lock()
+		a.proxyAccess[proxyStr] = time.Now()
+		a.proxyMu.Unlock()
 		return c
 	}
 
 	a.proxyMu.Lock()
 	defer a.proxyMu.Unlock()
 	if c, ok := a.proxyClients[proxyStr]; ok {
+		a.proxyAccess[proxyStr] = time.Now()
 		return c
+	}
+
+	// Cơ chế giới hạn LRU tối đa 50 proxy clients: đóng idle connections khi loại bỏ
+	const maxCachedProxies = 50
+	if len(a.proxyClients) >= maxCachedProxies {
+		var oldestKey string
+		var oldestTime time.Time
+		first := true
+		for k, t := range a.proxyAccess {
+			if first || t.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = t
+				first = false
+			}
+		}
+		if oldestKey != "" {
+			if oldClient, exists := a.proxyClients[oldestKey]; exists {
+				if tr, ok := oldClient.Transport.(*http.Transport); ok {
+					tr.CloseIdleConnections()
+				}
+				delete(a.proxyClients, oldestKey)
+				delete(a.proxyAccess, oldestKey)
+			}
+		}
 	}
 
 	proxyURL, err := url.Parse(proxyStr)
@@ -248,5 +278,11 @@ func (a *GoogleTransportAdapter) getClient(account *domain.ManagedAccount) *http
 		Timeout:   a.streamTimeout,
 	}
 	a.proxyClients[proxyStr] = client
+	a.proxyAccess[proxyStr] = time.Now()
 	return client
+}
+
+// ClientForAccount trả về http.Client được cấu hình proxy tương ứng với tài khoản
+func (a *GoogleTransportAdapter) ClientForAccount(account *domain.ManagedAccount) *http.Client {
+	return a.getClient(account)
 }

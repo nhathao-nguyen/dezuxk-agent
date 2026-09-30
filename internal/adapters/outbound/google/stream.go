@@ -14,10 +14,143 @@ import (
 )
 
 var (
-	digitOnlyRegex        = regexp.MustCompile(`^\d+$`)
-	imagePlaceholderRegex = regexp.MustCompile(`https?://googleusercontent\.com/image_generation_content/[a-zA-Z0-9_]+`)
-	cardContentRegex      = regexp.MustCompile(`https?://googleusercontent\.com/card_content/[a-zA-Z0-9_]+`)
+	digitOnlyRegex            = regexp.MustCompile(`^\d+$`)
+	imagePlaceholderRegex     = regexp.MustCompile(`https?://googleusercontent\.com/image_generation_content/[a-zA-Z0-9_]+`)
+	cardContentRegex          = regexp.MustCompile(`https?://googleusercontent\.com/card_content/[a-zA-Z0-9_]+`)
+	shoppingContentRegex      = regexp.MustCompile(`https?://googleusercontent\.com/shopping_content/[a-zA-Z0-9_\-]+`)
+	markdownShoppingLinkRegex = regexp.MustCompile(`\[([^\]]+)\]\(https?://googleusercontent\.com/shopping_content/[^)]+\)`)
+	youtubeContentRegex       = regexp.MustCompile(`https?://googleusercontent\.com/youtube_content/[a-zA-Z0-9_]+`)
+	immersiveEntryChipRegex   = regexp.MustCompile(`https?://googleusercontent\.com/immersive_entry_chip/[a-zA-Z0-9_]+`)
+	imageAgentTagRegex        = regexp.MustCompile(`https?://googleusercontent\.com/image_agent_tag_[a-zA-Z0-9_]+`)
+	lmdxImageRegex            = regexp.MustCompile(`https?://googleusercontent\.com/lmdx_image/[a-zA-Z0-9_]+`)
+	productComparisonRegex    = regexp.MustCompile(`(?s)<ProductComparisonTable(?:\s+title="([^"]*)")?[^>]*>(.*?)</ProductComparisonTable>`)
+	xmlImageTagRegex          = regexp.MustCompile(`<Image\s+[^>]*src="([^"]+)"[^>]*\/?>`)
+	entityCardRegex           = regexp.MustCompile(`(?s)<EntityCard\b(?:[^>]*?/>|[^>]*?>.*?</EntityCard>)`)
+	entityCardTitleRegex      = regexp.MustCompile(`title="([^"]+)"`)
 )
+
+// FormatEntityCard chuyển đổi thẻ <EntityCard .../> sang format trích dẫn sản phẩm Markdown
+func FormatEntityCard(text string) string {
+	if !strings.Contains(text, "<EntityCard") {
+		return text
+	}
+	return entityCardRegex.ReplaceAllStringFunc(text, func(m string) string {
+		if sub := entityCardTitleRegex.FindStringSubmatch(m); len(sub) > 1 {
+			title := strings.TrimSpace(sub[1])
+			if title != "" {
+				return "> 📦 **" + title + "**\n\n"
+			}
+		}
+		return ""
+	})
+}
+
+// FormatProductComparisonTable chuyển đổi thẻ <ProductComparisonTable> sang bảng Markdown GFM
+func FormatProductComparisonTable(text string) string {
+	if !strings.Contains(text, "<ProductComparisonTable") {
+		return text
+	}
+	return productComparisonRegex.ReplaceAllStringFunc(text, func(m string) string {
+		submatches := productComparisonRegex.FindStringSubmatch(m)
+		if len(submatches) < 3 {
+			return m
+		}
+		title := strings.TrimSpace(submatches[1])
+		rawJSON := strings.TrimSpace(submatches[2])
+
+		var products []map[string]interface{}
+		if err := json.Unmarshal([]byte(rawJSON), &products); err != nil || len(products) == 0 {
+			return m
+		}
+
+		attrOrder := extractJSONKeysInOrder(rawJSON)
+
+		productNames := make([]string, len(products))
+		for i, p := range products {
+			name := fmt.Sprintf("Sản phẩm %d", i+1)
+			if dn, ok := p["display_name"].(string); ok && dn != "" {
+				name = dn
+			} else if n, ok := p["name"].(string); ok && n != "" {
+				name = n
+			} else if t, ok := p["title"].(string); ok && t != "" {
+				name = t
+			}
+			productNames[i] = name
+		}
+
+		var sb strings.Builder
+		if title != "" {
+			sb.WriteString("### " + title + "\n\n")
+		}
+
+		// Header
+		sb.WriteString("| Thông số |")
+		for _, pn := range productNames {
+			sb.WriteString(" " + pn + " |")
+		}
+		sb.WriteString("\n| :--- |")
+		for range productNames {
+			sb.WriteString(" :--- |")
+		}
+		sb.WriteString("\n")
+
+		// Rows
+		for _, attr := range attrOrder {
+			if attr == "display_name" || attr == "product_id" || attr == "name" || attr == "title" {
+				continue
+			}
+			sb.WriteString("| **" + attr + "** |")
+			for _, p := range products {
+				valStr := ""
+				if val, exists := p[attr]; exists && val != nil {
+					valStr = fmt.Sprintf("%v", val)
+					valStr = strings.ReplaceAll(valStr, "\n", " ")
+					valStr = strings.ReplaceAll(valStr, "|", "\\|")
+				}
+				sb.WriteString(" " + valStr + " |")
+			}
+			sb.WriteString("\n")
+		}
+
+		return strings.TrimSpace(sb.String())
+	})
+}
+
+func extractJSONKeysInOrder(rawJSON string) []string {
+	re := regexp.MustCompile(`"([^"\\]*(?:\\.[^"\\]*)*)"\s*:`)
+	matches := re.FindAllStringSubmatch(rawJSON, -1)
+	seen := make(map[string]bool)
+	var keys []string
+	for _, m := range matches {
+		if len(m) > 1 {
+			k := m[1]
+			if !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+		}
+	}
+	return keys
+}
+
+// CleanInternalPlaceholders dọn dẹp các placeholder nội bộ và chuẩn hóa bảng
+func CleanInternalPlaceholders(text string) string {
+	text = FormatProductComparisonTable(text)
+	text = FormatEntityCard(text)
+	text = markdownShoppingLinkRegex.ReplaceAllString(text, "**$1**")
+	text = shoppingContentRegex.ReplaceAllString(text, "")
+	text = youtubeContentRegex.ReplaceAllString(text, "")
+	text = cardContentRegex.ReplaceAllString(text, "")
+	text = imageAgentTagRegex.ReplaceAllString(text, "")
+	text = lmdxImageRegex.ReplaceAllString(text, "")
+	text = immersiveEntryChipRegex.ReplaceAllString(text, "")
+	text = xmlImageTagRegex.ReplaceAllString(text, "")
+
+	emptyLinesRegex := regexp.MustCompile(`\n{3,}`)
+	text = emptyLinesRegex.ReplaceAllString(text, "\n\n")
+
+	return strings.TrimSpace(text)
+}
 
 type StreamHandler struct {
 	bufferSize int
@@ -66,17 +199,18 @@ func (h *StreamHandler) ProcessWrbFrStream(
 				}
 
 				if currentText != "" && currentText != lastFullText {
-					var delta string
-					if strings.HasPrefix(currentText, lastFullText) {
-						delta = currentText[len(lastFullText):]
-					} else {
-						delta = currentText
+					effectiveText := currentText
+					if strings.Contains(effectiveText, "<ProductComparisonTable") && !strings.Contains(effectiveText, "</ProductComparisonTable>") {
+						effectiveText = effectiveText[:strings.Index(effectiveText, "<ProductComparisonTable")]
 					}
-					lastFullText = currentText
+					if effectiveText != "" && effectiveText != lastFullText {
+						delta := ComputeDelta(effectiveText, lastFullText)
+						lastFullText = effectiveText
 
-					if delta != "" {
-						if err := onDelta(delta, conversationID); err != nil {
-							return err
+						if delta != "" {
+							if err := onDelta(delta, conversationID); err != nil {
+								return err
+							}
 						}
 					}
 				}
@@ -105,6 +239,7 @@ type StreamChunkMeta struct {
 	Grounding       *domain.GroundingMetadata
 	CodeExecutions  []domain.CodeExecution
 	MediaURLs       []string
+	Drafts          []string
 }
 
 func parseEnvelopeChunk(rawLine string) (text string, convID string) {
@@ -152,6 +287,25 @@ func ParseEnvelopeChunk(rawLine string) StreamChunkMeta {
 			// inner[4]: mảng candidates [ [rc_id, [text], ..., [thinking]] ]
 			if len(inner) > 4 && inner[4] != nil {
 				if candidates, ok := inner[4].([]interface{}); ok && len(candidates) > 0 {
+					for _, candItem := range candidates {
+						if candArr, ok := candItem.([]interface{}); ok && len(candArr) > 1 && candArr[1] != nil {
+							if tp, ok := candArr[1].([]interface{}); ok && len(tp) > 0 {
+								var candParts []string
+								for _, p := range tp {
+									if s, ok := p.(string); ok && s != "" {
+										candParts = append(candParts, s)
+									}
+								}
+								if len(candParts) > 0 {
+									dText := CleanInternalPlaceholders(strings.Join(candParts, "\n\n"))
+									if dText != "" {
+										meta.Drafts = append(meta.Drafts, dText)
+									}
+								}
+							}
+						}
+					}
+
 					if candidate, ok := candidates[0].([]interface{}); ok {
 						// candidate[0]: choice id "rc_..."
 						if len(candidate) > 0 {
@@ -160,11 +314,17 @@ func ParseEnvelopeChunk(rawLine string) StreamChunkMeta {
 							}
 						}
 
-						// candidate[1][0]: text parts
+						// candidate[1]: text parts
 						if len(candidate) > 1 && candidate[1] != nil {
 							if textParts, ok := candidate[1].([]interface{}); ok && len(textParts) > 0 {
-								if partStr, ok := textParts[0].(string); ok {
-									meta.Text = partStr
+								var parts []string
+								for _, p := range textParts {
+									if s, ok := p.(string); ok && s != "" {
+										parts = append(parts, s)
+									}
+								}
+								if len(parts) > 0 {
+									meta.Text = strings.Join(parts, "\n\n")
 								}
 							}
 						}
@@ -232,7 +392,7 @@ func ParseEnvelopeChunk(rawLine string) StreamChunkMeta {
 						if cardContentRegex.MatchString(meta.Text) {
 							meta.Text = cardContentRegex.ReplaceAllString(meta.Text, "")
 						}
-						meta.Text = strings.TrimSpace(meta.Text)
+						meta.Text = CleanInternalPlaceholders(meta.Text)
 					}
 				}
 			}
@@ -436,11 +596,8 @@ func walkMedia(v any, urls *[]string) {
 	}
 	switch val := v.(type) {
 	case string:
-		if strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://") {
-			lower := strings.ToLower(val)
-			if strings.Contains(lower, "googleusercontent.com") || strings.Contains(lower, "storage.googleapis.com") {
-				*urls = append(*urls, val)
-			}
+		if isAllowedMediaURL(val) {
+			*urls = append(*urls, val)
 		}
 	case []any:
 		for _, item := range val {
@@ -715,6 +872,9 @@ func ReadGeminiStream(ctx context.Context, body io.Reader, metrics *domain.Contr
 				if len(meta.CodeExecutions) > 0 {
 					reply.CodeExecutions = append(reply.CodeExecutions, meta.CodeExecutions...)
 				}
+				if len(meta.Drafts) > 0 {
+					reply.Drafts = meta.Drafts
+				}
 
 				mapped := meta.Text != "" || meta.ConversationID != "" || meta.ResponseID != "" || meta.ChoiceID != "" ||
 					meta.ThinkingContent != "" || len(meta.ThinkingBlocks) > 0 || meta.Grounding != nil ||
@@ -723,16 +883,20 @@ func ReadGeminiStream(ctx context.Context, body io.Reader, metrics *domain.Contr
 					reply.Unmapped++
 				}
 				if meta.Text != "" && meta.Text != lastFullText {
-					var delta string
-					if strings.HasPrefix(meta.Text, lastFullText) {
-						delta = meta.Text[len(lastFullText):]
-					} else {
-						delta = meta.Text
+					effectiveText := meta.Text
+					if strings.Contains(effectiveText, "<ProductComparisonTable") && !strings.Contains(effectiveText, "</ProductComparisonTable>") {
+						effectiveText = effectiveText[:strings.Index(effectiveText, "<ProductComparisonTable")]
 					}
-					lastFullText = meta.Text
-					if delta != "" {
-						if callErr := emit(delta, reply.ConversationID); callErr != nil {
-							return reply, callErr
+					if strings.Contains(effectiveText, "<EntityCard") && !strings.Contains(effectiveText, "/>") && !strings.Contains(effectiveText, "</EntityCard>") {
+						effectiveText = effectiveText[:strings.Index(effectiveText, "<EntityCard")]
+					}
+					if effectiveText != "" && effectiveText != lastFullText {
+						delta := ComputeDelta(effectiveText, lastFullText)
+						lastFullText = effectiveText
+						if delta != "" {
+							if callErr := emit(delta, reply.ConversationID); callErr != nil {
+								return reply, callErr
+							}
 						}
 					}
 				}
@@ -764,9 +928,41 @@ func ReadGeminiStream(ctx context.Context, body io.Reader, metrics *domain.Contr
 		}
 	}
 	metrics.AddUnmapped(reply.Unmapped)
-	if strings.TrimSpace(reply.Text) == "" && len(reply.MediaURLs) == 0 {
+	if lastFullText != "" {
+		reply.Text = CleanInternalPlaceholders(lastFullText)
+	}
+	if strings.TrimSpace(reply.Text) == "" && len(reply.MediaURLs) == 0 && len(reply.ThinkingBlocks) == 0 && len(reply.CodeExecutions) == 0 {
 		metrics.AddSchema()
 		return reply, domain.CodecSchema(domain.OriginStreamGenerate, domain.ServiceGemini, "phản hồi chat không đúng hợp đồng")
 	}
 	return reply, nil
+}
+
+// ComputeDelta tính phần chênh lệch delta an toàn giữa chuỗi mới và chuỗi trước đó
+// Chống lặp toàn bộ văn bản khi có ảnh Markdown hoặc trích dẫn Grounding chèn vào giữa
+func ComputeDelta(currentText, lastText string) string {
+	if lastText == "" {
+		return currentText
+	}
+	if strings.HasPrefix(currentText, lastText) {
+		return currentText[len(lastText):]
+	}
+	// Nếu currentText chứa toàn bộ lastText (ví dụ placeholder được thay thế bằng URL)
+	if idx := strings.Index(currentText, lastText); idx >= 0 {
+		return currentText[idx+len(lastText):]
+	}
+	// Tìm tiền tố chung dài nhất (Longest Common Prefix)
+	commonLen := 0
+	minLen := len(currentText)
+	if len(lastText) < minLen {
+		minLen = len(lastText)
+	}
+	for commonLen < minLen && currentText[commonLen] == lastText[commonLen] {
+		commonLen++
+	}
+	if commonLen > 0 {
+		return currentText[commonLen:]
+	}
+	// Nếu hoàn toàn không khớp và đã từng phát text trước đó, không phát lại từ đầu
+	return ""
 }

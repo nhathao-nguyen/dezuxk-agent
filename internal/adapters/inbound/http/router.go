@@ -203,14 +203,17 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			v1.Post("/chat/completions", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleChatCompletions))
 		}
 
-		// Profile Management (Quản lý Profile cục bộ)
+		// Profile Management (Quản lý Profile cục bộ - Yêu cầu quyền Quản trị viên)
 		if profileHandler != nil {
-			v1.Get("/profiles", profileHandler.HandleListProfiles)
-			v1.Post("/profiles", profileHandler.HandleCreateProfile)
-			v1.Post("/profiles/{id}/launch", profileHandler.HandleLaunchChrome)
-			v1.Post("/profiles/{id}/sync", profileHandler.HandleSyncCDP)
-			v1.Post("/profiles/{id}/ingest", profileHandler.HandleIngestCookies)
-			v1.Put("/profiles/{id}/proxy", profileHandler.HandleSetProxy)
+			v1.Route("/profiles", func(prof chi.Router) {
+				prof.Use(RequireAdmin)
+				prof.Get("/", profileHandler.HandleListProfiles)
+				prof.Post("/", profileHandler.HandleCreateProfile)
+				prof.Post("/{id}/launch", profileHandler.HandleLaunchChrome)
+				prof.Post("/{id}/sync", profileHandler.HandleSyncCDP)
+				prof.Post("/{id}/ingest", profileHandler.HandleIngestCookies)
+				prof.Put("/{id}/proxy", profileHandler.HandleSetProxy)
+			})
 		}
 
 		// Gemini History & Advanced Endpoints (Lịch sử chat, Quota, Canvas, Upload, Feedback)

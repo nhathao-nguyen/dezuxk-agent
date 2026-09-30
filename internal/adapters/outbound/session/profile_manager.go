@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,20 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+var validProfileIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// ValidateProfileID kiểm tra tính hợp lệ của profile ID và phòng chống tấn công Path Traversal
+func ValidateProfileID(profileID string) error {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return fmt.Errorf("tên profile không được để trống")
+	}
+	if !validProfileIDRegex.MatchString(profileID) || strings.Contains(profileID, "..") || strings.ContainsAny(profileID, "/\\") {
+		return fmt.Errorf("tên profile không hợp lệ: chỉ chấp nhận chữ cái, số, gạch dưới và gạch nối")
+	}
+	return nil
+}
 
 type ProfileManager struct {
 	mu            sync.RWMutex
@@ -42,6 +57,7 @@ type StoredProfileSession struct {
 	GeminiSNlM0e     string            `json:"gemini_sn_token,omitempty"`
 	UserAgent        string            `json:"user_agent"`
 	GeminiQuota      string            `json:"gemini_quota,omitempty"`
+	Tier             int               `json:"tier,omitempty"`
 	UpdatedAt        time.Time         `json:"updated_at"`
 }
 
@@ -52,8 +68,12 @@ func NewProfileManager(
 	ext ports.TokenExtractor,
 	v ...*Vault,
 ) (*ProfileManager, error) {
-	if err := os.MkdirAll(cfg.Profiles.BaseDir, 0755); err != nil {
-		return nil, fmt.Errorf("không thể tạo thư mục profiles tại %s: %w", cfg.Profiles.BaseDir, err)
+	absBaseDir, err := filepath.Abs(cfg.Profiles.BaseDir)
+	if err != nil {
+		absBaseDir = cfg.Profiles.BaseDir
+	}
+	if err := os.MkdirAll(absBaseDir, 0755); err != nil {
+		return nil, fmt.Errorf("không thể tạo thư mục profiles tại %s: %w", absBaseDir, err)
 	}
 
 	var vault *Vault
@@ -64,7 +84,7 @@ func NewProfileManager(
 	}
 
 	pm := &ProfileManager{
-		baseDir:       cfg.Profiles.BaseDir,
+		baseDir:       absBaseDir,
 		chromeBin:     resolveChromeBinary(cfg.Profiles.ChromeBinary),
 		cdpPortStart:  cfg.Profiles.CDPPortStart,
 		profiles:      make(map[string]*domain.Profile),
@@ -148,12 +168,31 @@ func (pm *ProfileManager) ScanAndDiscover(ctx context.Context) ([]*domain.Profil
 					}
 				}
 
+				// Tự động nâng cấp mã hóa Vault AES-256-GCM nếu file session trên đĩa còn lưu cookie dạng plaintext
+				if sess.EncryptedCookies == "" && len(sess.Cookies) > 0 && pm.vault != nil {
+					if rawBytes, err := json.Marshal(sess.Cookies); err == nil {
+						if enc, err := pm.vault.Encrypt(rawBytes); err == nil {
+							sess.EncryptedCookies = enc
+							sess.Cookies = nil // Loại bỏ cookie plaintext khỏi đĩa
+							sess.UpdatedAt = time.Now()
+							if updatedData, err := json.MarshalIndent(sess, "", "  "); err == nil {
+								_ = os.WriteFile(sessionPath, updatedData, 0600)
+								log.Printf("[Profile %s] Đã tự động nâng cấp mã hóa Vault AES-256-GCM cho session.json trên đĩa", profileID)
+							}
+						}
+					}
+				}
+
 				if len(cookies) > 0 {
 					prof.Proxy = sess.Proxy
 					jar := domain.NewCookieJar(cookies)
 					hasGemini := jar.HasKey("__Secure-1PSID") && jar.HasKey("__Secure-1PSIDTS")
 
 					if hasGemini {
+						tier := sess.Tier
+						if tier == 0 {
+							tier = 1
+						}
 						acc := &domain.ManagedAccount{
 							ID:           profileID,
 							Email:        sess.Email,
@@ -161,6 +200,7 @@ func (pm *ProfileManager) ScanAndDiscover(ctx context.Context) ([]*domain.Profil
 							Jar:          jar,
 							GeminiSNlM0e: sess.GeminiSNlM0e,
 							UserAgent:    sess.UserAgent,
+							Tier:         tier,
 							IsHealthy:    true,
 							LastRefresh:  time.Now(),
 						}
@@ -194,13 +234,12 @@ func (pm *ProfileManager) CreateProfile(profileID string) (*domain.Profile, erro
 
 // CreateProfileWithProxy khởi tạo profile với tùy chọn Proxy mạng
 func (pm *ProfileManager) CreateProfileWithProxy(profileID string, proxy string) (*domain.Profile, error) {
+	if err := ValidateProfileID(profileID); err != nil {
+		return nil, err
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-
-	profileID = strings.TrimSpace(profileID)
-	if profileID == "" {
-		return nil, fmt.Errorf("tên profile không được để trống")
-	}
 
 	if p, exists := pm.profiles[profileID]; exists {
 		if proxy != "" {
@@ -229,6 +268,10 @@ func (pm *ProfileManager) CreateProfileWithProxy(profileID string, proxy string)
 
 // SetProfileProxy cập nhật Proxy cho một Profile cụ thể
 func (pm *ProfileManager) SetProfileProxy(profileID string, proxy string) error {
+	if err := ValidateProfileID(profileID); err != nil {
+		return err
+	}
+
 	pm.mu.Lock()
 	prof, ok := pm.profiles[profileID]
 	if !ok {
@@ -261,6 +304,10 @@ func (pm *ProfileManager) SetProfileProxy(profileID string, proxy string) error 
 
 // LaunchChromeForProfile mở trình duyệt Chrome cho Profile này với cổng CDP riêng
 func (pm *ProfileManager) LaunchChromeForProfile(profileID string) error {
+	if err := ValidateProfileID(profileID); err != nil {
+		return err
+	}
+
 	pm.mu.RLock()
 	prof, ok := pm.profiles[profileID]
 	pm.mu.RUnlock()
@@ -270,15 +317,19 @@ func (pm *ProfileManager) LaunchChromeForProfile(profileID string) error {
 	}
 
 	userDataDir := prof.Dir
+	if absDir, err := filepath.Abs(userDataDir); err == nil {
+		userDataDir = absDir
+	}
 	cdpPort := prof.CDPPort
 
 	args := []string{
 		fmt.Sprintf("--user-data-dir=%s", userDataDir),
 		fmt.Sprintf("--remote-debugging-port=%d", cdpPort),
+		"--remote-allow-origins=*",
+		"--new-window",
 		"--no-first-run",
 		"--no-default-browser-check",
-		"--disable-background-networking",
-		"--disable-features=TranslateUI",
+		"--disable-blink-features=AutomationControlled",
 	}
 
 	if prof.Proxy != "" {
@@ -298,6 +349,10 @@ func (pm *ProfileManager) LaunchChromeForProfile(profileID string) error {
 
 // SyncCookiesFromCDP kết nối vào Chrome qua CDP WebSocket và trích xuất cookie trực tiếp từ RAM trình duyệt
 func (pm *ProfileManager) SyncCookiesFromCDP(ctx context.Context, profileID string) (*domain.ManagedAccount, error) {
+	if err := ValidateProfileID(profileID); err != nil {
+		return nil, err
+	}
+
 	pm.mu.RLock()
 	prof, ok := pm.profiles[profileID]
 	pm.mu.RUnlock()
@@ -334,37 +389,57 @@ func (pm *ProfileManager) SyncCookiesFromCDP(ctx context.Context, profileID stri
 	}
 	defer wsConn.Close()
 
-	cdpReq := map[string]interface{}{
-		"id":     1,
-		"method": "Network.getAllCookies",
-		"params": map[string]interface{}{},
-	}
-	if err := wsConn.WriteJSON(cdpReq); err != nil {
-		return nil, fmt.Errorf("gửi lệnh Network.getAllCookies thất bại: %w", err)
+	type cdpCookie struct {
+		Name   string `json:"name"`
+		Value  string `json:"value"`
+		Domain string `json:"domain"`
+		Path   string `json:"path"`
 	}
 
 	type cdpResponse struct {
 		ID     int `json:"id"`
 		Result struct {
-			Cookies []struct {
-				Name   string `json:"name"`
-				Value  string `json:"value"`
-				Domain string `json:"domain"`
-				Path   string `json:"path"`
-			} `json:"cookies"`
+			Cookies []cdpCookie `json:"cookies"`
 		} `json:"result"`
 		Error *struct {
 			Message string `json:"message"`
+			Code    int    `json:"code"`
 		} `json:"error"`
 	}
 
+	// Thử Storage.getCookies trước (chuẩn Chrome CDP hiện đại), nếu không có thì fallback Network.getAllCookies
 	var cdpResp cdpResponse
-	if err := wsConn.ReadJSON(&cdpResp); err != nil {
-		return nil, fmt.Errorf("đọc cookies từ Chrome CDP thất bại: %w", err)
+	reqID := 1
+	methods := []string{"Storage.getCookies", "Network.getAllCookies"}
+	var lastErr error
+
+	for _, method := range methods {
+		cdpReq := map[string]interface{}{
+			"id":     reqID,
+			"method": method,
+			"params": map[string]interface{}{},
+		}
+		reqID++
+		if err := wsConn.WriteJSON(cdpReq); err != nil {
+			lastErr = fmt.Errorf("gửi lệnh %s thất bại: %w", method, err)
+			continue
+		}
+		var resp cdpResponse
+		if err := wsConn.ReadJSON(&resp); err != nil {
+			lastErr = fmt.Errorf("đọc cookies từ Chrome CDP (%s) thất bại: %w", method, err)
+			continue
+		}
+		if resp.Error != nil {
+			lastErr = fmt.Errorf("CDP trả về lỗi (%s): %s", method, resp.Error.Message)
+			continue
+		}
+		cdpResp = resp
+		lastErr = nil
+		break
 	}
 
-	if cdpResp.Error != nil {
-		return nil, fmt.Errorf("CDP trả về lỗi: %s", cdpResp.Error.Message)
+	if lastErr != nil && len(cdpResp.Result.Cookies) == 0 {
+		return nil, lastErr
 	}
 
 	cookieMap := make(map[string]string)
@@ -408,6 +483,10 @@ func (pm *ProfileManager) IngestLiveCookiesWithProxy(
 	userAgent string,
 	proxy string,
 ) (*domain.ManagedAccount, error) {
+	if err := ValidateProfileID(profileID); err != nil {
+		return nil, err
+	}
+
 	jar := domain.NewCookieJar(rawCookies)
 
 	hasGemini := jar.HasKey("__Secure-1PSID") && jar.HasKey("__Secure-1PSIDTS")
@@ -521,6 +600,10 @@ func (pm *ProfileManager) IngestLiveCookiesWithProxy(
 
 // SetProfileQuota cập nhật thông tin hạn ngạch Gemini cho profile và lưu session.json
 func (pm *ProfileManager) SetProfileQuota(profileID string, quota string) {
+	if err := ValidateProfileID(profileID); err != nil {
+		return
+	}
+
 	pm.mu.Lock()
 	if prof, ok := pm.profiles[profileID]; ok {
 		prof.GeminiQuota = quota

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"dezuxk-gateway/internal/adapters/outbound/google"
 	"dezuxk-gateway/internal/core/domain"
@@ -183,6 +184,7 @@ func TestChatService_ConcurrentChatOnSameAccountConflicts(t *testing.T) {
 	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
 	repo := &mockSessionRepo{denyLease: true}
 	chatService := services.NewChatService(mr, repo, nil, nil, nil)
+	chatService.SetLeaseWaitTimeout(50 * time.Millisecond)
 
 	_, err := chatService.ExecuteChatSync(context.Background(), &domain.OpenAIChatRequest{
 		Model:    "gemini-3.8-flash",

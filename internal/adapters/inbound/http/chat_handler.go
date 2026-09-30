@@ -63,7 +63,22 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 				break
 			}
 		}
-		cacheKey = services.GenerateChatCacheKey(req.Model, req.Messages, req.Temperature, sysPrompt)
+		isThinking := false
+		if req.Thinking != nil {
+			isThinking = *req.Thinking
+		} else if strings.Contains(strings.ToLower(req.Model), "thinking") {
+			isThinking = true
+		}
+		isGrounding := false
+		if req.SearchGrounding != nil {
+			isGrounding = *req.SearchGrounding
+		}
+		isCodeInterpreter := false
+		if req.CodeInterpreter != nil {
+			isCodeInterpreter = *req.CodeInterpreter
+		}
+
+		cacheKey = services.GenerateChatCacheKey(req.Model, req.Messages, req.Temperature, sysPrompt, isThinking, isGrounding, isCodeInterpreter)
 		if entry, hit := h.cache.Get(cacheKey); hit {
 			w.Header().Set("Content-Type", entry.ContentType)
 			w.Header().Set("X-Cache", "HIT")
@@ -78,23 +93,25 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	if req.Stream {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no")
-
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			writeChatError(w, r, h.metrics, domain.UpstreamRejected(domain.OpChatCompletions, "", domain.ServiceGemini, "máy chủ không hỗ trợ luồng"), false)
 			return
 		}
 
-		err := h.chatUseCase.ExecuteChatStream(r.Context(), &req, w, flusher.Flush)
+		lazy := newLazyStreamWriter(w, flusher)
+		err := h.chatUseCase.ExecuteChatStream(r.Context(), &req, lazy, lazy.Flush)
 		if err != nil {
 			if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
 				return
 			}
-			writeChatError(w, r, h.metrics, err, true)
+			if !lazy.headersSent {
+				// Chưa gửi chunk nào ra client -> Trả về HTTP error JSON chuẩn (429, 503, v.v.)
+				writeChatError(w, r, h.metrics, err, false)
+			} else {
+				// Đã gửi một phần chunk ra stream -> Ghi SSE chunk báo lỗi kèm [DONE]
+				writeChatError(w, r, h.metrics, err, true)
+			}
 		}
 		return
 	}
@@ -122,4 +139,34 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(payload)
+}
+
+type lazyStreamWriter struct {
+	w           http.ResponseWriter
+	flusher     http.Flusher
+	headersSent bool
+}
+
+func newLazyStreamWriter(w http.ResponseWriter, flusher http.Flusher) *lazyStreamWriter {
+	return &lazyStreamWriter{
+		w:       w,
+		flusher: flusher,
+	}
+}
+
+func (l *lazyStreamWriter) Write(p []byte) (int, error) {
+	if !l.headersSent {
+		l.w.Header().Set("Content-Type", "text/event-stream")
+		l.w.Header().Set("Cache-Control", "no-cache")
+		l.w.Header().Set("Connection", "keep-alive")
+		l.w.Header().Set("X-Accel-Buffering", "no")
+		l.headersSent = true
+	}
+	return l.w.Write(p)
+}
+
+func (l *lazyStreamWriter) Flush() {
+	if l.flusher != nil && l.headersSent {
+		l.flusher.Flush()
+	}
 }

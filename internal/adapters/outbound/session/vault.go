@@ -6,18 +6,26 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"strings"
+	"sync"
+	"time"
 )
 
 const (
 	EncryptedPrefix      = "enc:v1:"
 	DefaultMasterKeyEnv  = "DEZUXK_MASTER_KEY"
 	FallbackMasterKeyEnv = "GATEWAY_MASTER_KEY"
-	defaultFallbackKey   = "dezuxk-gateway-deterministic-master-key-32b"
+)
+
+var (
+	ephemeralKeyOnce sync.Once
+	ephemeralKey     string
 )
 
 // Vault xử lý mã hóa đối xứng AES-256-GCM cho bí mật và cookie lưu trên đĩa (Encryption at Rest)
@@ -35,7 +43,7 @@ func NewVault(passphraseOrKey string) *Vault {
 // 1. Biến môi trường DEZUXK_MASTER_KEY
 // 2. Biến môi trường GATEWAY_MASTER_KEY
 // 3. Cấu hình security.master_key trong YAML
-// 4. Khóa mặc định an toàn (có ghi log cảnh báo)
+// 4. Khóa ngẫu nhiên sinh trong RAM cho tiến trình hiện tại (kèm cảnh báo)
 func ResolveMasterKey(configKey string) string {
 	if env := os.Getenv(DefaultMasterKeyEnv); env != "" {
 		return env
@@ -46,8 +54,16 @@ func ResolveMasterKey(configKey string) string {
 	if configKey != "" {
 		return configKey
 	}
-	log.Println("[Security Warning] Chưa thiết lập DEZUXK_MASTER_KEY. Hệ thống đang sử dụng khóa lưu trữ mặc định. Hãy thiết lập biến môi trường DEZUXK_MASTER_KEY để đảm bảo an toàn tuyệt đối.")
-	return defaultFallbackKey
+	ephemeralKeyOnce.Do(func() {
+		rnd := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, rnd); err == nil {
+			ephemeralKey = hex.EncodeToString(rnd)
+		} else {
+			ephemeralKey = fmt.Sprintf("ephemeral-key-%d", time.Now().UnixNano())
+		}
+		log.Println("[Security Warning] Chưa thiết lập DEZUXK_MASTER_KEY. Hệ thống tự động sinh khóa ngẫu nhiên trong RAM cho phiên chạy này. Hãy thiết lập biến môi trường DEZUXK_MASTER_KEY để lưu cookie vĩnh viễn qua các lần restart.")
+	})
+	return ephemeralKey
 }
 
 func deriveKey(passphrase string) []byte {

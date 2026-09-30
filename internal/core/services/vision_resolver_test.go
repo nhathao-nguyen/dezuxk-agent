@@ -204,3 +204,49 @@ func TestVisionResolver_HTTPURLDownload(t *testing.T) {
 		t.Errorf("expected storage token from http download, got %s", attachments[0].StorageToken)
 	}
 }
+
+func TestAttachmentResolver_PDFAndTextDocuments(t *testing.T) {
+	cfg := config.VisionConfig{
+		MaxImageSizeBytes: 10 * 1024 * 1024,
+		AllowedMimeTypes:  []string{"image/jpeg", "image/png", "application/pdf", "text/plain", "text/csv", "audio/mp3"},
+		UploadMethod:      "scotty",
+	}
+	mockUpload := &mockUploadService{returnToken: "/contrib_service/ttl_1d/pdf_token"}
+	vr := services.NewVisionResolver(cfg, mockUpload)
+	acc := &domain.ManagedAccount{ID: "acc-1"}
+
+	// PDF base64
+	fakePDF := base64.StdEncoding.EncodeToString([]byte("%PDF-1.5 fake pdf content"))
+	pdfURL := "data:application/pdf;base64," + fakePDF
+
+	// CSV base64
+	fakeCSV := base64.StdEncoding.EncodeToString([]byte("id,name,score\n1,Alice,100\n2,Bob,95"))
+	csvURL := "data:text/csv;base64," + fakeCSV
+
+	req := &domain.OpenAIChatRequest{
+		Messages: []domain.OpenAIMessage{
+			{
+				Role: "user",
+				ContentParts: []domain.MessageContentPart{
+					{Type: "document", Document: &domain.MessageImageURL{URL: pdfURL}},
+					{Type: "file", File: &domain.MessageImageURL{URL: csvURL}},
+				},
+			},
+		},
+	}
+
+	attachments, err := vr.ProcessRequestAttachments(context.Background(), acc, req)
+	if err != nil {
+		t.Fatalf("unexpected error resolving documents: %v", err)
+	}
+	if len(attachments) != 2 {
+		t.Fatalf("expected 2 attachments, got %d", len(attachments))
+	}
+	if attachments[0].FileName != "upload_doc_1.pdf" {
+		t.Errorf("expected upload_doc_1.pdf, got %s", attachments[0].FileName)
+	}
+	if attachments[1].FileName != "upload_doc_2.csv" {
+		t.Errorf("expected upload_doc_2.csv, got %s", attachments[1].FileName)
+	}
+}
+

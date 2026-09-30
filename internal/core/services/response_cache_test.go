@@ -22,11 +22,14 @@ func TestResponseCache_KeyGeneration(t *testing.T) {
 		{Role: "user", Content: "Khác nội dung"},
 	}
 
-	key1 := services.GenerateChatCacheKey("gemini-2.5-flash", messages1, 0.7, "You are a helpful assistant")
-	key2 := services.GenerateChatCacheKey("gemini-2.5-flash", messages2, 0.7, "You are a helpful assistant")
-	key3 := services.GenerateChatCacheKey("gemini-2.5-flash", messages3, 0.7, "You are a helpful assistant")
-	key4 := services.GenerateChatCacheKey("gemini-2.5-pro", messages1, 0.7, "You are a helpful assistant")
-	key5 := services.GenerateChatCacheKey("gemini-2.5-flash", messages1, 0.2, "You are a helpful assistant")
+	key1 := services.GenerateChatCacheKey("gemini-2.5-flash", messages1, 0.7, "You are a helpful assistant", false, false, false)
+	key2 := services.GenerateChatCacheKey("gemini-2.5-flash", messages2, 0.7, "You are a helpful assistant", false, false, false)
+	key3 := services.GenerateChatCacheKey("gemini-2.5-flash", messages3, 0.7, "You are a helpful assistant", false, false, false)
+	key4 := services.GenerateChatCacheKey("gemini-2.5-pro", messages1, 0.7, "You are a helpful assistant", false, false, false)
+	key5 := services.GenerateChatCacheKey("gemini-2.5-flash", messages1, 0.2, "You are a helpful assistant", false, false, false)
+	keyThinking := services.GenerateChatCacheKey("gemini-2.5-flash", messages1, 0.7, "You are a helpful assistant", true, false, false)
+	keyGrounding := services.GenerateChatCacheKey("gemini-2.5-flash", messages1, 0.7, "You are a helpful assistant", false, true, false)
+	keyCode := services.GenerateChatCacheKey("gemini-2.5-flash", messages1, 0.7, "You are a helpful assistant", false, false, true)
 
 	if key1 != key2 {
 		t.Errorf("expected identical keys for identical chat params, got %s vs %s", key1, key2)
@@ -39,6 +42,15 @@ func TestResponseCache_KeyGeneration(t *testing.T) {
 	}
 	if key1 == key5 {
 		t.Error("expected different keys when temperature differs")
+	}
+	if key1 == keyThinking {
+		t.Error("expected different keys when thinking differs")
+	}
+	if key1 == keyGrounding {
+		t.Error("expected different keys when grounding differs")
+	}
+	if key1 == keyCode {
+		t.Error("expected different keys when codeInterpreter differs")
 	}
 
 	// Verify key format includes SHA-256
@@ -200,6 +212,6 @@ func BenchmarkGenerateChatCacheKey(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = services.GenerateChatCacheKey("gemini-2.5-flash", messages, 0.7, "system prompt")
+		_ = services.GenerateChatCacheKey("gemini-2.5-flash", messages, 0.7, "system prompt", false, false, false)
 	}
 }

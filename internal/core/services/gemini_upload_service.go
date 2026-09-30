@@ -108,7 +108,8 @@ func (s *GeminiUploadService) UploadFileWithAccount(
 		req1.Header.Set("User-Agent", account.UserAgent)
 	}
 
-	resp1, err := s.client.Do(req1)
+	client := s.httpClientForAccount(account)
+	resp1, err := client.Do(req1)
 	if err != nil {
 		return "", domain.CodecTransport("UploadHandshake", domain.ServiceGemini, err)
 	}
@@ -142,7 +143,7 @@ func (s *GeminiUploadService) UploadFileWithAccount(
 		req2.Header.Set("User-Agent", account.UserAgent)
 	}
 
-	resp2, err := s.client.Do(req2)
+	resp2, err := client.Do(req2)
 	if err != nil {
 		return "", domain.CodecTransport("UploadBinary", domain.ServiceGemini, err)
 	}
@@ -163,4 +164,16 @@ func (s *GeminiUploadService) UploadFileWithAccount(
 	}
 
 	return storageToken, nil
+}
+
+func (s *GeminiUploadService) httpClientForAccount(account *domain.ManagedAccount) *http.Client {
+	if s.upstream != nil {
+		if provider, ok := s.upstream.(interface{ ClientForAccount(account *domain.ManagedAccount) *http.Client }); ok {
+			return provider.ClientForAccount(account)
+		}
+	}
+	if s.client != nil {
+		return s.client
+	}
+	return &http.Client{Timeout: 120 * time.Second}
 }

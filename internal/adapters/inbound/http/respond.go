@@ -25,6 +25,7 @@ func writeChatError(w http.ResponseWriter, r *http.Request, metrics *domain.Cont
 	if streamed {
 		encoded, _ := json.Marshal(payload)
 		_, _ = w.Write([]byte("data: " + string(encoded) + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}

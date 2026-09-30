@@ -94,6 +94,7 @@ type ManagedAccount struct {
 	GeminiSNlM0e string
 	UserAgent    string
 	Tier         int // 1: Free, 2: Pro
+	ActiveModeID string // Mode ID hiện tại (RPC L5adhe)
 	ProxyURL     string
 	InFlightReqs int64
 	IsHealthy    bool
@@ -119,6 +120,24 @@ func (a *ManagedAccount) SetProxy(proxyURL string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.ProxyURL = proxyURL
+}
+
+func (a *ManagedAccount) GetActiveModeID() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.ActiveModeID
+}
+
+func (a *ManagedAccount) SetActiveModeID(modeID string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.ActiveModeID = modeID
 }
 
 func (a *ManagedAccount) IsAvailable() bool {

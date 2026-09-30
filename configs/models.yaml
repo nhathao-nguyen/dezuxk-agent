@@ -8,6 +8,7 @@ gemini_models:
     capabilities:
       - "chat"
     internal_backend_id: "3.5 Flash-Lite"
+    mode_id: "8c46e95b1a07cecc"
     model_tier_code: 1
     credit_cost_per_unit: 0
     is_active: true
@@ -18,6 +19,7 @@ gemini_models:
     capabilities:
       - "chat"
     internal_backend_id: "3.8 Flash"
+    mode_id: "56fdd199312815e2"
     model_tier_code: 1
     credit_cost_per_unit: 0
     is_active: true
@@ -28,6 +30,7 @@ gemini_models:
     capabilities:
       - "chat"
     internal_backend_id: "3.1 Pro"
+    mode_id: "e6fa609c3fa255c0"
     model_tier_code: 3
     credit_cost_per_unit: 0
     is_active: true

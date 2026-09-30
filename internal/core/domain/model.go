@@ -30,6 +30,7 @@ type ModelDescriptor struct {
 	TargetService      ServiceKind       `json:"target_service" yaml:"target_service"`
 	Capabilities       []ModelCapability `json:"capabilities" yaml:"capabilities"`
 	InternalBackendID  string            `json:"internal_backend_id" yaml:"internal_backend_id"`
+	ModeID             string            `json:"mode_id" yaml:"mode_id"`                 // RPC L5adhe mode ID
 	ModelTierCode      int               `json:"model_tier_code" yaml:"model_tier_code"` // 1: Flash, 3: Pro
 	CreditCostPerUnit  int               `json:"credit_cost_per_unit" yaml:"credit_cost_per_unit"`
 	SupportedDurations []int             `json:"supported_durations" yaml:"supported_durations"`

@@ -147,6 +147,7 @@ func (r *SqliteSessionRepository) migrate() error {
 	}
 	// Đảm bảo tương thích với database SQLite đã tồn tại trước đó
 	_, _ = r.db.Exec("ALTER TABLE sessions ADD COLUMN proxy TEXT;")
+	_, _ = r.db.Exec("DELETE FROM session_alerts WHERE service = 'flow';")
 	return nil
 }
 
@@ -200,10 +201,10 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 		r.promote(acc)
 	}
 
-	// Nạp các alert gần đây
+	// Nạp các alert gần đây (bỏ qua các dịch vụ đã loại bỏ như flow)
 	alertRows, err := r.db.Query(`
 		SELECT account_id, service, reason, status_code, action_required, created_at 
-		FROM session_alerts ORDER BY id DESC LIMIT 50
+		FROM session_alerts WHERE service != 'flow' ORDER BY id DESC LIMIT 50
 	`)
 	if err == nil {
 		defer alertRows.Close()

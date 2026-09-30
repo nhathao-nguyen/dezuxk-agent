@@ -30,6 +30,7 @@ type TokenExtractorAdapter struct {
 	short        time.Duration
 	proxyMu      sync.RWMutex
 	proxyClients map[string]*http.Client
+	proxyAccess  map[string]time.Time
 }
 
 func NewGoogleTokenExtractorAdapter(short time.Duration) ports.TokenExtractor {
@@ -51,7 +52,9 @@ func newTokenExtractor(flowHost, geminiHost, defaultUA string, short time.Durati
 				return fmt.Errorf("quá 10 lần chuyển hướng")
 			}
 			if len(via) > 0 {
-				req.Header.Set("Cookie", via[0].Header.Get("Cookie"))
+				if req.URL.Host == via[0].URL.Host || strings.HasSuffix(req.URL.Host, ".google.com") {
+					req.Header.Set("Cookie", via[0].Header.Get("Cookie"))
+				}
 				req.Header.Set("User-Agent", via[0].Header.Get("User-Agent"))
 			}
 			return nil
@@ -64,6 +67,7 @@ func newTokenExtractor(flowHost, geminiHost, defaultUA string, short time.Durati
 		defaultUA:    defaultUA,
 		short:        short,
 		proxyClients: make(map[string]*http.Client),
+		proxyAccess:  make(map[string]time.Time),
 	}
 }
 
@@ -143,13 +147,41 @@ func (e *TokenExtractorAdapter) getClient(account *domain.ManagedAccount) *http.
 	c, ok := e.proxyClients[proxyStr]
 	e.proxyMu.RUnlock()
 	if ok {
+		e.proxyMu.Lock()
+		e.proxyAccess[proxyStr] = time.Now()
+		e.proxyMu.Unlock()
 		return c
 	}
 
 	e.proxyMu.Lock()
 	defer e.proxyMu.Unlock()
 	if c, ok := e.proxyClients[proxyStr]; ok {
+		e.proxyAccess[proxyStr] = time.Now()
 		return c
+	}
+
+	// Cơ chế giới hạn LRU tối đa 50 proxy clients: đóng idle connections khi loại bỏ
+	const maxCachedProxies = 50
+	if len(e.proxyClients) >= maxCachedProxies {
+		var oldestKey string
+		var oldestTime time.Time
+		first := true
+		for k, t := range e.proxyAccess {
+			if first || t.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = t
+				first = false
+			}
+		}
+		if oldestKey != "" {
+			if oldClient, exists := e.proxyClients[oldestKey]; exists {
+				if tr, ok := oldClient.Transport.(*http.Transport); ok {
+					tr.CloseIdleConnections()
+				}
+				delete(e.proxyClients, oldestKey)
+				delete(e.proxyAccess, oldestKey)
+			}
+		}
 	}
 
 	proxyURL, err := url.Parse(proxyStr)
@@ -177,12 +209,15 @@ func (e *TokenExtractorAdapter) getClient(account *domain.ManagedAccount) *http.
 				return fmt.Errorf("quá 10 lần chuyển hướng")
 			}
 			if len(via) > 0 {
-				req.Header.Set("Cookie", via[0].Header.Get("Cookie"))
+				if req.URL.Host == via[0].URL.Host || strings.HasSuffix(req.URL.Host, ".google.com") {
+					req.Header.Set("Cookie", via[0].Header.Get("Cookie"))
+				}
 				req.Header.Set("User-Agent", via[0].Header.Get("User-Agent"))
 			}
 			return nil
 		},
 	}
 	e.proxyClients[proxyStr] = client
+	e.proxyAccess[proxyStr] = time.Now()
 	return client
 }

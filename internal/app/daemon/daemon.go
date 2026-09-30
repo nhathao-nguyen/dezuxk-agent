@@ -154,6 +154,7 @@ func Run(configPath string, portOverride int) error {
 	tokenCounter := services.NewTokenCounter(cfg.Tokens)
 
 	chatService := services.NewChatService(modelRegistry, sessionRepo, upstreamTransport, wire, metrics)
+	chatService.SetRpcRegistry(rpcRegistry)
 	if mediaStorage != nil {
 		chatService.SetStorage(mediaStorage)
 	}

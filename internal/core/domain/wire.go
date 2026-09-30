@@ -19,4 +19,5 @@ type GeminiReply struct {
 	CodeExecutions []CodeExecution
 	MediaURLs      []string
 	Unmapped       int
+	Drafts         []string
 }

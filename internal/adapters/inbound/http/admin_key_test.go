@@ -25,8 +25,9 @@ func TestAdminKeyEndpoints_And_ClientAuth(t *testing.T) {
 	}
 
 	router := BuildRouter(RouterDependencies{
-		Config:     cfg,
-		KeyUseCase: keyService,
+		Config:        cfg,
+		KeyUseCase:    keyService,
+		ModelRegistry: domain.NewModelRegistry(nil),
 	})
 
 	// 1. Gọi /v1/admin/keys không có Authorization header -> 401 Unauthorized
@@ -42,7 +43,7 @@ func TestAdminKeyEndpoints_And_ClientAuth(t *testing.T) {
 		"name":                 "Client Mobile App",
 		"role":                 "user",
 		"rate_limit_rpm":       10,
-		"daily_quota_requests": 3,
+		"daily_quota_requests": 2,
 		"allowed_models":       []string{"gemini-2.5-flash"},
 	}
 	bodyBytes, _ := json.Marshal(createBody)
@@ -107,6 +108,15 @@ func TestAdminKeyEndpoints_And_ClientAuth(t *testing.T) {
 	router.ServeHTTP(rec, reqChatDisallowed)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 Forbidden for disallowed model, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// 5.1. Gọi GET /v1/models không tiêu thụ hạn ngạch ngày
+	reqModels := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	reqModels.Header.Set("Authorization", "Bearer "+clientRawKey)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, reqModels)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /v1/models, got %d", rec.Code)
 	}
 
 	// 6. Kiểm tra Daily Quota (Hạn ngạch 2 request)

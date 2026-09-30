@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,8 +25,10 @@ type ChatService struct {
 	metrics        *domain.ContractMetrics
 	storage        ports.MediaRepository
 	visionResolver *VisionResolver
-	tokenCounter   *TokenCounter
-	failoverConfig config.FailoverConfig
+	tokenCounter     *TokenCounter
+	failoverConfig   config.FailoverConfig
+	leaseWaitTimeout time.Duration
+	rpcRegistry      *domain.RpcRegistry
 }
 
 func NewChatService(
@@ -41,11 +44,13 @@ func NewChatService(
 		upstream:      up,
 		wire:          wire,
 		metrics:       metrics,
+		rpcRegistry:   domain.DefaultRpcRegistry(),
 		tokenCounter:  NewTokenCounter(config.TokensConfig{}),
 		failoverConfig: config.FailoverConfig{
 			MaxAttempts:     3,
 			CoolingDuration: 60 * time.Second,
 		},
+		leaseWaitTimeout: 3 * time.Second,
 	}
 }
 
@@ -63,6 +68,16 @@ func (s *ChatService) SetTokenCounter(tc *TokenCounter) {
 
 func (s *ChatService) SetFailoverConfig(fc config.FailoverConfig) {
 	s.failoverConfig = fc
+}
+
+func (s *ChatService) SetLeaseWaitTimeout(d time.Duration) {
+	s.leaseWaitTimeout = d
+}
+
+func (s *ChatService) SetRpcRegistry(r *domain.RpcRegistry) {
+	if r != nil {
+		s.rpcRegistry = r
+	}
 }
 
 func (s *ChatService) ExecuteChatStream(
@@ -150,8 +165,36 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 		triedAccounts[account.ID] = struct{}{}
 
 		if !s.sessionRepo.TryWriteLease(account, domain.ServiceGemini) {
-			s.sessionRepo.Release(account, nil)
-			return domain.Conflict(domain.OpChatCompletions, domain.OriginStreamGenerate, domain.ServiceGemini, "phiên đang bận một tác vụ ghi")
+			allAccs := s.sessionRepo.ListAll(ctx)
+			if len(allAccs) <= 1 {
+				// Hàng đợi chờ giải phóng Lease ghi (Wait Queue) cho cấu hình 1 tài khoản
+				waitDuration := s.leaseWaitTimeout
+				if waitDuration <= 0 {
+					waitDuration = 3 * time.Second
+				}
+				acquired := false
+				waitDeadline := time.Now().Add(waitDuration)
+				for time.Now().Before(waitDeadline) {
+					select {
+					case <-ctx.Done():
+						s.sessionRepo.Release(account, nil)
+						return ctx.Err()
+					case <-time.After(50 * time.Millisecond):
+					}
+					if s.sessionRepo.TryWriteLease(account, domain.ServiceGemini) {
+						acquired = true
+						break
+					}
+				}
+				if !acquired {
+					s.sessionRepo.Release(account, nil)
+					return domain.Conflict(domain.OpChatCompletions, domain.OriginStreamGenerate, domain.ServiceGemini, "phiên đang bận một tác vụ ghi")
+				}
+			} else {
+				s.sessionRepo.Release(account, nil)
+				lastErr = domain.Conflict(domain.OpChatCompletions, domain.OriginStreamGenerate, domain.ServiceGemini, "phiên đang bận một tác vụ ghi")
+				continue
+			}
 		}
 
 		var canRetry bool
@@ -443,6 +486,32 @@ func (s *ChatService) syncRound(
 	}
 
 	stopReason := "stop"
+	choices := []domain.OpenAIChoice{
+		{
+			Index: 0,
+			Message: domain.OpenAIMessage{
+				Role:    "assistant",
+				Content: reply.Text,
+			},
+			FinishReason: &stopReason,
+		},
+	}
+	if len(reply.Drafts) > 1 {
+		for i := 1; i < len(reply.Drafts); i++ {
+			draftContent := reply.Drafts[i]
+			if strings.TrimSpace(draftContent) != "" && draftContent != reply.Text {
+				choices = append(choices, domain.OpenAIChoice{
+					Index: len(choices),
+					Message: domain.OpenAIMessage{
+						Role:    "assistant",
+						Content: draftContent,
+					},
+					FinishReason: &stopReason,
+				})
+			}
+		}
+	}
+
 	return &domain.OpenAIChatResponse{
 		ID:             "chatcmpl-" + reply.ConversationID,
 		Object:         "chat.completion",
@@ -456,16 +525,7 @@ func (s *ChatService) syncRound(
 		CodeExecutions: reply.CodeExecutions,
 		MediaURLs:      reply.MediaURLs,
 		Usage:          usage,
-		Choices: []domain.OpenAIChoice{
-			{
-				Index: 0,
-				Message: domain.OpenAIMessage{
-					Role:    "assistant",
-					Content: reply.Text,
-				},
-				FinishReason: &stopReason,
-			},
-		},
+		Choices:        choices,
 	}, nil
 }
 
@@ -475,7 +535,11 @@ func (s *ChatService) postGemini(
 	modelDesc *domain.ModelDescriptor,
 	req *domain.OpenAIChatRequest,
 ) (*http.Response, error) {
-	_, lastUserPrompt := domain.FlattenMessages(req.Messages)
+	if err := s.ensureAccountMode(ctx, account, modelDesc); err != nil {
+		return nil, err
+	}
+
+	_, lastUserPrompt := domain.FlattenMessagesForModel(req.Messages, req.Model)
 	isThinking := strings.Contains(strings.ToLower(req.Model), "thinking")
 	if req.Thinking != nil {
 		isThinking = *req.Thinking
@@ -544,6 +608,85 @@ func (s *ChatService) postGemini(
 		return nil, domain.CodecTransport(domain.OriginStreamGenerate, modelDesc.TargetService, err)
 	}
 	return resp, nil
+}
+
+func (s *ChatService) ensureAccountMode(
+	ctx context.Context,
+	account *domain.ManagedAccount,
+	modelDesc *domain.ModelDescriptor,
+) error {
+	if account == nil || modelDesc == nil || modelDesc.ModeID == "" {
+		return nil
+	}
+	if account.GetActiveModeID() == modelDesc.ModeID {
+		return nil
+	}
+
+	reqPayload, err := domain.BuildModeSwitchRequest(modelDesc.ModeID)
+	if err != nil {
+		return err
+	}
+
+	path := "/_/BardChatUi/data/batchexecute?rpcids=L5adhe&source-path=%2Fapp&rt=c"
+	if s.rpcRegistry != nil {
+		if ep, ok := s.rpcRegistry.Get("L5adhe"); ok {
+			if ep.PathPattern != "" {
+				path = ep.PathPattern
+				if !strings.Contains(path, "rt=c") {
+					if strings.Contains(path, "?") {
+						path += "&rt=c"
+					} else {
+						path += "?rt=c"
+					}
+				}
+			}
+			if ep.TargetHost != "" && !strings.HasPrefix(path, "http") {
+				path = ep.TargetHost + path
+			}
+		}
+	}
+
+	postBody := "f.req=" + url.QueryEscape(reqPayload)
+	if at := account.GetAtToken(domain.ServiceGemini); at != "" {
+		postBody += "&at=" + url.QueryEscape(at)
+	}
+
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if s.upstream == nil {
+		return nil
+	}
+	resp, err := s.upstream.DoRequest(
+		callCtx,
+		account,
+		domain.ServiceGemini,
+		http.MethodPost,
+		path,
+		strings.NewReader(postBody),
+		"application/x-www-form-urlencoded;charset=UTF-8",
+	)
+	if err != nil {
+		return domain.ClassifyTransport(domain.OpChatCompletions, "L5adhe", domain.ServiceGemini, err)
+	}
+	if resp != nil {
+		if resp.Body != nil {
+			defer resp.Body.Close()
+		}
+		if resp.StatusCode >= 400 {
+			if ge := domain.ClassifyUpstreamStatus(domain.OpChatCompletions, "L5adhe", resp.StatusCode, false, domain.ServiceGemini); ge != nil {
+				return ge
+			}
+			return domain.UpstreamRejected(domain.OpChatCompletions, "L5adhe", domain.ServiceGemini, "chuyển model mode không thành công")
+		}
+		if resp.Body != nil {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if ok, parseErr := domain.ParseModeSwitchResponse(string(bodyBytes)); ok && parseErr == nil {
+				account.SetActiveModeID(modelDesc.ModeID)
+			}
+		}
+	}
+	return nil
 }
 
 func boundStream(upstream ports.UpstreamGoogleTransport, ctx context.Context) (context.Context, context.CancelFunc) {

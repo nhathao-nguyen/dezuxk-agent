@@ -94,14 +94,27 @@ func (r *TestRunner) logFail(name string, err error) {
 	fmt.Printf("  ❌ [%-25s] FAIL: %v\n", name, err)
 }
 
+func (r *TestRunner) checkResp(name string, resp *http.Response, err error, expectedStatus int) bool {
+	if err != nil {
+		r.logFail(name, fmt.Errorf("lỗi kết nối: %w", err))
+		return false
+	}
+	if resp.StatusCode != expectedStatus {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		r.logFail(name, fmt.Errorf("status HTTP: %d (mong đợi %d), body: %s", resp.StatusCode, expectedStatus, string(body)))
+		return false
+	}
+	return true
+}
+
 func (r *TestRunner) testHealthAndReady() {
 	fmt.Println("\n--- [Phần 1: Kiểm Tra Trạng Thái Hạ Tầng Gateway] ---")
 
 	// GET /ready
 	t0 := time.Now()
 	resp, err := r.client.Get(baseURL + "/ready")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("GET /ready", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("GET /ready", resp, err, http.StatusOK) {
 		return
 	}
 	_ = resp.Body.Close()
@@ -110,8 +123,7 @@ func (r *TestRunner) testHealthAndReady() {
 	// GET /health
 	t0 = time.Now()
 	resp, err = r.client.Get(baseURL + "/health")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("GET /health", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("GET /health", resp, err, http.StatusOK) {
 		return
 	}
 	var health map[string]any
@@ -127,8 +139,7 @@ func (r *TestRunner) testAdminAndKeyManagement() {
 	t0 := time.Now()
 	loginPayload := `{"username":"admin","password":"dezuxk_admin_secret_pass"}`
 	resp, err := r.client.Post(baseURL+"/v1/admin/auth/login", "application/json", strings.NewReader(loginPayload))
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("POST /admin/auth/login", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("POST /admin/auth/login", resp, err, http.StatusOK) {
 		return
 	}
 	_ = resp.Body.Close()
@@ -141,8 +152,7 @@ func (r *TestRunner) testAdminAndKeyManagement() {
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusCreated {
-		r.logFail("POST /admin/keys", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("POST /admin/keys", resp, err, http.StatusCreated) {
 		return
 	}
 	var keyResp map[string]any
@@ -162,8 +172,7 @@ func (r *TestRunner) testModelsAndProfiles() {
 	req, _ := http.NewRequest(http.MethodGet, baseURL+"/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("GET /v1/models", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("GET /v1/models", resp, err, http.StatusOK) {
 		return
 	}
 	var models map[string]any
@@ -177,8 +186,7 @@ func (r *TestRunner) testModelsAndProfiles() {
 	req, _ = http.NewRequest(http.MethodGet, baseURL+"/v1/profiles", nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	resp, err = r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("GET /v1/profiles", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("GET /v1/profiles", resp, err, http.StatusOK) {
 		return
 	}
 	var profs map[string]any
@@ -195,8 +203,8 @@ func (r *TestRunner) testGeminiDirectEndpoints() {
 	req, _ := http.NewRequest(http.MethodGet, baseURL+"/v1/gemini/usage", nil)
 	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("GET /v1/gemini/usage", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("GET /v1/gemini/usage", resp, err, http.StatusOK) {
+		// non-fatal
 	} else {
 		_ = resp.Body.Close()
 		r.logPass("GET /v1/gemini/usage", time.Since(t0).Milliseconds(), "Truy vấn Hạn ngạch & Session Keep-Alive thành công")
@@ -207,8 +215,8 @@ func (r *TestRunner) testGeminiDirectEndpoints() {
 	req, _ = http.NewRequest(http.MethodGet, baseURL+"/v1/gemini/conversations?limit=3", nil)
 	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
 	resp, err = r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("GET /v1/gemini/conversations", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("GET /v1/gemini/conversations", resp, err, http.StatusOK) {
+		// non-fatal
 	} else {
 		_ = resp.Body.Close()
 		r.logPass("GET /v1/gemini/conversations", time.Since(t0).Milliseconds(), "Đọc danh sách lịch sử hội thoại thành công")
@@ -231,8 +239,7 @@ func (r *TestRunner) testChatSync() {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("Chat Sync", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("Chat Sync", resp, err, http.StatusOK) {
 		return
 	}
 	var chatResp map[string]any
@@ -268,8 +275,7 @@ func (r *TestRunner) testChatStreaming() {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("Chat Stream", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("Chat Stream", resp, err, http.StatusOK) {
 		return
 	}
 	defer resp.Body.Close()
@@ -328,8 +334,7 @@ func (r *TestRunner) testChatThinking() {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("Chat Thinking", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("Chat Thinking", resp, err, http.StatusOK) {
 		return
 	}
 	var chatResp map[string]any
@@ -366,8 +371,7 @@ func (r *TestRunner) testChatSearchGrounding() {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("Search Grounding", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("Search Grounding", resp, err, http.StatusOK) {
 		return
 	}
 	var chatResp map[string]any
@@ -399,8 +403,7 @@ func (r *TestRunner) testChatCodeInterpreter() {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("Code Interpreter", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("Code Interpreter", resp, err, http.StatusOK) {
 		return
 	}
 	var chatResp map[string]any
@@ -452,8 +455,7 @@ func (r *TestRunner) testChatMultimodalVision() {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("Multimodal Vision", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("Multimodal Vision", resp, err, http.StatusOK) {
 		return
 	}
 	var chatResp map[string]any
@@ -490,8 +492,7 @@ func (r *TestRunner) testChatSuperCombo() {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("Super Combo", fmt.Errorf("status: %v, err: %w", resp.StatusCode, err))
+	if !r.checkResp("Super Combo", resp, err, http.StatusOK) {
 		return
 	}
 	var chatResp map[string]any
@@ -534,8 +535,7 @@ func (r *TestRunner) testResponseCaching() {
 	req1.Header.Set("Authorization", "Bearer "+r.virtualKey)
 	req1.Header.Set("Content-Type", "application/json")
 	resp1, err := r.client.Do(req1)
-	if err != nil || resp1.StatusCode != http.StatusOK {
-		r.logFail("Cache Miss (Lần 1)", fmt.Errorf("status: %v", resp1.StatusCode))
+	if !r.checkResp("Cache Miss (Lần 1)", resp1, err, http.StatusOK) {
 		return
 	}
 	cacheHdr1 := resp1.Header.Get("X-Cache")
@@ -550,8 +550,7 @@ func (r *TestRunner) testResponseCaching() {
 	req2.Header.Set("Content-Type", "application/json")
 	resp2, err := r.client.Do(req2)
 	latencyCache := time.Since(t0).Milliseconds()
-	if err != nil || resp2.StatusCode != http.StatusOK {
-		r.logFail("Cache Hit (Lần 2)", fmt.Errorf("status: %v", resp2.StatusCode))
+	if !r.checkResp("Cache Hit (Lần 2)", resp2, err, http.StatusOK) {
 		return
 	}
 	cacheHdr2 := resp2.Header.Get("X-Cache")
@@ -573,8 +572,7 @@ func (r *TestRunner) testKeyRevocationSecurity() {
 	req, _ := http.NewRequest(http.MethodDelete, baseURL+"/v1/admin/keys/"+r.keyID, nil)
 	req.Header.Set("Authorization", "Bearer "+adminToken)
 	resp, err := r.client.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		r.logFail("DELETE /admin/keys", fmt.Errorf("status: %v", resp.StatusCode))
+	if !r.checkResp("DELETE /admin/keys", resp, err, http.StatusOK) {
 		return
 	}
 	_ = resp.Body.Close()

@@ -26,15 +26,16 @@
 flowchart TD
     subgraph DrivingAdapters ["Inbound / Driving Adapters (Đầu vào)"]
         HTTPHandler["OpenAI Compatible HTTP Handler (/v1/*)"]
-        WailsBinding["Wails v2 Desktop Bridge (IPC)"]
-        CLIDaemon["CLI / Headless Daemon Controller"]
+        AdminHandler["Admin Dashboard & Overview Handler"]
+        ProfileHandler["Profile CDP & Cookie Handler"]
+        CLIDaemon["Headless Daemon Controller"]
     end
 
     subgraph InboundPorts ["Inbound Ports (Giao diện điều phối)"]
-        ChatPort["ChatCompletionUseCase"]
-        VideoPort["VideoGenerationUseCase"]
-        ImagePort["ImageGenerationUseCase"]
-        AccountPort["AccountManagementUseCase"]
+        ChatPort["ChatUseCase"]
+        ProfilePort["ProfileUseCase"]
+        KeyPort["KeyUseCase"]
+        GeminiExtPort["Gemini Advanced UseCases (History, Quota, Canvas)"]
     end
 
     subgraph DomainCore ["Domain Core (Nghiệp vụ thuần túy - Zero External Deps)"]

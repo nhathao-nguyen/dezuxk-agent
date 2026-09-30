@@ -1,6 +1,7 @@
-# Module 07: Giao Diện Desktop & Tích Hợp Wails v2 (Wails Desktop GUI)
+# Module 07: Giao Diện Desktop & Tích Hợp Wails v2 (Wails Desktop GUI) - [ARCHIVED]
 
-> Tài liệu đặc tả kiến trúc tích hợp khung ứng dụng Wails v2, liên kết hai chiều giữa Golang và Frontend (Go Bindings), quản lý khay hệ thống (System Tray) và các màn hình chức năng trên Desktop.
+> [!NOTE]
+> **TÀI LIỆU LƯU TRỮ (ARCHIVED / DEPRECATED):** Phân hệ Wails v2 Desktop GUI và Video/Flow đã được lược bỏ khỏi mã nguồn chính thức (kể từ commit `e94de18`). Dự án hiện tại vận hành hoàn toàn ở chế độ **Headless Daemon Server** (`dezuxk.exe` / `run.ps1`) tương thích chuẩn OpenAI API cho các ứng dụng khách bên ngoài (Cursor, NextChat, OpenWebUI, LibreChat, Chatbox).
 
 ---
 

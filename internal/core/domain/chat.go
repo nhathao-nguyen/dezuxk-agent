@@ -68,6 +68,8 @@ type MessageContentPart struct {
 	Type     string           `json:"type"`
 	Text     string           `json:"text,omitempty"`
 	ImageURL *MessageImageURL `json:"image_url,omitempty"`
+	File     *MessageImageURL `json:"file,omitempty"`
+	Document *MessageImageURL `json:"document,omitempty"`
 }
 
 type MessageImageURL struct {
@@ -137,8 +139,12 @@ func (m *OpenAIMessage) GetImageURLs() []string {
 	}
 	var urls []string
 	for _, part := range m.ContentParts {
-		if part.Type == "image_url" && part.ImageURL != nil && strings.TrimSpace(part.ImageURL.URL) != "" {
+		if part.ImageURL != nil && strings.TrimSpace(part.ImageURL.URL) != "" {
 			urls = append(urls, strings.TrimSpace(part.ImageURL.URL))
+		} else if part.File != nil && strings.TrimSpace(part.File.URL) != "" {
+			urls = append(urls, strings.TrimSpace(part.File.URL))
+		} else if part.Document != nil && strings.TrimSpace(part.Document.URL) != "" {
+			urls = append(urls, strings.TrimSpace(part.Document.URL))
 		}
 	}
 	return urls
@@ -251,8 +257,28 @@ type GeminiPayloadBuilder struct {
 	ClientUUID            string
 }
 
+// ModelIdentityInstruction trả về System Instruction nhận diện cho từng model để model tự biết danh tính chuẩn xác
+func ModelIdentityInstruction(modelID string) string {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	switch {
+	case strings.Contains(m, "flash-lite") || strings.Contains(m, "3.5"):
+		return "You are Gemini 3.5 Flash-Lite, Google's fastest high-efficiency model. When asked about your identity or model name, identify as Gemini 3.5 Flash-Lite."
+	case strings.Contains(m, "3.1-pro") || strings.Contains(m, "pro"):
+		return "You are Gemini 3.1 Pro, Google's advanced reasoning model. When asked about your identity or model name, identify as Gemini 3.1 Pro."
+	case strings.Contains(m, "3.8-flash") || strings.Contains(m, "flash"):
+		return "You are Gemini 3.8 Flash, Google's versatile multimodal model. When asked about your identity or model name, identify as Gemini 3.8 Flash."
+	default:
+		return ""
+	}
+}
+
 // FlattenMessages gộp System Instruction và toàn bộ lịch sử ngữ cảnh
 func FlattenMessages(messages []OpenAIMessage) (system string, prompt string) {
+	return FlattenMessagesForModel(messages, "")
+}
+
+// FlattenMessagesForModel gộp System Instruction, tiêm danh tính mô hình chính xác (nếu có), và toàn bộ lịch sử ngữ cảnh
+func FlattenMessagesForModel(messages []OpenAIMessage, modelID string) (system string, prompt string) {
 	var systemParts []string
 	var dialogParts []string
 
@@ -287,6 +313,20 @@ func FlattenMessages(messages []OpenAIMessage) (system string, prompt string) {
 		}
 	}
 
+	// Tiêm System Instruction định danh model nếu modelID được truyền vào
+	if identity := ModelIdentityInstruction(modelID); identity != "" {
+		hasIdentity := false
+		for _, sp := range systemParts {
+			if strings.Contains(sp, identity) {
+				hasIdentity = true
+				break
+			}
+		}
+		if !hasIdentity {
+			systemParts = append([]string{identity}, systemParts...)
+		}
+	}
+
 	// Fallback nếu không có message nào role user
 	if prompt == "" && len(messages) > 0 {
 		for i := len(messages) - 1; i >= 0; i-- {
@@ -300,10 +340,10 @@ func FlattenMessages(messages []OpenAIMessage) (system string, prompt string) {
 	system = strings.Join(systemParts, "\n\n")
 	if len(dialogParts) > 0 {
 		historyContext := strings.Join(dialogParts, "\n")
-		prompt = "[Lịch sử hội thoại trước đó:\n" + historyContext + "]\n\n" + prompt
+		prompt = "[Conversation History:\n" + historyContext + "]\n\n" + prompt
 	}
 	if system != "" {
-		prompt = "[Chỉ dẫn hệ thống: " + system + "]\n\n" + prompt
+		prompt = "[System Instruction: " + system + "]\n\n" + prompt
 	}
 
 	return system, prompt

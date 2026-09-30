@@ -240,3 +240,40 @@ func TestFlattenMessages(t *testing.T) {
 		t.Errorf("expected prompt2 to fallback to previous user message, got %q", prompt2)
 	}
 }
+
+func TestFlattenMessagesForModel(t *testing.T) {
+	messages := []domain.OpenAIMessage{
+		{Role: "user", Content: "Bạn là model gì?"},
+	}
+
+	// 1. Flash-Lite
+	sys1, prompt1 := domain.FlattenMessagesForModel(messages, "gemini-3.5-flash-lite")
+	if !strings.Contains(sys1, "Gemini 3.5 Flash-Lite") {
+		t.Errorf("expected 3.5 Flash-Lite in system, got: %s", sys1)
+	}
+	if !strings.Contains(prompt1, "Gemini 3.5 Flash-Lite") {
+		t.Errorf("expected 3.5 Flash-Lite in prompt, got: %s", prompt1)
+	}
+
+	// 2. Flash
+	sys2, _ := domain.FlattenMessagesForModel(messages, "gemini-3.8-flash")
+	if !strings.Contains(sys2, "Gemini 3.8 Flash") {
+		t.Errorf("expected 3.8 Flash in system, got: %s", sys2)
+	}
+
+	// 3. Pro
+	sys3, _ := domain.FlattenMessagesForModel(messages, "gemini-3.1-pro")
+	if !strings.Contains(sys3, "Gemini 3.1 Pro") {
+		t.Errorf("expected 3.1 Pro in system, got: %s", sys3)
+	}
+
+	// 4. Kèm custom system message
+	customMessages := []domain.OpenAIMessage{
+		{Role: "system", Content: "Bạn là chuyên gia lập trình Go"},
+		{Role: "user", Content: "Xin chào"},
+	}
+	sysCustom, _ := domain.FlattenMessagesForModel(customMessages, "gemini-3.5-flash-lite")
+	if !strings.Contains(sysCustom, "Gemini 3.5 Flash-Lite") || !strings.Contains(sysCustom, "chuyên gia lập trình Go") {
+		t.Errorf("expected both identity and custom system, got: %s", sysCustom)
+	}
+}

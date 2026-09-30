@@ -177,3 +177,18 @@ func TestDeleteConversationRequestAndResponse(t *testing.T) {
 		t.Errorf("ParseDeleteConversationResponse thất bại: %v", err)
 	}
 }
+
+func TestModeSwitchRequestAndResponse(t *testing.T) {
+	req, err := domain.BuildModeSwitchRequest("8c46e95b1a07cecc")
+	if err != nil {
+		t.Fatalf("BuildModeSwitchRequest thất bại: %v", err)
+	}
+	if !strings.Contains(req, "L5adhe") || !strings.Contains(req, "8c46e95b1a07cecc") {
+		t.Fatalf("payload không đúng: %s", req)
+	}
+
+	ok, err := domain.ParseModeSwitchResponse(`[[["wrb.fr","L5adhe","[1]",null,null,null,"generic"]]]`)
+	if err != nil || !ok {
+		t.Errorf("ParseModeSwitchResponse thất bại: %v", err)
+	}
+}

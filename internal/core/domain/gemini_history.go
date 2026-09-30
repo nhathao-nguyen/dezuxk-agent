@@ -279,7 +279,13 @@ func ParseBranchSwitchResponse(rawJSON string) (bool, error) {
 	}
 }
 
-// BuildAccountTierRequest đóng gói payload batchexecute cho RPC I4z33b
+const (
+	ModeIDPro       = "e6fa609c3fa255c0"
+	ModeIDFlash     = "56fdd199312815e2"
+	ModeIDFlashLite = "8c46e95b1a07cecc"
+)
+
+// BuildAccountTierRequest đóng gói payload batchexecute cho RPC I4z33b (legacy)
 func BuildAccountTierRequest() string {
 	outerEnvelope := [][]any{
 		{
@@ -293,11 +299,25 @@ func BuildAccountTierRequest() string {
 	return string(payloadBytes)
 }
 
-// ParseAccountTierResponse phân tích payload trả về từ RPC I4z33b
+// BuildOtAQ7bRequest đóng gói payload batchexecute cho RPC otAQ7b (hiện đại)
+func BuildOtAQ7bRequest() string {
+	outerEnvelope := [][]any{
+		{
+			"otAQ7b",
+			"[]",
+			nil,
+			"generic",
+		},
+	}
+	payloadBytes, _ := json.Marshal([]any{outerEnvelope})
+	return string(payloadBytes)
+}
+
+// ParseAccountTierResponse phân tích payload trả về từ RPC otAQ7b hoặc I4z33b
 func ParseAccountTierResponse(rawJSON string) (*AccountTierInfo, error) {
 	rawJSON = strings.TrimSpace(rawJSON)
 	if rawJSON == "" {
-		return nil, fmt.Errorf("payload I4z33b rỗng")
+		return nil, fmt.Errorf("payload tier rỗng")
 	}
 
 	info := &AccountTierInfo{
@@ -307,11 +327,15 @@ func ParseAccountTierResponse(rawJSON string) (*AccountTierInfo, error) {
 		RawPayload:        rawJSON,
 	}
 
-	// Nhận diện gói theo các token trong payload
+	// Nhận diện gói Pro theo mã modeId của otAQ7b hoặc token GOOGLE_ONE_AI_PREMIUM / Google AI Pro
 	if strings.Contains(rawJSON, "GOOGLE_ONE_AI_PREMIUM") {
 		info.TierCode = "GOOGLE_ONE_AI_PREMIUM"
 		info.ContextWindowSize = 1000000
-		info.Capabilities = append(info.Capabilities, "advanced_reasoning", "pro_tier", "expanded_context")
+		info.Capabilities = append(info.Capabilities, "advanced_reasoning", "pro_tier", "expanded_context", "extended_thinking")
+	} else if strings.Contains(rawJSON, ModeIDPro) || strings.Contains(rawJSON, "GOOGLE_AI_PRO") || strings.Contains(rawJSON, "Google AI Pro") {
+		info.TierCode = "GOOGLE_AI_PRO"
+		info.ContextWindowSize = 1000000
+		info.Capabilities = append(info.Capabilities, "advanced_reasoning", "pro_tier", "expanded_context", "extended_thinking")
 	} else if strings.Contains(rawJSON, "WORKSPACE_ENTERPRISE") {
 		info.TierCode = "WORKSPACE_ENTERPRISE"
 		info.ContextWindowSize = 2000000
@@ -476,3 +500,46 @@ func ParseDeleteConversationResponse(rawJSON string) (bool, error) {
 	}
 	return true, nil
 }
+
+// BuildModeSwitchRequest đóng gói payload batchexecute cho RPC L5adhe để kích hoạt model mode
+func BuildModeSwitchRequest(modeID string) (string, error) {
+	modeID = strings.TrimSpace(modeID)
+	if modeID == "" {
+		return "", fmt.Errorf("modeID không được để trống khi chuyển mode")
+	}
+
+	// Mảng 100 phần tử: 99 null và modeID ở vị trí index 99
+	innerList := make([]any, 100)
+	innerList[99] = modeID
+
+	outerPayload := []any{innerList, nil, []any{100}}
+	innerJSON, err := json.Marshal(outerPayload)
+	if err != nil {
+		return "", fmt.Errorf("lỗi encode args L5adhe: %w", err)
+	}
+
+	outerEnvelope := [][]any{
+		{
+			"L5adhe",
+			string(innerJSON),
+			nil,
+			"generic",
+		},
+	}
+	payloadBytes, err := json.Marshal([]any{outerEnvelope})
+	if err != nil {
+		return "", fmt.Errorf("lỗi encode envelope L5adhe: %w", err)
+	}
+
+	return string(payloadBytes), nil
+}
+
+// ParseModeSwitchResponse kiểm tra phản hồi từ RPC L5adhe
+func ParseModeSwitchResponse(rawJSON string) (bool, error) {
+	_, err := ExtractBatchexecuteEnvelopePayload(rawJSON, "L5adhe")
+	if err != nil {
+		return false, fmt.Errorf("L5adhe JSON không hợp lệ: %w", err)
+	}
+	return true, nil
+}
+

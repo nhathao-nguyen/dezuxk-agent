@@ -56,14 +56,16 @@ func VirtualKeyAuthMiddleware(keyUseCase ports.KeyUseCase) func(http.Handler) ht
 				return
 			}
 
-			// 4. Tiêu thụ 1 lượt hạn ngạch ngày (Quota Decrementor)
-			if _, err := keyUseCase.ConsumeQuota(r.Context(), vKey.ID); err != nil {
-				if errors.Is(err, domain.ErrDailyQuotaExceeded) {
-					writeAuthError(w, http.StatusTooManyRequests, "quota_exceeded", "Đã sử dụng hết hạn ngạch yêu cầu trong ngày của khóa API.")
+			// 4. Tiêu thụ 1 lượt hạn ngạch ngày (Quota Decrementor) chỉ đối với các tác vụ tính phí (/v1/chat/completions)
+			if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/chat/completions") {
+				if _, err := keyUseCase.ConsumeQuota(r.Context(), vKey.ID); err != nil {
+					if errors.Is(err, domain.ErrDailyQuotaExceeded) {
+						writeAuthError(w, http.StatusTooManyRequests, "quota_exceeded", "Đã sử dụng hết hạn ngạch yêu cầu trong ngày của khóa API.")
+						return
+					}
+					writeAuthError(w, http.StatusInternalServerError, "quota_error", "Không thể ghi nhận hạn ngạch.")
 					return
 				}
-				writeAuthError(w, http.StatusInternalServerError, "quota_error", "Không thể ghi nhận hạn ngạch.")
-				return
 			}
 
 			// 5. Đưa thông tin VirtualKey vào Request Context để các tầng sau sử dụng
@@ -95,11 +97,12 @@ func extractTargetModel(r *http.Request) string {
 		return m
 	}
 
-	// Đọc thân JSON (tối đa 1MB) và phục hồi r.Body
+	// Đọc thân JSON (tối đa 16MB) và phục hồi hoàn chỉnh r.Body bằng io.MultiReader
 	if r.Method == http.MethodPost && strings.Contains(r.Header.Get("Content-Type"), "application/json") && r.Body != nil {
-		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
+		const maxPeek = 16 * 1024 * 1024
+		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxPeek))
 		if err == nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), r.Body))
 			var peek struct {
 				Model string `json:"model"`
 			}

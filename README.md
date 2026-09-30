@@ -84,7 +84,7 @@ Bạn có thể cắm ngay **Dezuxk AI Gateway** vào bất kỳ ứng dụng h�
 
 #### 1. NextChat (ChatGPT-Next-Web)
 * **Custom Model (Mô hình tùy chỉnh)**: `-all,+gemini-3.8-flash,+gemini-3.1-pro,+gemini-3.0-ultra`
-* **OpenAI API Key**: Nhập key được tạo ở Bước 2 (hoặc key quản trị: `dezuxk_admin_secret_key_2026`).
+* **OpenAI API Key**: Nhập key được tạo ở Bước 2 (hoặc key quản trị: `dezuxk_secure_admin_session_token_2026`).
 * **OpenAI Endpoint (Địa chỉ API)**: `http://127.0.0.1:8080` (hoặc `http://127.0.0.1:8080/v1`).
 
 #### 2. OpenWebUI / LibreChat

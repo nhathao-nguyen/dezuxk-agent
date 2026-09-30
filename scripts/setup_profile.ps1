@@ -6,7 +6,7 @@
 $ErrorActionPreference = "Stop"
 
 $BaseURL = "http://127.0.0.1:8080"
-$AdminToken = "dezuxk_secure_admin_session_token_2026"
+$AdminToken = "sk-dez-12f564ddef831e78546a198cd56f4deb"
 
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host "   DEZUXK AI GATEWAY - THIET LAP TAI KHOAN GOOGLE GEMINI (1-CLICK)    " -ForegroundColor Yellow
@@ -106,7 +106,26 @@ try {
         Write-Host "   Gemini CSRF Token: $($snToken.Substring(0, $previewLen))..." -ForegroundColor Gray
     }
 } catch {
-    Write-Host "[LOI DONG BO] $($_.Exception.Message)" -ForegroundColor Red
+    $errMsg = $_.Exception.Message
+    if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+        try {
+            $jsonErr = $_.ErrorDetails.Message | ConvertFrom-Json
+            if ($jsonErr.error) { $errMsg = $jsonErr.error }
+        } catch {
+            $errMsg = $_.ErrorDetails.Message
+        }
+    } elseif ($_.Exception.Response) {
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            if ($stream) {
+                $reader = New-Object System.IO.StreamReader($stream)
+                $body = $reader.ReadToEnd()
+                $jsonErr = $body | ConvertFrom-Json
+                if ($jsonErr.error) { $errMsg = $jsonErr.error }
+            }
+        } catch {}
+    }
+    Write-Host "[LOI DONG BO] $errMsg" -ForegroundColor Red
     Write-Host "Kiem tra lai cua so Chrome xem da dang nhap thanh cong vao gemini.google.com chua." -ForegroundColor Yellow
     exit 1
 }
@@ -136,7 +155,7 @@ try {
     $VirtualKey = $keyResp.key
 } catch {
     Write-Host "[CANH BAO] Dung Master API Key mac dinh" -ForegroundColor Yellow
-    $VirtualKey = "dezuxk_admin_secret_key_2026"
+    $VirtualKey = $AdminToken
 }
 
 # 7. Hien thi thong so ket noi

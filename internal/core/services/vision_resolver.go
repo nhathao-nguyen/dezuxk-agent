@@ -88,8 +88,7 @@ func (vr *VisionResolver) ResolveImage(ctx context.Context, rawURL string, index
 				fmt.Sprintf("dung lượng ảnh (%d bytes) vượt quá giới hạn cấu hình (%d bytes)", size, maxBytes))
 		}
 
-		ext := extensionForMime(mimeType)
-		fileName := fmt.Sprintf("upload_image_%d.%s", index+1, ext)
+		fileName := fileNameForMime(mimeType, index)
 
 		return &ResolvedImageData{
 			FileName:   fileName,
@@ -144,8 +143,7 @@ func (vr *VisionResolver) ResolveImage(ctx context.Context, rawURL string, index
 				fmt.Sprintf("định dạng ảnh %s không được hỗ trợ (chỉ chấp nhận: %s)", mimeType, strings.Join(allowedMimes, ", ")))
 		}
 
-		ext := extensionForMime(mimeType)
-		fileName := fmt.Sprintf("upload_image_%d.%s", index+1, ext)
+		fileName := fileNameForMime(mimeType, index)
 
 		return &ResolvedImageData{
 			FileName: fileName,
@@ -249,6 +247,18 @@ func isMimeAllowed(mime string, allowed []string) bool {
 	return false
 }
 
+func fileNameForMime(mime string, index int) string {
+	ext := extensionForMime(mime)
+	prefix := "upload_image"
+	lower := strings.ToLower(strings.TrimSpace(mime))
+	if strings.HasPrefix(lower, "application/") || strings.HasPrefix(lower, "text/") {
+		prefix = "upload_doc"
+	} else if strings.HasPrefix(lower, "audio/") {
+		prefix = "upload_audio"
+	}
+	return fmt.Sprintf("%s_%d.%s", prefix, index+1, ext)
+}
+
 func extensionForMime(mime string) string {
 	switch strings.ToLower(strings.TrimSpace(mime)) {
 	case "image/png":
@@ -257,7 +267,35 @@ func extensionForMime(mime string) string {
 		return "webp"
 	case "image/gif":
 		return "gif"
-	default:
+	case "image/jpeg", "image/jpg":
 		return "jpg"
+	case "application/pdf":
+		return "pdf"
+	case "text/plain":
+		return "txt"
+	case "text/csv":
+		return "csv"
+	case "application/json":
+		return "json"
+	case "text/markdown", "text/x-markdown":
+		return "md"
+	case "audio/mpeg", "audio/mp3":
+		return "mp3"
+	case "audio/wav", "audio/x-wav":
+		return "wav"
+	case "audio/ogg":
+		return "ogg"
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return "docx"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return "xlsx"
+	default:
+		if strings.HasPrefix(mime, "audio/") {
+			return "mp3"
+		}
+		if strings.HasPrefix(mime, "text/") {
+			return "txt"
+		}
+		return "bin"
 	}
 }
