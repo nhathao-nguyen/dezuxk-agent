@@ -277,3 +277,107 @@ func TestFlattenMessagesForModel(t *testing.T) {
 		t.Errorf("expected both identity and custom system, got: %s", sysCustom)
 	}
 }
+
+func TestOpenAIChatRequest_ToolSerialization(t *testing.T) {
+	rawJSON := `{
+		"model": "gemini-3.8-flash",
+		"messages": [
+			{
+				"role": "user",
+				"content": "Hãy đọc file main.go"
+			},
+			{
+				"role": "assistant",
+				"content": "Tôi sẽ đọc file.",
+				"reasoning_content": "Cần dùng tool read_file",
+				"tool_calls": [
+					{
+						"id": "call_123",
+						"type": "function",
+						"function": {
+							"name": "read_file",
+							"arguments": "{\"path\":\"main.go\"}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call_123",
+				"content": "package main\n\nfunc main() {}"
+			}
+		],
+		"tools": [
+			{
+				"type": "function",
+				"function": {
+					"name": "read_file",
+					"description": "Read file",
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"path": {"type": "string"}
+						},
+						"required": ["path"]
+					}
+				}
+			}
+		],
+		"tool_choice": "auto"
+	}`
+
+	var req domain.OpenAIChatRequest
+	if err := json.Unmarshal([]byte(rawJSON), &req); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if len(req.Tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(req.Tools))
+	}
+	if req.Tools[0].Function.Name != "read_file" {
+		t.Errorf("expected tool name 'read_file', got %s", req.Tools[0].Function.Name)
+	}
+
+	if len(req.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(req.Messages))
+	}
+	asst := req.Messages[1]
+	if asst.ReasoningContent != "Cần dùng tool read_file" {
+		t.Errorf("expected reasoning_content, got %s", asst.ReasoningContent)
+	}
+	if len(asst.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(asst.ToolCalls))
+	}
+	if asst.ToolCalls[0].Function.Name != "read_file" {
+		t.Errorf("expected function name read_file, got %s", asst.ToolCalls[0].Function.Name)
+	}
+	if req.Messages[2].ToolCallID != "call_123" {
+		t.Errorf("expected tool_call_id call_123, got %s", req.Messages[2].ToolCallID)
+	}
+
+	// Verify Delta marshaling with tool calls and reasoning
+	delta := domain.OpenAIDelta{
+		Role:             "assistant",
+		ReasoningContent: "Thinking step 1",
+		ToolCalls: []domain.OpenAIToolCall{
+			{
+				Index: 0,
+				ID:    "call_abc",
+				Type:  "function",
+				Function: domain.OpenAIFunctionCallData{
+					Name:      "read_file",
+					Arguments: "{\"path\":\"foo.go\"}",
+				},
+			},
+		},
+	}
+	deltaBytes, err := json.Marshal(delta)
+	if err != nil {
+		t.Fatalf("Delta marshal failed: %v", err)
+	}
+	deltaStr := string(deltaBytes)
+	if !strings.Contains(deltaStr, "reasoning_content") || !strings.Contains(deltaStr, "tool_calls") {
+		t.Errorf("expected delta JSON to contain reasoning_content and tool_calls, got: %s", deltaStr)
+	}
+}
+

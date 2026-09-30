@@ -77,23 +77,55 @@ type MessageImageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+type OpenAITool struct {
+	Type     string            `json:"type"`
+	Function OpenAIFunctionDef `json:"function"`
+}
+
+type OpenAIFunctionDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type OpenAIToolCall struct {
+	Index    int                    `json:"index,omitempty"`
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function OpenAIFunctionCallData `json:"function"`
+}
+
+type OpenAIFunctionCallData struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
 type OpenAIMessage struct {
-	Role         string               `json:"role"`
-	Content      string               `json:"content"`
-	ContentParts []MessageContentPart `json:"content_parts,omitempty"`
+	Role             string               `json:"role"`
+	Content          string               `json:"content"`
+	ReasoningContent string               `json:"reasoning_content,omitempty"`
+	ContentParts     []MessageContentPart `json:"content_parts,omitempty"`
+	ToolCalls        []OpenAIToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID       string               `json:"tool_call_id,omitempty"`
 }
 
 func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Role         string               `json:"role"`
-		Content      json.RawMessage      `json:"content"`
-		ContentParts []MessageContentPart `json:"content_parts,omitempty"`
+		Role             string               `json:"role"`
+		Content          json.RawMessage      `json:"content"`
+		ReasoningContent string               `json:"reasoning_content,omitempty"`
+		ContentParts     []MessageContentPart `json:"content_parts,omitempty"`
+		ToolCalls        []OpenAIToolCall     `json:"tool_calls,omitempty"`
+		ToolCallID       string               `json:"tool_call_id,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
 	m.Role = raw.Role
+	m.ReasoningContent = raw.ReasoningContent
 	m.ContentParts = raw.ContentParts
+	m.ToolCalls = raw.ToolCalls
+	m.ToolCallID = raw.ToolCallID
 
 	if len(raw.Content) == 0 || string(raw.Content) == "null" {
 		return nil
@@ -125,11 +157,17 @@ func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 
 func (m OpenAIMessage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+		Role             string           `json:"role"`
+		Content          string           `json:"content"`
+		ReasoningContent string           `json:"reasoning_content,omitempty"`
+		ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+		ToolCallID       string           `json:"tool_call_id,omitempty"`
 	}{
-		Role:    m.Role,
-		Content: m.Content,
+		Role:             m.Role,
+		Content:          m.Content,
+		ReasoningContent: m.ReasoningContent,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
 	})
 }
 
@@ -169,6 +207,8 @@ type OpenAIChatRequest struct {
 	Attachments      []GeminiAttachment `json:"attachments,omitempty"`
 	ParentResponseID string             `json:"parent_response_id,omitempty"`
 	ParentChoiceID   string             `json:"parent_choice_id,omitempty"`
+	Tools            []OpenAITool       `json:"tools,omitempty"`
+	ToolChoice       any                `json:"tool_choice,omitempty"`
 }
 
 func (r *OpenAIChatRequest) GetAllImageURLs() []string {
@@ -213,12 +253,14 @@ type OpenAIChoice struct {
 }
 
 type OpenAIDelta struct {
-	Role           string             `json:"role,omitempty"`
-	Content        string             `json:"content,omitempty"`
-	Thinking       string             `json:"thinking,omitempty"`
-	Grounding      *GroundingMetadata `json:"grounding,omitempty"`
-	CodeExecutions []CodeExecution    `json:"code_executions,omitempty"`
-	MediaURLs      []string           `json:"media_urls,omitempty"`
+	Role             string             `json:"role,omitempty"`
+	Content          string             `json:"content,omitempty"`
+	ReasoningContent string             `json:"reasoning_content,omitempty"`
+	Thinking         string             `json:"thinking,omitempty"`
+	ToolCalls        []OpenAIToolCall   `json:"tool_calls,omitempty"`
+	Grounding        *GroundingMetadata `json:"grounding,omitempty"`
+	CodeExecutions   []CodeExecution    `json:"code_executions,omitempty"`
+	MediaURLs        []string           `json:"media_urls,omitempty"`
 }
 
 type OpenAIUsage struct {
