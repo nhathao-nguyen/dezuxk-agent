@@ -381,3 +381,51 @@ func TestOpenAIChatRequest_ToolSerialization(t *testing.T) {
 	}
 }
 
+func TestFlattenMessages_WithToolCallsAndResults(t *testing.T) {
+	messages := []domain.OpenAIMessage{
+		{
+			Role:    "user",
+			Content: "Đọc file main.go giúp tôi",
+		},
+		{
+			Role:    "assistant",
+			Content: "Đang đọc file...",
+			ToolCalls: []domain.OpenAIToolCall{
+				{
+					ID:   "call_999",
+					Type: "function",
+					Function: domain.OpenAIFunctionCallData{
+						Name:      "read_file",
+						Arguments: `{"path":"main.go"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:       "tool",
+			ToolCallID: "call_999",
+			Content:    "package main\nfunc main() {}",
+		},
+		{
+			Role:    "user",
+			Content: "Bây giờ hãy sửa hàm main để in Hello",
+		},
+	}
+
+	_, prompt := domain.FlattenMessagesForModel(messages, "gemini-3.8-flash")
+
+	// Verify tool result formatting
+	if !strings.Contains(prompt, "[Tool Result (call_id: call_999)]") {
+		t.Errorf("expected prompt to contain '[Tool Result (call_id: call_999)]', got: %s", prompt)
+	}
+	// Verify assistant tool invocation formatting
+	if !strings.Contains(prompt, "[Invoked Tool read_file") {
+		t.Errorf("expected prompt to contain '[Invoked Tool read_file', got: %s", prompt)
+	}
+	// Verify last user prompt
+	if !strings.Contains(prompt, "Bây giờ hãy sửa hàm main để in Hello") {
+		t.Errorf("expected prompt to end with current user prompt, got: %s", prompt)
+	}
+}
+
+

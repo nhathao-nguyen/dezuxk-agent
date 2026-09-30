@@ -345,9 +345,27 @@ func FlattenMessagesForModel(messages []OpenAIMessage, modelID string) (system s
 				dialogParts = append(dialogParts, "User: "+m.Content)
 			}
 		case "assistant":
-			if strings.TrimSpace(m.Content) != "" {
-				dialogParts = append(dialogParts, "Assistant: "+m.Content)
+			asstText := m.Content
+			if len(m.ToolCalls) > 0 {
+				var calls []string
+				for _, tc := range m.ToolCalls {
+					calls = append(calls, fmt.Sprintf("[Invoked Tool %s with arguments: %s]", tc.Function.Name, tc.Function.Arguments))
+				}
+				if asstText != "" {
+					asstText = asstText + "\n" + strings.Join(calls, "\n")
+				} else {
+					asstText = strings.Join(calls, "\n")
+				}
 			}
+			if strings.TrimSpace(asstText) != "" {
+				dialogParts = append(dialogParts, "Assistant: "+asstText)
+			}
+		case "tool", "function":
+			callID := m.ToolCallID
+			if callID == "" {
+				callID = "default"
+			}
+			dialogParts = append(dialogParts, fmt.Sprintf("[Tool Result (call_id: %s)]:\n%s", callID, m.Content))
 		default:
 			if strings.TrimSpace(m.Content) != "" {
 				dialogParts = append(dialogParts, m.Role+": "+m.Content)
