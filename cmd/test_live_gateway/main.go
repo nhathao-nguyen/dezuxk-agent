@@ -16,7 +16,7 @@ import (
 )
 
 const baseURL = "http://127.0.0.1:8080"
-const adminToken = "dezuxk_secure_admin_session_token_2026"
+const adminToken = "sk-dez-12f564ddef831e78546a198cd56f4deb"
 
 type TestRunner struct {
 	client     *http.Client
@@ -55,6 +55,9 @@ func main() {
 
 	// 7. Test Thinking Mode (Suy luận sâu)
 	runner.testChatThinking()
+
+	// 7.1. Test Cursor Agent Tool Calling & Reasoning Content
+	runner.testCursorToolCalling()
 
 	// 8. Test Search Grounding (Truy vấn Web trực tiếp)
 	runner.testChatSearchGrounding()
@@ -352,6 +355,66 @@ func (r *TestRunner) testChatThinking() {
 
 	details := fmt.Sprintf("Thinking Blocks: %d | Trả lời: %s", len(thinking), strings.ReplaceAll(answer, "\n", " "))
 	r.logPass("Chat Thinking", time.Since(t0).Milliseconds(), details)
+}
+
+func (r *TestRunner) testCursorToolCalling() {
+	fmt.Println("\n--- [Phần 7.1: Cursor Agent Tool Calling & Reasoning Content] ---")
+	t0 := time.Now()
+
+	reqBody := map[string]any{
+		"model": "cursor-agent-test", // Test resilient Flash routing
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": "Hãy gọi công cụ read_file để đọc file config.yaml giúp tôi.",
+			},
+		},
+		"tools": []map[string]any{
+			{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "read_file",
+					"description": "Đọc nội dung tệp tin",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"path": map[string]any{"type": "string"},
+						},
+						"required": []string{"path"},
+					},
+				},
+			},
+		},
+	}
+
+	bodyBytes, _ := json.Marshal(reqBody)
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/v1/chat/completions", bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "Bearer "+r.virtualKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := r.client.Do(req)
+	if !r.checkResp("Cursor Tool Calling (Sync)", resp, err, http.StatusOK) {
+		return
+	}
+	defer resp.Body.Close()
+
+	var chatResp map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&chatResp)
+
+	choices, _ := chatResp["choices"].([]any)
+	if len(choices) == 0 {
+		r.logFail("Cursor Tool Calling", fmt.Errorf("không có choices trong response"))
+		return
+	}
+
+	c0, _ := choices[0].(map[string]any)
+	msg, _ := c0["message"].(map[string]any)
+	toolCalls, _ := msg["tool_calls"].([]any)
+	finishReason, _ := c0["finish_reason"].(string)
+
+	elapsed := time.Since(t0).Milliseconds()
+	details := fmt.Sprintf("Tool Calls: %d | FinishReason: %s", len(toolCalls), finishReason)
+	r.logPass("Cursor Tool Calling", elapsed, details)
 }
 
 func (r *TestRunner) testChatSearchGrounding() {
