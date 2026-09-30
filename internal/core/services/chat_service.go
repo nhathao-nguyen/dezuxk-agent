@@ -383,7 +383,70 @@ func (s *ChatService) streamRound(
 		usage = s.tokenCounter.CalculateUsage(req.Messages, reply)
 	}
 
+	_, toolCalls := ExtractToolCalls(reply.Text)
+
+	var reasoningText string
+	if len(reply.ThinkingBlocks) > 0 {
+		var rParts []string
+		for _, tb := range reply.ThinkingBlocks {
+			if strings.TrimSpace(tb.Content) != "" {
+				rParts = append(rParts, tb.Content)
+			}
+		}
+		reasoningText = strings.Join(rParts, "\n\n")
+	}
+
+	// Phát chunk reasoning_content cho Cursor hiển thị thanh Thinking
+	if reasoningText != "" {
+		reasoningChunk := domain.OpenAIChatResponse{
+			ID:             "chatcmpl-" + conversationID,
+			Object:         "chat.completion.chunk",
+			Created:        createdTime,
+			Model:          req.Model,
+			ConversationID: conversationID,
+			Choices: []domain.OpenAIChoice{{
+				Index: 0,
+				Delta: domain.OpenAIDelta{
+					ReasoningContent: reasoningText,
+				},
+			}},
+		}
+		if b, err := json.Marshal(reasoningChunk); err == nil {
+			_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+			if flusher != nil {
+				flusher()
+			}
+		}
+	}
+
+	// Phát chunk tool_calls cho Cursor Agent thực thi công cụ
+	if len(toolCalls) > 0 {
+		toolChunk := domain.OpenAIChatResponse{
+			ID:             "chatcmpl-" + conversationID,
+			Object:         "chat.completion.chunk",
+			Created:        createdTime,
+			Model:          req.Model,
+			ConversationID: conversationID,
+			Choices: []domain.OpenAIChoice{{
+				Index: 0,
+				Delta: domain.OpenAIDelta{
+					ToolCalls: toolCalls,
+				},
+			}},
+		}
+		if b, err := json.Marshal(toolChunk); err == nil {
+			_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+			if flusher != nil {
+				flusher()
+			}
+		}
+	}
+
 	stopReason := "stop"
+	if len(toolCalls) > 0 {
+		stopReason = "tool_calls"
+	}
+
 	finalChunk := domain.OpenAIChatResponse{
 		ID:             "chatcmpl-" + conversationID,
 		Object:         "chat.completion.chunk",
@@ -485,13 +548,31 @@ func (s *ChatService) syncRound(
 		usage = s.tokenCounter.CalculateUsage(req.Messages, reply)
 	}
 
+	cleanText, toolCalls := ExtractToolCalls(reply.Text)
+	var reasoningText string
+	if len(reply.ThinkingBlocks) > 0 {
+		var rParts []string
+		for _, tb := range reply.ThinkingBlocks {
+			if strings.TrimSpace(tb.Content) != "" {
+				rParts = append(rParts, tb.Content)
+			}
+		}
+		reasoningText = strings.Join(rParts, "\n\n")
+	}
+
 	stopReason := "stop"
+	if len(toolCalls) > 0 {
+		stopReason = "tool_calls"
+	}
+
 	choices := []domain.OpenAIChoice{
 		{
 			Index: 0,
 			Message: domain.OpenAIMessage{
-				Role:    "assistant",
-				Content: reply.Text,
+				Role:             "assistant",
+				Content:          cleanText,
+				ReasoningContent: reasoningText,
+				ToolCalls:        toolCalls,
 			},
 			FinishReason: &stopReason,
 		},
@@ -500,11 +581,13 @@ func (s *ChatService) syncRound(
 		for i := 1; i < len(reply.Drafts); i++ {
 			draftContent := reply.Drafts[i]
 			if strings.TrimSpace(draftContent) != "" && draftContent != reply.Text {
+				dClean, dCalls := ExtractToolCalls(draftContent)
 				choices = append(choices, domain.OpenAIChoice{
 					Index: len(choices),
 					Message: domain.OpenAIMessage{
-						Role:    "assistant",
-						Content: draftContent,
+						Role:      "assistant",
+						Content:   dClean,
+						ToolCalls: dCalls,
 					},
 					FinishReason: &stopReason,
 				})
@@ -540,6 +623,13 @@ func (s *ChatService) postGemini(
 	}
 
 	_, lastUserPrompt := domain.FlattenMessagesForModel(req.Messages, req.Model)
+	if len(req.Tools) > 0 {
+		toolPrompt := domain.CompileToolsInstruction(req.Tools)
+		if toolPrompt != "" {
+			lastUserPrompt = toolPrompt + "\n\n" + lastUserPrompt
+		}
+	}
+
 	isThinking := strings.Contains(strings.ToLower(req.Model), "thinking")
 	if req.Thinking != nil {
 		isThinking = *req.Thinking
@@ -554,7 +644,7 @@ func (s *ChatService) postGemini(
 	}
 
 	modelTier := modelDesc.ModelTierCode
-	if isThinking && modelTier < 3 {
+	if isThinking && modelTier < 3 && strings.Contains(strings.ToLower(req.Model), "pro") {
 		modelTier = 3
 	}
 
