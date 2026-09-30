@@ -118,17 +118,39 @@ func (s *ChatService) ExecuteChatSync(
 }
 
 func (s *ChatService) prepareModel(req *domain.OpenAIChatRequest) (*domain.ModelDescriptor, error) {
-	if req == nil || strings.TrimSpace(req.Model) == "" || len(req.Messages) == 0 {
-		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "thiếu hội thoại hoặc mô hình")
+	if req == nil || len(req.Messages) == 0 {
+		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "thiếu hội thoại")
 	}
+
+	modelInput := strings.ToLower(strings.TrimSpace(req.Model))
+
+	// 1. Tìm chính xác trong modelRegistry trước
 	modelDesc, err := s.modelRegistry.MustFind(req.Model)
-	if err != nil {
-		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "không có mô hình này")
+	if err == nil && modelDesc != nil && modelDesc.TargetService == domain.ServiceGemini {
+		return modelDesc, nil
 	}
-	if modelDesc.TargetService != domain.ServiceGemini {
-		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "mô hình này không dùng cho chat")
+
+	// 2. Resilient Flash-First Routing: Phân giải thông minh
+	// - Nếu chứa 'pro' -> chọn 'gemini-3.1-pro'
+	// - Mặc định mọi tên khác ('default', 'gpt-4o', 'cursor-small', 'flash', rỗng...) -> chọn 'gemini-3.8-flash'
+	targetID := "gemini-3.8-flash"
+	if strings.Contains(modelInput, "pro") {
+		targetID = "gemini-3.1-pro"
 	}
-	return modelDesc, nil
+
+	fallbackDesc, fallbackErr := s.modelRegistry.MustFind(targetID)
+	if fallbackErr == nil && fallbackDesc != nil && fallbackDesc.TargetService == domain.ServiceGemini {
+		return fallbackDesc, nil
+	}
+
+	// Fallback cuối cùng: lấy model Gemini đầu tiên khả dụng trong registry
+	for _, m := range s.modelRegistry.List() {
+		if m.TargetService == domain.ServiceGemini {
+			return &m, nil
+		}
+	}
+
+	return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "không có mô hình Gemini khả dụng")
 }
 
 type failoverAction func(account *domain.ManagedAccount) (canRetry bool, err error)
@@ -630,9 +652,11 @@ func (s *ChatService) postGemini(
 		}
 	}
 
-	isThinking := strings.Contains(strings.ToLower(req.Model), "thinking")
+	isThinking := true // Smart-by-Default: luôn bật suy luận trừ khi có yêu cầu tắt
 	if req.Thinking != nil {
 		isThinking = *req.Thinking
+	} else if strings.Contains(strings.ToLower(req.Model), "no-thinking") {
+		isThinking = false
 	}
 	isGrounding := true
 	if req.SearchGrounding != nil {

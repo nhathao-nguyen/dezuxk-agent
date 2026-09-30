@@ -290,3 +290,35 @@ func TestChatService_CachesMediaURLs(t *testing.T) {
 		t.Errorf("Expected content with local URL replaced, got %s", resp.Choices[0].Message.Content)
 	}
 }
+
+func TestPrepareModel_FlashFirstAndSmartByDefault(t *testing.T) {
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, mediaChatCodec{}, metrics)
+
+	// Case 1: Unknown model name from Cursor (e.g. "cursor-small", "default", "gpt-4o") should route to Flash
+	resp, err := chatService.ExecuteChatSync(context.Background(), &domain.OpenAIChatRequest{
+		Model:    "cursor-small",
+		Messages: []domain.OpenAIMessage{{Role: "user", Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Expected resilient routing to Flash, got error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("Expected response, got nil")
+	}
+
+	// Case 2: Model containing "pro" should route to Pro
+	respPro, err := chatService.ExecuteChatSync(context.Background(), &domain.OpenAIChatRequest{
+		Model:    "gemini-pro-custom",
+		Messages: []domain.OpenAIMessage{{Role: "user", Content: "Hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Expected routing to Pro, got error: %v", err)
+	}
+	if respPro == nil {
+		t.Fatal("Expected response for Pro, got nil")
+	}
+}
+
