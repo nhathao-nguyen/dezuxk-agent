@@ -102,10 +102,14 @@ func Run(configPath string, portOverride int) error {
 		keyRepo = session.NewMemoryKeyRepository()
 	}
 	masterAdminKey := cfg.Server.APIKey
-	if masterAdminKey == "" && cfg.Admin.IsEnabled() {
-		masterAdminKey = cfg.Admin.GetSessionToken()
+	var additionalAdminTokens []string
+	if cfg.Admin.IsEnabled() && cfg.Admin.GetSessionToken() != "" {
+		additionalAdminTokens = append(additionalAdminTokens, cfg.Admin.GetSessionToken())
 	}
-	keyService := services.NewKeyService(keyRepo, masterAdminKey)
+	if masterAdminKey == "" && len(additionalAdminTokens) > 0 {
+		masterAdminKey = additionalAdminTokens[0]
+	}
+	keyService := services.NewKeyService(keyRepo, masterAdminKey, additionalAdminTokens...)
 
 	metrics := domain.NewContractMetrics()
 
@@ -161,6 +165,9 @@ func Run(configPath string, portOverride int) error {
 	chatService.SetVisionResolver(visionResolver)
 	chatService.SetTokenCounter(tokenCounter)
 	chatService.SetFailoverConfig(cfg.Failover)
+	if keyService != nil {
+		chatService.SetKeyUseCase(keyService)
+	}
 
 	if sr, ok := sessionRepo.(interface{ SetCoolingDuration(time.Duration) }); ok {
 		sr.SetCoolingDuration(cfg.Failover.GetCoolingDuration())
@@ -228,11 +235,11 @@ func Run(configPath string, portOverride int) error {
 	// 9. Chạy Server trong Goroutine
 	go func() {
 		log.Printf("[Server] Dezuxk Gateway đang lắng nghe tại: http://%s", serverAddr)
+		log.Printf("[Server] Web Dashboard UI:  http://%s/admin/", serverAddr)
 		log.Printf("[Server] Admin Overview API: http://%s/v1/admin/overview", serverAddr)
-		log.Printf("[Server] OpenAI API Base: http://%s/v1", serverAddr)
-		log.Printf("[Server] Profiles API:   http://%s/v1/profiles", serverAddr)
-
-		log.Printf("[Server] Health API:     http://%s/health", serverAddr)
+		log.Printf("[Server] OpenAI API Base:    http://%s/v1", serverAddr)
+		log.Printf("[Server] Profiles API:       http://%s/v1/profiles", serverAddr)
+		log.Printf("[Server] Health API:         http://%s/health", serverAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[Server] Fatal error: %v", err)
 		}

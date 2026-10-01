@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
@@ -50,13 +51,38 @@ func (r *SqliteKeyRepository) migrate() error {
 		allowed_models_json TEXT DEFAULT '["*"]',
 		is_active INTEGER DEFAULT 1,
 		expires_at DATETIME,
-		created_at DATETIME NOT NULL
+		created_at DATETIME NOT NULL,
+		prompt_tokens_total INTEGER DEFAULT 0,
+		completion_tokens_total INTEGER DEFAULT 0,
+		total_tokens INTEGER DEFAULT 0,
+		max_token_quota INTEGER DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_virtual_keys_hash ON virtual_keys(key_hash);
 	CREATE INDEX IF NOT EXISTS idx_virtual_keys_active ON virtual_keys(is_active);
+
+	CREATE TABLE IF NOT EXISTS virtual_key_token_usages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		key_id TEXT NOT NULL,
+		date TEXT NOT NULL,
+		prompt_tokens INTEGER DEFAULT 0,
+		completion_tokens INTEGER DEFAULT 0,
+		total_tokens INTEGER DEFAULT 0,
+		request_count INTEGER DEFAULT 0,
+		UNIQUE(key_id, date)
+	);
+	CREATE INDEX IF NOT EXISTS idx_vkey_usage_key_date ON virtual_key_token_usages(key_id, date);
 	`
-	_, err := r.db.Exec(schema)
-	return err
+	if _, err := r.db.Exec(schema); err != nil {
+		return err
+	}
+
+	// Đảm bảo tương thích ngược nếu bảng đã được tạo trước đó
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN prompt_tokens_total INTEGER DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN completion_tokens_total INTEGER DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN total_tokens INTEGER DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN max_token_quota INTEGER DEFAULT 0")
+
+	return nil
 }
 
 // Save lưu một Virtual API Key mới vào SQLite
@@ -76,8 +102,9 @@ func (r *SqliteKeyRepository) Save(ctx context.Context, key *domain.VirtualKey) 
 	query := `
 	INSERT INTO virtual_keys (
 		id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
-		used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
+		prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	isActiveInt := 0
 	if key.IsActive {
@@ -103,6 +130,10 @@ func (r *SqliteKeyRepository) Save(ctx context.Context, key *domain.VirtualKey) 
 		isActiveInt,
 		expiresAtVal,
 		key.CreatedAt.UTC(),
+		key.PromptTokensTotal,
+		key.CompletionTokensTotal,
+		key.TotalTokens,
+		key.MaxTokenQuota,
 	)
 	return err
 }
@@ -114,7 +145,8 @@ func (r *SqliteKeyRepository) FindByKeyHash(ctx context.Context, keyHash string)
 
 	query := `
 	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
-	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
+	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
+	       prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
 	FROM virtual_keys
 	WHERE key_hash = ?
 	LIMIT 1
@@ -130,7 +162,8 @@ func (r *SqliteKeyRepository) FindByID(ctx context.Context, id string) (*domain.
 
 	query := `
 	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
-	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
+	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
+	       prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
 	FROM virtual_keys
 	WHERE id = ?
 	LIMIT 1
@@ -146,7 +179,8 @@ func (r *SqliteKeyRepository) ListActive(ctx context.Context) ([]*domain.Virtual
 
 	query := `
 	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
-	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at
+	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
+	       prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
 	FROM virtual_keys
 	WHERE is_active = 1
 	ORDER BY created_at DESC
@@ -270,6 +304,10 @@ func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error
 		&isActiveInt,
 		&expiresAt,
 		&k.CreatedAt,
+		&k.PromptTokensTotal,
+		&k.CompletionTokensTotal,
+		&k.TotalTokens,
+		&k.MaxTokenQuota,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -299,15 +337,123 @@ func (r *SqliteKeyRepository) scanKeyFromRows(rows *sql.Rows) (*domain.VirtualKe
 	return r.scanKey(rows)
 }
 
+// RecordTokenUsage cập nhật số lượng token tiêu thụ lũy kế và theo ngày trong SQLite
+func (r *SqliteKeyRepository) RecordTokenUsage(ctx context.Context, id string, promptTokens, completionTokens int) error {
+	if id == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	total := int64(promptTokens + completionTokens)
+	today := time.Now().UTC().Format("2006-01-02")
+
+	// 1. Cập nhật tổng lũy kế trong bảng virtual_keys (nếu không phải khóa master ảo)
+	if id != "master" {
+		queryKey := `
+		UPDATE virtual_keys
+		SET prompt_tokens_total = prompt_tokens_total + ?,
+		    completion_tokens_total = completion_tokens_total + ?,
+		    total_tokens = total_tokens + ?
+		WHERE id = ?
+		`
+		if _, err := r.db.ExecContext(ctx, queryKey, promptTokens, completionTokens, total, id); err != nil {
+			return err
+		}
+	}
+
+	// 2. Cập nhật hoặc chèn bản ghi theo ngày trong virtual_key_token_usages (Upsert)
+	queryDaily := `
+	INSERT INTO virtual_key_token_usages (key_id, date, prompt_tokens, completion_tokens, total_tokens, request_count)
+	VALUES (?, ?, ?, ?, ?, 1)
+	ON CONFLICT(key_id, date) DO UPDATE SET
+	    prompt_tokens = prompt_tokens + excluded.prompt_tokens,
+	    completion_tokens = completion_tokens + excluded.completion_tokens,
+	    total_tokens = total_tokens + excluded.total_tokens,
+	    request_count = request_count + 1
+	`
+	_, err := r.db.ExecContext(ctx, queryDaily, id, today, promptTokens, completionTokens, total)
+	return err
+}
+
+// GetTokenUsageHistory lấy lịch sử tiêu thụ token của một khóa theo số ngày
+func (r *SqliteKeyRepository) GetTokenUsageHistory(ctx context.Context, keyID string, days int) ([]domain.KeyTokenUsage, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if days <= 0 {
+		days = 7
+	}
+
+	query := `
+	SELECT key_id, date, prompt_tokens, completion_tokens, total_tokens, request_count
+	FROM virtual_key_token_usages
+	WHERE key_id = ?
+	ORDER BY date DESC
+	LIMIT ?
+	`
+	rows, err := r.db.QueryContext(ctx, query, keyID, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []domain.KeyTokenUsage
+	for rows.Next() {
+		var u domain.KeyTokenUsage
+		if err := rows.Scan(&u.KeyID, &u.Date, &u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.RequestCount); err != nil {
+			return nil, err
+		}
+		list = append(list, u)
+	}
+	return list, rows.Err()
+}
+
+// GetSystemTokenUsageHistory lấy lịch sử tiêu thụ token gộp toàn hệ thống
+func (r *SqliteKeyRepository) GetSystemTokenUsageHistory(ctx context.Context, days int) ([]domain.KeyTokenUsage, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if days <= 0 {
+		days = 7
+	}
+
+	query := `
+	SELECT '' as key_id, date, SUM(prompt_tokens) as prompt_tokens, SUM(completion_tokens) as completion_tokens,
+	       SUM(total_tokens) as total_tokens, SUM(request_count) as request_count
+	FROM virtual_key_token_usages
+	GROUP BY date
+	ORDER BY date DESC
+	LIMIT ?
+	`
+	rows, err := r.db.QueryContext(ctx, query, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []domain.KeyTokenUsage
+	for rows.Next() {
+		var u domain.KeyTokenUsage
+		if err := rows.Scan(&u.KeyID, &u.Date, &u.PromptTokens, &u.CompletionTokens, &u.TotalTokens, &u.RequestCount); err != nil {
+			return nil, err
+		}
+		list = append(list, u)
+	}
+	return list, rows.Err()
+}
+
 // MemoryKeyRepository lưu trữ Virtual API Keys trong RAM cho kiểm thử nhanh
 type MemoryKeyRepository struct {
-	mu   sync.Mutex
-	keys map[string]*domain.VirtualKey // id -> key
+	mu     sync.Mutex
+	keys   map[string]*domain.VirtualKey // id -> key
+	usages []domain.KeyTokenUsage
 }
 
 func NewMemoryKeyRepository() *MemoryKeyRepository {
 	return &MemoryKeyRepository{
-		keys: make(map[string]*domain.VirtualKey),
+		keys:   make(map[string]*domain.VirtualKey),
+		usages: make([]domain.KeyTokenUsage, 0),
 	}
 }
 
@@ -384,6 +530,81 @@ func (m *MemoryKeyRepository) ConsumeDailyQuota(ctx context.Context, id string, 
 		return -1, nil
 	}
 	return k.DailyQuotaRequests - k.UsedToday, nil
+}
+
+func (m *MemoryKeyRepository) RecordTokenUsage(ctx context.Context, id string, promptTokens, completionTokens int) error {
+	if id == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	total := int64(promptTokens + completionTokens)
+	if id != "master" {
+		if k, ok := m.keys[id]; ok {
+			k.PromptTokensTotal += int64(promptTokens)
+			k.CompletionTokensTotal += int64(completionTokens)
+			k.TotalTokens += total
+		}
+	}
+
+	today := time.Now().UTC().Format("2006-01-02")
+	found := false
+	for i := range m.usages {
+		if m.usages[i].KeyID == id && m.usages[i].Date == today {
+			m.usages[i].PromptTokens += int64(promptTokens)
+			m.usages[i].CompletionTokens += int64(completionTokens)
+			m.usages[i].TotalTokens += total
+			m.usages[i].RequestCount++
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.usages = append(m.usages, domain.KeyTokenUsage{
+			KeyID:            id,
+			Date:             today,
+			PromptTokens:     int64(promptTokens),
+			CompletionTokens: int64(completionTokens),
+			TotalTokens:      total,
+			RequestCount:     1,
+		})
+	}
+	return nil
+}
+
+func (m *MemoryKeyRepository) GetTokenUsageHistory(ctx context.Context, keyID string, days int) ([]domain.KeyTokenUsage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var list []domain.KeyTokenUsage
+	for _, u := range m.usages {
+		if u.KeyID == keyID {
+			list = append(list, u)
+		}
+	}
+	return list, nil
+}
+
+func (m *MemoryKeyRepository) GetSystemTokenUsageHistory(ctx context.Context, days int) ([]domain.KeyTokenUsage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	byDate := make(map[string]*domain.KeyTokenUsage)
+	for _, u := range m.usages {
+		if cur, ok := byDate[u.Date]; ok {
+			cur.PromptTokens += u.PromptTokens
+			cur.CompletionTokens += u.CompletionTokens
+			cur.TotalTokens += u.TotalTokens
+			cur.RequestCount += u.RequestCount
+		} else {
+			copyU := u
+			copyU.KeyID = ""
+			byDate[u.Date] = &copyU
+		}
+	}
+	var list []domain.KeyTokenUsage
+	for _, v := range byDate {
+		list = append(list, *v)
+	}
+	return list, nil
 }
 
 // Đảm bảo implement đúng ports.KeyRepository

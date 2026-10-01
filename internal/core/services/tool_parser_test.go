@@ -54,7 +54,7 @@ Vui lòng đợi một lát.`
 		}
 	})
 
-	// Case 3: Multiple tool calls
+	// Case 3: Multiple tool calls (Multiple XML tags)
 	t.Run("MultipleToolCalls", func(t *testing.T) {
 		raw := `<tool_call>{"name": "read_file", "arguments": {"path": "a.txt"}}</tool_call>
 <tool_call>{"name": "read_file", "arguments": {"path": "b.txt"}}</tool_call>`
@@ -67,4 +67,153 @@ Vui lòng đợi một lát.`
 			t.Errorf("unexpected names in multiple calls")
 		}
 	})
+
+	// Case 4: Markdown fence inside XML <tool_call>
+	t.Run("MarkdownFencesInsideXML", func(t *testing.T) {
+		raw := `<tool_call>
+` + "```json\n" + `{"name": "write_file", "arguments": {"path": "test.txt", "content": "hello"}}
+` + "```\n" + `</tool_call>`
+
+		clean, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 tool call, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "write_file" {
+			t.Errorf("expected write_file, got: %s", calls[0].Function.Name)
+		}
+		if clean != "" {
+			t.Errorf("expected empty clean text, got: %q", clean)
+		}
+	})
+
+	// Case 5: Literal unescaped newlines inside JSON string argument (code writing)
+	t.Run("UnescapedNewlinesInJSON", func(t *testing.T) {
+		raw := "<tool_call>\n" +
+			`{"name": "write_file", "arguments": {"path": "main.go", "content": "package main` + "\n" +
+			`func main() {` + "\n" +
+			`	println(\"ok\")` + "\n" +
+			`}"}}` + "\n</tool_call>"
+
+		_, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 tool call after auto-repair, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "write_file" {
+			t.Errorf("expected write_file, got: %s", calls[0].Function.Name)
+		}
+		if !strings.Contains(calls[0].Function.Arguments, "package main") {
+			t.Errorf("expected arguments to contain package main, got: %s", calls[0].Function.Arguments)
+		}
+	})
+
+	// Case 6: JSON Array of tool calls inside single <tool_call>
+	t.Run("JSONArrayOfToolCalls", func(t *testing.T) {
+		raw := `<tool_call>
+[
+  {"name": "read_file", "arguments": {"path": "doc1.txt"}},
+  {"name": "read_file", "arguments": {"path": "doc2.txt"}}
+]
+</tool_call>`
+
+		_, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 2 {
+			t.Fatalf("expected 2 tool calls from array, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "read_file" || calls[1].Function.Name != "read_file" {
+			t.Errorf("unexpected tool names from array")
+		}
+		if !strings.Contains(calls[0].Function.Arguments, "doc1.txt") {
+			t.Errorf("expected doc1.txt in first call")
+		}
+		if !strings.Contains(calls[1].Function.Arguments, "doc2.txt") {
+			t.Errorf("expected doc2.txt in second call")
+		}
+	})
+
+	// Case 7: Fallback markdown block
+	t.Run("FallbackMarkdownBlock", func(t *testing.T) {
+		raw := "Tôi sẽ thực hiện lệnh:\n" +
+			"```json\n" +
+			`{"name": "run_command", "arguments": {"command": "dir"}}` + "\n" +
+			"```\n" +
+			"Vui lòng đợi kết quả."
+
+		clean, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 tool call from fallback markdown, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "run_command" {
+			t.Errorf("expected run_command, got: %s", calls[0].Function.Name)
+		}
+		if !strings.Contains(clean, "Tôi sẽ thực hiện lệnh:") || !strings.Contains(clean, "Vui lòng đợi kết quả.") {
+			t.Errorf("expected surrounding text to be preserved, got: %s", clean)
+		}
+		if strings.Contains(clean, "run_command") {
+			t.Errorf("clean text should not contain tool code block, got: %s", clean)
+		}
+	})
+
+	// Case 8: Trailing comma inside arguments
+	t.Run("TrailingCommaInArguments", func(t *testing.T) {
+		raw := `<tool_call>
+{"name": "test_tool", "arguments": {"a": 1, "b": 2,}}
+</tool_call>`
+
+		_, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 tool call with trailing comma auto-repaired, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "test_tool" {
+			t.Errorf("expected test_tool, got: %s", calls[0].Function.Name)
+		}
+	})
+
+	// Case 9: Unclosed outer braces
+	t.Run("UnclosedBracesAutoRepair", func(t *testing.T) {
+		raw := `<tool_call>
+{"name": "edit_file", "arguments": {"path": "main.go"}
+</tool_call>`
+
+		_, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 tool call with unclosed brace auto-repaired, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "edit_file" {
+			t.Errorf("expected edit_file, got: %s", calls[0].Function.Name)
+		}
+	})
+
+	// Case 10: Single quotes syntax
+	t.Run("SingleQuotesSyntax", func(t *testing.T) {
+		raw := `<tool_call>
+{'name': 'query_db', 'arguments': {'sql': 'SELECT 1'}}
+</tool_call>`
+
+		_, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 tool call from single-quoted JSON, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "query_db" {
+			t.Errorf("expected query_db, got: %s", calls[0].Function.Name)
+		}
+	})
+
+	// Case 11: Loose format extraction
+	t.Run("LooseFormatExtraction", func(t *testing.T) {
+		raw := `<tool_call>
+I am invoking: name: "fetch_url", arguments: {"url": "https://example.com"}
+</tool_call>`
+
+		_, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 1 {
+			t.Fatalf("expected 1 tool call from loose format, got %d", len(calls))
+		}
+		if calls[0].Function.Name != "fetch_url" {
+			t.Errorf("expected fetch_url, got: %s", calls[0].Function.Name)
+		}
+		if !strings.Contains(calls[0].Function.Arguments, "https://example.com") {
+			t.Errorf("expected url in arguments, got: %s", calls[0].Function.Arguments)
+		}
+	})
 }
+

@@ -29,6 +29,7 @@ type ChatService struct {
 	failoverConfig   config.FailoverConfig
 	leaseWaitTimeout time.Duration
 	rpcRegistry      *domain.RpcRegistry
+	keyUseCase       ports.KeyUseCase
 }
 
 func NewChatService(
@@ -64,6 +65,10 @@ func (s *ChatService) SetVisionResolver(vr *VisionResolver) {
 
 func (s *ChatService) SetTokenCounter(tc *TokenCounter) {
 	s.tokenCounter = tc
+}
+
+func (s *ChatService) SetKeyUseCase(k ports.KeyUseCase) {
+	s.keyUseCase = k
 }
 
 func (s *ChatService) SetFailoverConfig(fc config.FailoverConfig) {
@@ -122,35 +127,13 @@ func (s *ChatService) prepareModel(req *domain.OpenAIChatRequest) (*domain.Model
 		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "thiếu hội thoại")
 	}
 
-	modelInput := strings.ToLower(strings.TrimSpace(req.Model))
-
-	// 1. Tìm chính xác trong modelRegistry trước
-	modelDesc, err := s.modelRegistry.MustFind(req.Model)
-	if err == nil && modelDesc != nil && modelDesc.TargetService == domain.ServiceGemini {
-		return modelDesc, nil
+	desc, ok := s.modelRegistry.ResolveGeminiModel(req.Model)
+	if !ok {
+		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "không có mô hình Gemini khả dụng")
 	}
 
-	// 2. Resilient Flash-First Routing: Phân giải thông minh
-	// - Nếu chứa 'pro' -> chọn 'gemini-3.1-pro'
-	// - Mặc định mọi tên khác ('default', 'gpt-4o', 'cursor-small', 'flash', rỗng...) -> chọn 'gemini-3.8-flash'
-	targetID := "gemini-3.8-flash"
-	if strings.Contains(modelInput, "pro") {
-		targetID = "gemini-3.1-pro"
-	}
-
-	fallbackDesc, fallbackErr := s.modelRegistry.MustFind(targetID)
-	if fallbackErr == nil && fallbackDesc != nil && fallbackDesc.TargetService == domain.ServiceGemini {
-		return fallbackDesc, nil
-	}
-
-	// Fallback cuối cùng: lấy model Gemini đầu tiên khả dụng trong registry
-	for _, m := range s.modelRegistry.List() {
-		if m.TargetService == domain.ServiceGemini {
-			return &m, nil
-		}
-	}
-
-	return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "không có mô hình Gemini khả dụng")
+	req.Model = desc.ID
+	return &desc, nil
 }
 
 type failoverAction func(account *domain.ManagedAccount) (canRetry bool, err error)
@@ -325,7 +308,11 @@ func (s *ChatService) streamRound(
 
 	createdTime := time.Now().Unix()
 	var conversationID string
-	reply, err := s.wire.DematerializeChat(ctx, resp, s.metrics.Bind(domain.OpChatCompletions), func(delta, cID string) error {
+	filter := NewStreamToolFilter(len(req.Tools) > 0, streamWriter, flusher, flushedToClient, createdTime, req.Model, conversationID)
+
+	var streamedReasoning bool
+
+	onContent := func(delta, cID string) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -333,8 +320,26 @@ func (s *ChatService) streamRound(
 		}
 		if cID != "" {
 			conversationID = cID
+			filter.SetConversationID(cID)
 		}
-		chunk := domain.OpenAIChatResponse{
+		return filter.OnDelta(delta, cID)
+	}
+
+	onReasoning := func(delta, cID string) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if delta == "" {
+			return nil
+		}
+		if cID != "" {
+			conversationID = cID
+			filter.SetConversationID(cID)
+		}
+		streamedReasoning = true
+		reasoningChunk := domain.OpenAIChatResponse{
 			ID:             "chatcmpl-" + conversationID,
 			Object:         "chat.completion.chunk",
 			Created:        createdTime,
@@ -342,11 +347,16 @@ func (s *ChatService) streamRound(
 			ConversationID: conversationID,
 			Choices: []domain.OpenAIChoice{{
 				Index: 0,
-				Delta: domain.OpenAIDelta{Content: delta},
+				Delta: domain.OpenAIDelta{
+					ReasoningContent: delta,
+				},
 			}},
 		}
-		chunkBytes, _ := json.Marshal(chunk)
-		if _, writeErr := fmt.Fprintf(streamWriter, "data: %s\n\n", chunkBytes); writeErr != nil {
+		b, err := json.Marshal(reasoningChunk)
+		if err != nil {
+			return err
+		}
+		if _, writeErr := fmt.Fprintf(streamWriter, "data: %s\n\n", b); writeErr != nil {
 			return writeErr
 		}
 		if flusher != nil {
@@ -356,9 +366,15 @@ func (s *ChatService) streamRound(
 			*flushedToClient = true
 		}
 		return nil
-	})
+	}
+
+	reply, err := s.wire.DematerializeChatStream(ctx, resp, s.metrics.Bind(domain.OpChatCompletions), onContent, onReasoning)
 	if conversationID == "" {
 		conversationID = reply.ConversationID
+		filter.SetConversationID(conversationID)
+	}
+	if flushErr := filter.FlushRemaining(); flushErr != nil && err == nil {
+		err = flushErr
 	}
 	if err != nil {
 		return normalizeWireErr(err)
@@ -405,7 +421,39 @@ func (s *ChatService) streamRound(
 		usage = s.tokenCounter.CalculateUsage(req.Messages, reply)
 	}
 
-	_, toolCalls := ExtractToolCalls(reply.Text)
+	if s.keyUseCase != nil && usage != nil {
+		if vKey := domain.VirtualKeyFromContext(ctx); vKey != nil {
+			_ = s.keyUseCase.RecordTokenUsage(ctx, vKey.ID, usage.PromptTokens, usage.CompletionTokens)
+		}
+	}
+
+	toolCalls := filter.GetEmittedToolCalls()
+	if len(toolCalls) == 0 {
+		_, fallbackCalls := ExtractToolCalls(reply.Text)
+		if len(fallbackCalls) > 0 {
+			toolCalls = fallbackCalls
+			// Phát chunk tool_calls bổ sung nếu chưa được phát qua stream
+			toolChunk := domain.OpenAIChatResponse{
+				ID:             "chatcmpl-" + conversationID,
+				Object:         "chat.completion.chunk",
+				Created:        createdTime,
+				Model:          req.Model,
+				ConversationID: conversationID,
+				Choices: []domain.OpenAIChoice{{
+					Index: 0,
+					Delta: domain.OpenAIDelta{
+						ToolCalls: toolCalls,
+					},
+				}},
+			}
+			if b, err := json.Marshal(toolChunk); err == nil {
+				_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+				if flusher != nil {
+					flusher()
+				}
+			}
+		}
+	}
 
 	var reasoningText string
 	if len(reply.ThinkingBlocks) > 0 {
@@ -418,8 +466,8 @@ func (s *ChatService) streamRound(
 		reasoningText = strings.Join(rParts, "\n\n")
 	}
 
-	// Phát chunk reasoning_content cho Cursor hiển thị thanh Thinking
-	if reasoningText != "" {
+	// Phát chunk reasoning_content dự phòng nếu chưa được phát qua stream token-by-token
+	if !streamedReasoning && reasoningText != "" {
 		reasoningChunk := domain.OpenAIChatResponse{
 			ID:             "chatcmpl-" + conversationID,
 			Object:         "chat.completion.chunk",
@@ -434,29 +482,6 @@ func (s *ChatService) streamRound(
 			}},
 		}
 		if b, err := json.Marshal(reasoningChunk); err == nil {
-			_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
-			if flusher != nil {
-				flusher()
-			}
-		}
-	}
-
-	// Phát chunk tool_calls cho Cursor Agent thực thi công cụ
-	if len(toolCalls) > 0 {
-		toolChunk := domain.OpenAIChatResponse{
-			ID:             "chatcmpl-" + conversationID,
-			Object:         "chat.completion.chunk",
-			Created:        createdTime,
-			Model:          req.Model,
-			ConversationID: conversationID,
-			Choices: []domain.OpenAIChoice{{
-				Index: 0,
-				Delta: domain.OpenAIDelta{
-					ToolCalls: toolCalls,
-				},
-			}},
-		}
-		if b, err := json.Marshal(toolChunk); err == nil {
 			_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
 			if flusher != nil {
 				flusher()
@@ -570,6 +595,12 @@ func (s *ChatService) syncRound(
 		usage = s.tokenCounter.CalculateUsage(req.Messages, reply)
 	}
 
+	if s.keyUseCase != nil && usage != nil {
+		if vKey := domain.VirtualKeyFromContext(ctx); vKey != nil {
+			_ = s.keyUseCase.RecordTokenUsage(ctx, vKey.ID, usage.PromptTokens, usage.CompletionTokens)
+		}
+	}
+
 	cleanText, toolCalls := ExtractToolCalls(reply.Text)
 	var reasoningText string
 	if len(reply.ThinkingBlocks) > 0 {
@@ -644,9 +675,10 @@ func (s *ChatService) postGemini(
 		return nil, err
 	}
 
-	_, lastUserPrompt := domain.FlattenMessagesForModel(req.Messages, req.Model)
+	hasRemoteHistory := req.ConversationID != ""
+	_, lastUserPrompt := domain.FlattenMessagesForModelWithContext(req.Messages, req.Model, hasRemoteHistory)
 	if len(req.Tools) > 0 {
-		toolPrompt := domain.CompileToolsInstruction(req.Tools)
+		toolPrompt := domain.CompileToolsInstructionWithChoice(req.Tools, req.ToolChoice)
 		if toolPrompt != "" {
 			lastUserPrompt = toolPrompt + "\n\n" + lastUserPrompt
 		}
@@ -657,6 +689,41 @@ func (s *ChatService) postGemini(
 		isThinking = *req.Thinking
 	} else if strings.Contains(strings.ToLower(req.Model), "no-thinking") {
 		isThinking = false
+	}
+
+	// Xử lý tham số chuẩn OpenAI reasoning_effort và thinking_budget / budget_tokens
+	effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort))
+	var reasoningInstruction string
+	switch effort {
+	case "none":
+		isThinking = false
+	case "low":
+		isThinking = true
+		reasoningInstruction = "[Reasoning Effort: low. Provide a concise, fast, and direct internal reasoning process.]"
+	case "medium":
+		isThinking = true
+		reasoningInstruction = "[Reasoning Effort: medium. Provide a structured and balanced step-by-step reasoning process.]"
+	case "high":
+		isThinking = true
+		reasoningInstruction = "[Reasoning Effort: high. Provide deep, comprehensive, rigorous step-by-step reasoning and self-verification.]"
+	}
+
+	budget := 0
+	if req.ThinkingBudget != nil {
+		budget = *req.ThinkingBudget
+	} else if req.BudgetTokens != nil {
+		budget = *req.BudgetTokens
+	}
+
+	if budget == 0 && (req.ThinkingBudget != nil || req.BudgetTokens != nil) {
+		isThinking = false
+	} else if budget > 0 {
+		isThinking = true
+		reasoningInstruction = fmt.Sprintf("[Thinking Budget: ~%d tokens. Adapt internal reasoning depth and verbosity to fit within this budget.]", budget)
+	}
+
+	if reasoningInstruction != "" && isThinking {
+		lastUserPrompt = reasoningInstruction + "\n\n" + lastUserPrompt
 	}
 	isGrounding := true
 	if req.SearchGrounding != nil {

@@ -43,11 +43,22 @@ func (w *WireAdapter) MaterializeChat(account *domain.ManagedAccount, payload do
 }
 
 func (w *WireAdapter) DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
+	return w.DematerializeChatStream(ctx, resp, metrics, onDelta, nil)
+}
+
+func (w *WireAdapter) DematerializeChatStream(
+	ctx context.Context,
+	resp *http.Response,
+	metrics *domain.ContractMetrics,
+	onContent func(delta, convID string) error,
+	onReasoning func(delta, convID string) error,
+) (domain.GeminiReply, error) {
 	if resp == nil || resp.Body == nil {
 		return domain.GeminiReply{}, domain.CodecRejected(domain.OriginStreamGenerate, domain.ServiceGemini, "không có phản hồi chat")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return domain.GeminiReply{}, StatusError(resp, domain.OriginStreamGenerate, false, domain.ServiceGemini)
 	}
-	return ReadGeminiStream(ctx, resp.Body, metrics, onDelta)
+	return ReadGeminiStreamWithThinking(ctx, resp.Body, metrics, onContent, onReasoning)
 }
+

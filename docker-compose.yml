@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  dezuxk-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dezuxk-gateway:latest
+    container_name: dezuxk-gateway
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - DEZUXK_HOST=0.0.0.0
+      - DEZUXK_PORT=8080
+      - DEZUXK_CHROME_BINARY=/usr/bin/chromium
+      - TZ=Asia/Ho_Chi_Minh
+      # Tùy chọn cấu hình bảo mật thông qua biến môi trường:
+      # - DEZUXK_API_KEY=sk-dez-your-secret-master-key
+      # - DEZUXK_ADMIN_USERNAME=admin
+      # - DEZUXK_ADMIN_PASSWORD=your_secure_password
+    volumes:
+      - ./configs:/app/configs
+      - ./storage:/app/storage
+      - ./profiles:/app/profiles
+    # Cấu hình cần thiết cho Chromium headless trên Linux
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '1gb'
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

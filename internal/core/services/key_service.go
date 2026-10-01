@@ -74,15 +74,46 @@ type KeyService struct {
 	repo           ports.KeyRepository
 	rateLimiter    *KeyRateLimiter
 	masterAdminKey string
+	adminTokens    []string
 }
 
-func NewKeyService(repo ports.KeyRepository, masterAdminKey string) *KeyService {
+func NewKeyService(repo ports.KeyRepository, masterAdminKey string, additionalAdminKeys ...string) *KeyService {
+	var tokens []string
+	for _, k := range additionalAdminKeys {
+		k = strings.TrimSpace(k)
+		if k != "" {
+			tokens = append(tokens, k)
+		}
+	}
 	return &KeyService{
 		repo:           repo,
 		rateLimiter:    NewKeyRateLimiter(),
 		masterAdminKey: strings.TrimSpace(masterAdminKey),
+		adminTokens:    tokens,
 	}
 }
+
+// AddAdminToken bổ sung thêm token/key có quyền quản trị tối cao
+func (s *KeyService) AddAdminToken(token string) {
+	token = strings.TrimSpace(token)
+	if token != "" {
+		s.adminTokens = append(s.adminTokens, token)
+	}
+}
+
+func (s *KeyService) isMasterAdminKey(key string) bool {
+	if s.masterAdminKey != "" && key == s.masterAdminKey {
+		return true
+	}
+	for _, tok := range s.adminTokens {
+		if tok != "" && key == tok {
+			return true
+		}
+	}
+	return false
+}
+
+
 
 // CreateKey tạo một Virtual API Key mới với hạn ngạch cấu hình
 func (s *KeyService) CreateKey(ctx context.Context, req domain.CreateKeyRequest) (*domain.VirtualKeyCreated, error) {
@@ -136,6 +167,7 @@ func (s *KeyService) CreateKey(ctx context.Context, req domain.CreateKeyRequest)
 		Role:               role,
 		RateLimitRPM:       rpm,
 		DailyQuotaRequests: dailyQuota,
+		MaxTokenQuota:      req.MaxTokenQuota,
 		UsedToday:          0,
 		LastUsedDate:       now.Format("2006-01-02"),
 		AllowedModels:      allowedModels,
@@ -151,6 +183,7 @@ func (s *KeyService) CreateKey(ctx context.Context, req domain.CreateKeyRequest)
 	return &domain.VirtualKeyCreated{
 		VirtualKey: *vKey,
 		Key:        rawKey,
+		RawKey:     rawKey,
 	}, nil
 }
 
@@ -179,8 +212,8 @@ func (s *KeyService) ValidateKey(ctx context.Context, rawKey string, targetModel
 		rawKey = strings.TrimSpace(rawKey[7:])
 	}
 
-	// 1. Kiểm tra nếu khớp với Master Admin Key từ server.api_key
-	if s.masterAdminKey != "" && rawKey == s.masterAdminKey {
+	// 1. Kiểm tra nếu khớp với Master Admin Key hoặc Admin Session Token
+	if s.isMasterAdminKey(rawKey) {
 		return &domain.VirtualKey{
 			ID:                 "master",
 			KeyPrefix:          domain.MaskKey(rawKey),
@@ -227,6 +260,11 @@ func (s *KeyService) ValidateKey(ctx context.Context, rawKey string, targetModel
 		return nil, domain.ErrDailyQuotaExceeded
 	}
 
+	// 8. Kiểm tra hạn ngạch tổng token nếu có thiết lập
+	if vKey.MaxTokenQuota > 0 && vKey.TotalTokens >= vKey.MaxTokenQuota {
+		return nil, domain.ErrTokenQuotaExceeded
+	}
+
 	return vKey, nil
 }
 
@@ -237,6 +275,24 @@ func (s *KeyService) ConsumeQuota(ctx context.Context, keyID string) (int, error
 	}
 	today := time.Now().UTC().Format("2006-01-02")
 	return s.repo.ConsumeDailyQuota(ctx, keyID, today)
+}
+
+// RecordTokenUsage ghi nhận số token tiêu thụ cho một Virtual API Key
+func (s *KeyService) RecordTokenUsage(ctx context.Context, keyID string, promptTokens, completionTokens int) error {
+	if keyID == "" {
+		return nil
+	}
+	return s.repo.RecordTokenUsage(ctx, keyID, promptTokens, completionTokens)
+}
+
+// GetTokenUsageHistory lấy lịch sử sử dụng token theo ngày của một khóa
+func (s *KeyService) GetTokenUsageHistory(ctx context.Context, keyID string, days int) ([]domain.KeyTokenUsage, error) {
+	return s.repo.GetTokenUsageHistory(ctx, keyID, days)
+}
+
+// GetSystemTokenUsageHistory lấy lịch sử sử dụng token tổng hợp toàn hệ thống
+func (s *KeyService) GetSystemTokenUsageHistory(ctx context.Context, days int) ([]domain.KeyTokenUsage, error) {
+	return s.repo.GetSystemTokenUsageHistory(ctx, days)
 }
 
 // Đảm bảo implement đúng ports.KeyUseCase

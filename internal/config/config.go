@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -384,11 +385,53 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("lỗi cú pháp YAML trong file %s: %w", path, err)
 	}
 
+	applyEnvOverrides(&cfg)
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("cấu hình không hợp lệ trong %s: %w", path, err)
 	}
 
 	return &cfg, nil
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if h := os.Getenv("DEZUXK_HOST"); h != "" {
+		cfg.Server.Host = h
+	} else if h := os.Getenv("HOST"); h != "" {
+		cfg.Server.Host = h
+	}
+
+	if pStr := os.Getenv("DEZUXK_PORT"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+			cfg.Server.Port = p
+		}
+	} else if pStr := os.Getenv("PORT"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil && p > 0 {
+			cfg.Server.Port = p
+		}
+	}
+
+	if k := os.Getenv("DEZUXK_API_KEY"); k != "" {
+		cfg.Server.APIKey = k
+	}
+	if mk := os.Getenv("DEZUXK_MASTER_KEY"); mk != "" {
+		cfg.Security.MasterKey = mk
+	}
+	if cb := os.Getenv("DEZUXK_CHROME_BINARY"); cb != "" {
+		cfg.Profiles.ChromeBinary = cb
+	}
+	if pd := os.Getenv("DEZUXK_PROFILES_DIR"); pd != "" {
+		cfg.Profiles.BaseDir = pd
+	}
+	if dp := os.Getenv("DEZUXK_DATABASE_PATH"); dp != "" {
+		cfg.Storage.DatabasePath = dp
+	}
+	if u := os.Getenv("DEZUXK_ADMIN_USERNAME"); u != "" {
+		cfg.Admin.Username = u
+	}
+	if pw := os.Getenv("DEZUXK_ADMIN_PASSWORD"); pw != "" {
+		cfg.Admin.Password = pw
+	}
 }
 
 // Validate kiểm tra tính hợp lệ của hạ tầng máy chủ

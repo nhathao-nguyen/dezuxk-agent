@@ -114,6 +114,45 @@ func (r *ModelRegistry) MustFind(id string) (*ModelDescriptor, error) {
 	return &m, nil
 }
 
+// ResolveGeminiModel phân giải linh hoạt tên mô hình đầu vào thành ModelDescriptor Gemini khả dụng.
+// Áp dụng triết lý Flash-First:
+// 1. Tìm chính xác theo ID (hoặc nếu là ServiceGemini).
+// 2. Nếu tên chứa "pro", thử chuyển sang "gemini-3.1-pro".
+// 3. Mọi alias/tên khác hoặc rỗng -> chuyển sang "gemini-3.8-flash".
+// 4. Nếu không có, chọn mô hình Gemini bất kỳ đang active trong registry.
+func (r *ModelRegistry) ResolveGeminiModel(name string) (ModelDescriptor, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// 1. Tìm chính xác
+	if m, ok := r.models[name]; ok && m.TargetService == ServiceGemini {
+		return m, true
+	}
+
+	modelInput := strings.ToLower(strings.TrimSpace(name))
+
+	// 2. Chứa "pro" -> gemini-3.1-pro
+	if strings.Contains(modelInput, "pro") {
+		if m, ok := r.models["gemini-3.1-pro"]; ok && m.TargetService == ServiceGemini {
+			return m, true
+		}
+	}
+
+	// 3. Mặc định Flash-First -> gemini-3.8-flash
+	if m, ok := r.models["gemini-3.8-flash"]; ok && m.TargetService == ServiceGemini {
+		return m, true
+	}
+
+	// 4. Bất kỳ Gemini nào có trong registry
+	for _, m := range r.models {
+		if m.TargetService == ServiceGemini {
+			return m, true
+		}
+	}
+
+	return ModelDescriptor{}, false
+}
+
 // UpdateBackendStatus cập nhật trạng thái IsActive của mô hình theo kết quả trả về từ yBhWQ
 func (r *ModelRegistry) UpdateBackendStatus(service ServiceKind, backendStatus map[string]bool) {
 	r.mu.Lock()

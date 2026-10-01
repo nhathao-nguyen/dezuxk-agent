@@ -44,15 +44,25 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 		writeChatError(w, r, h.metrics, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "hội thoại không đọc được"), false)
 		return
 	}
-	if strings.TrimSpace(req.Model) == "" || len(req.Messages) == 0 {
-		writeChatError(w, r, h.metrics, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "thiếu hội thoại hoặc mô hình"), false)
+	if len(req.Messages) == 0 {
+		writeChatError(w, r, h.metrics, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "thiếu danh sách tin nhắn"), false)
 		return
 	}
-	desc, ok := h.modelRegistry.Get(req.Model)
-	if !ok || desc.TargetService != domain.ServiceGemini {
-		writeChatError(w, r, h.metrics, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "không có mô hình này"), false)
+	// Hỗ trợ truyền conversation_id qua Request Header nếu chưa có trong body
+	if req.ConversationID == "" {
+		if cID := r.Header.Get("X-Conversation-Id"); cID != "" {
+			req.ConversationID = cID
+		} else if cID := r.Header.Get("X-Session-Id"); cID != "" {
+			req.ConversationID = cID
+		}
+	}
+
+	desc, ok := h.modelRegistry.ResolveGeminiModel(req.Model)
+	if !ok {
+		writeChatError(w, r, h.metrics, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "chưa có mô hình Gemini khả dụng"), false)
 		return
 	}
+	req.Model = desc.ID
 
 	var cacheKey string
 	if !req.Stream && h.cache != nil && h.cache.SupportsMethod("chat") {
@@ -132,6 +142,9 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	if resp != nil && resp.ConversationID != "" {
+		w.Header().Set("X-Conversation-Id", resp.ConversationID)
+	}
 	if cacheKey != "" && h.cache != nil && h.cache.SupportsMethod("chat") {
 		h.cache.Set(cacheKey, payload, "application/json", nil)
 		w.Header().Set("X-Cache", "MISS")

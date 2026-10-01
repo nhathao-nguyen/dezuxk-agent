@@ -252,7 +252,10 @@ func (mediaChatCodec) MaterializeChat(account *domain.ManagedAccount, payload do
 		ContentType: "application/x-www-form-urlencoded",
 	}, nil
 }
-func (mediaChatCodec) DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
+func (m mediaChatCodec) DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
+	return m.DematerializeChatStream(ctx, resp, metrics, onDelta, nil)
+}
+func (mediaChatCodec) DematerializeChatStream(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onContent func(delta, convID string) error, onReasoning func(delta, convID string) error) (domain.GeminiReply, error) {
 	return domain.GeminiReply{
 		Text:           "Đây là ảnh mèo:\n![Hình ảnh](https://lh3.googleusercontent.com/rd-gg-dl/cat123)",
 		MediaURLs:      []string{"https://lh3.googleusercontent.com/rd-gg-dl/cat123"},
@@ -321,4 +324,79 @@ func TestPrepareModel_FlashFirstAndSmartByDefault(t *testing.T) {
 		t.Fatal("Expected response for Pro, got nil")
 	}
 }
+
+type thinkingStreamCodec struct{}
+
+func (thinkingStreamCodec) MaterializeChat(account *domain.ManagedAccount, payload domain.GeminiPayloadBuilder) (domain.OutboundAttempt, error) {
+	return domain.OutboundAttempt{
+		Path:        "/test",
+		Body:        "test",
+		ContentType: "application/x-www-form-urlencoded",
+	}, nil
+}
+
+func (t thinkingStreamCodec) DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
+	return t.DematerializeChatStream(ctx, resp, metrics, onDelta, nil)
+}
+
+func (thinkingStreamCodec) DematerializeChatStream(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onContent func(delta, convID string) error, onReasoning func(delta, convID string) error) (domain.GeminiReply, error) {
+	if onReasoning != nil {
+		_ = onReasoning("Suy nghĩ bước 1: ", "c_stream_thk")
+		_ = onReasoning("Suy nghĩ bước 2.", "c_stream_thk")
+	}
+	if onContent != nil {
+		_ = onContent("Đáp án cuối cùng.", "c_stream_thk")
+	}
+	return domain.GeminiReply{
+		Text:           "Đáp án cuối cùng.",
+		ConversationID: "c_stream_thk",
+		ThinkingBlocks: []domain.ThoughtBlock{{Content: "Suy nghĩ bước 1: Suy nghĩ bước 2.", IsThinking: true}},
+	}, nil
+}
+
+func TestChatService_ExecuteChatStream_RealtimeThinking(t *testing.T) {
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, thinkingStreamCodec{}, metrics)
+
+	var streamBuffer strings.Builder
+	flushed := false
+	flusher := func() { flushed = true }
+
+	err := chatService.ExecuteChatStream(context.Background(), &domain.OpenAIChatRequest{
+		Model:    "gemini-3.8-flash",
+		Messages: []domain.OpenAIMessage{{Role: "user", Content: "Giải bài toán khó"}},
+	}, &streamBuffer, flusher)
+
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+	if !flushed {
+		t.Errorf("expected flusher to be called")
+	}
+
+	streamOutput := streamBuffer.String()
+	// Phải chứa cả reasoning_content và content
+	if !strings.Contains(streamOutput, "reasoning_content") {
+		t.Errorf("expected streamOutput to contain reasoning_content, got: %s", streamOutput)
+	}
+	if !strings.Contains(streamOutput, "Suy nghĩ bước 1: ") {
+		t.Errorf("expected streamOutput to contain thinking delta 1")
+	}
+	if !strings.Contains(streamOutput, "Suy nghĩ bước 2.") {
+		t.Errorf("expected streamOutput to contain thinking delta 2")
+	}
+	if !strings.Contains(streamOutput, "Đáp án cuối cùng.") {
+		t.Errorf("expected streamOutput to contain final answer content")
+	}
+
+	// Đảm bảo reasoning_content xuất hiện trước content trong luồng stream
+	idxReasoning := strings.Index(streamOutput, "Suy nghĩ bước 1:")
+	idxContent := strings.Index(streamOutput, "Đáp án cuối cùng.")
+	if idxReasoning >= idxContent {
+		t.Errorf("expected reasoning tokens to stream BEFORE answer content, but idxReasoning=%d, idxContent=%d", idxReasoning, idxContent)
+	}
+}
+
 

@@ -72,9 +72,10 @@ func TestKeyService_CreateAndValidate(t *testing.T) {
 
 func TestKeyService_MasterKeyBypass(t *testing.T) {
 	repo := session.NewMemoryKeyRepository()
-	service := NewKeyService(repo, "master-admin-secret-123")
+	service := NewKeyService(repo, "master-admin-secret-123", "admin-session-token-456")
 	ctx := context.Background()
 
+	// 1. Primary master key
 	vKey, err := service.ValidateKey(ctx, "master-admin-secret-123", "any-model-at-all")
 	if err != nil {
 		t.Fatalf("expected master key to be valid, got %v", err)
@@ -82,7 +83,27 @@ func TestKeyService_MasterKeyBypass(t *testing.T) {
 	if vKey.Role != "admin" || !vKey.IsModelAllowed("any-model") {
 		t.Fatalf("expected master key to be admin with full model access, got: %+v", vKey)
 	}
+
+	// 2. Additional admin session token
+	vKey2, err := service.ValidateKey(ctx, "admin-session-token-456", "any-model-2")
+	if err != nil {
+		t.Fatalf("expected admin session token to be valid, got %v", err)
+	}
+	if vKey2.Role != "admin" || !vKey2.IsModelAllowed("any-model-2") {
+		t.Fatalf("expected admin session token to be admin, got: %+v", vKey2)
+	}
+
+	// 3. Dynamically added admin token
+	service.AddAdminToken("runtime-added-token-789")
+	vKey3, err := service.ValidateKey(ctx, "Bearer runtime-added-token-789", "any-model-3")
+	if err != nil {
+		t.Fatalf("expected runtime added token to be valid, got %v", err)
+	}
+	if vKey3.Role != "admin" {
+		t.Fatalf("expected admin role for runtime added token, got: %s", vKey3.Role)
+	}
 }
+
 
 func TestKeyService_RevokeKey(t *testing.T) {
 	repo := session.NewMemoryKeyRepository()

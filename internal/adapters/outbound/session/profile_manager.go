@@ -322,11 +322,21 @@ func (pm *ProfileManager) LaunchChromeForProfile(profileID string) error {
 	}
 	cdpPort := prof.CDPPort
 
+	// Nếu Chrome đã đang chạy và phản hồi trên cổng CDP này, không cần khởi chạy lại
+	versionURL := fmt.Sprintf("http://127.0.0.1:%d/json/version", cdpPort)
+	if resp, err := pm.client.Get(versionURL); err == nil {
+		_ = resp.Body.Close()
+		log.Printf("[Profile %s] Chrome đã đang chạy trên cổng CDP %d", profileID, cdpPort)
+		return nil
+	}
+
 	args := []string{
 		fmt.Sprintf("--user-data-dir=%s", userDataDir),
 		fmt.Sprintf("--remote-debugging-port=%d", cdpPort),
 		"--remote-allow-origins=*",
 		"--new-window",
+		"--start-maximized",
+		"--window-position=50,50",
 		"--no-first-run",
 		"--no-default-browser-check",
 		"--disable-blink-features=AutomationControlled",

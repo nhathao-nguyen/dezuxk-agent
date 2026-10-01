@@ -48,4 +48,42 @@ func TestCompileToolsInstruction(t *testing.T) {
 	if !strings.Contains(instruction, "<tool_call>") || !strings.Contains(instruction, "</tool_call>") {
 		t.Errorf("expected <tool_call> usage syntax in instruction, got: %s", instruction)
 	}
+	if !strings.Contains(instruction, "[Tool Result (call_id: ...)]") {
+		t.Errorf("expected instruction to explain tool result format, got: %s", instruction)
+	}
+}
+
+func TestCompileToolsInstructionWithChoice(t *testing.T) {
+	tools := []domain.OpenAITool{
+		{
+			Type: "function",
+			Function: domain.OpenAIFunctionDef{
+				Name:        "read_file",
+				Description: "Read file",
+			},
+		},
+	}
+
+	// 1. tool_choice: "none" -> return empty string
+	if res := domain.CompileToolsInstructionWithChoice(tools, "none"); res != "" {
+		t.Errorf("expected empty instruction when tool_choice is none, got: %s", res)
+	}
+
+	// 2. tool_choice: "required" -> must mandate tool call
+	resReq := domain.CompileToolsInstructionWithChoice(tools, "required")
+	if !strings.Contains(resReq, "CRITICAL REQUIREMENT") || !strings.Contains(resReq, "at least one tool") {
+		t.Errorf("expected required requirement, got: %s", resReq)
+	}
+
+	// 3. tool_choice: specific function -> must mandate specific tool
+	choiceMap := map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name": "read_file",
+		},
+	}
+	resSpecific := domain.CompileToolsInstructionWithChoice(tools, choiceMap)
+	if !strings.Contains(resSpecific, `You MUST invoke the specific tool "read_file"`) {
+		t.Errorf("expected specific tool requirement, got: %s", resSpecific)
+	}
 }

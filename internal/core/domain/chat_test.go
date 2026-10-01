@@ -428,4 +428,77 @@ func TestFlattenMessages_WithToolCallsAndResults(t *testing.T) {
 	}
 }
 
+func TestFlattenMessages_AgentLoopLastIsToolResult(t *testing.T) {
+	messages := []domain.OpenAIMessage{
+		{
+			Role:    "user",
+			Content: "Kiểm tra và sửa lỗi trong file server.go",
+		},
+		{
+			Role:    "assistant",
+			Content: "Tôi sẽ đọc file trước.",
+			ToolCalls: []domain.OpenAIToolCall{
+				{
+					ID:   "call_abc",
+					Type: "function",
+					Function: domain.OpenAIFunctionCallData{
+						Name:      "read_file",
+						Arguments: `{"path":"server.go"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:       "tool",
+			ToolCallID: "call_abc",
+			Content:    "syntax error at line 42: undefined variable",
+		},
+	}
+
+	_, prompt := domain.FlattenMessagesForModel(messages, "gemini-3.8-flash")
+
+	// Đảm bảo tin nhắn user gốc nằm trong Conversation History
+	if !strings.Contains(prompt, "User: Kiểm tra và sửa lỗi trong file server.go") {
+		t.Errorf("expected original user prompt in history, got: %s", prompt)
+	}
+	// Đảm bảo kết quả tool nằm trong Conversation History
+	if !strings.Contains(prompt, "[Tool Result (call_id: call_abc)]") {
+		t.Errorf("expected tool result in history, got: %s", prompt)
+	}
+	// Đảm bảo prompt cuối cùng hướng dẫn Gemini tiếp tục dựa trên kết quả tool và mục tiêu của user
+	if !strings.Contains(prompt, "[Tool execution completed") || !strings.Contains(prompt, "Kiểm tra và sửa lỗi trong file server.go") {
+		t.Errorf("expected tool execution completed prompt with user goal, got: %s", prompt)
+	}
+}
+
+func TestFlattenMessagesForModelWithContext_RemoteHistoryOptimization(t *testing.T) {
+	messages := []domain.OpenAIMessage{
+		{Role: "user", Content: "Tôi tên là An."},
+		{Role: "assistant", Content: "Chào An! Rất vui được gặp bạn."},
+		{Role: "user", Content: "Hôm nay tôi bao nhiêu tuổi?"},
+	}
+
+	// 1. Khi chưa có remote history (Turn đầu hoặc stateless): phải bao gồm toàn bộ lịch sử
+	_, promptStateless := domain.FlattenMessagesForModelWithContext(messages, "gemini-3.8-flash", false)
+	if !strings.Contains(promptStateless, "User: Tôi tên là An.") {
+		t.Errorf("expected history in stateless prompt, got: %s", promptStateless)
+	}
+	if !strings.Contains(promptStateless, "Assistant: Chào An! Rất vui được gặp bạn.") {
+		t.Errorf("expected assistant history in stateless prompt, got: %s", promptStateless)
+	}
+
+	// 2. Khi đã có remote history trên Google (hasRemoteHistory == true): bỏ qua các lượt cũ, chỉ gửi lượt mới
+	_, promptOptimized := domain.FlattenMessagesForModelWithContext(messages, "gemini-3.8-flash", true)
+	if strings.Contains(promptOptimized, "User: Tôi tên là An.") {
+		t.Errorf("expected previous turn to be omitted when remote history exists, got: %s", promptOptimized)
+	}
+	if strings.Contains(promptOptimized, "Assistant: Chào An! Rất vui được gặp bạn.") {
+		t.Errorf("expected previous assistant turn to be omitted when remote history exists, got: %s", promptOptimized)
+	}
+	if !strings.Contains(promptOptimized, "Hôm nay tôi bao nhiêu tuổi?") {
+		t.Errorf("expected current prompt to be preserved, got: %s", promptOptimized)
+	}
+}
+
+
 

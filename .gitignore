@@ -11,3 +11,6 @@ dezuxk
 
 # Superpowers SDD workspace
 .superpowers/
+
+# Temporary scratch folder
+scratch/

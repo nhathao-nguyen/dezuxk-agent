@@ -202,6 +202,9 @@ type OpenAIChatRequest struct {
 	ChoiceID         string             `json:"choice_id,omitempty"`
 	ContextBlob      string             `json:"context_blob,omitempty"`
 	Thinking         *bool              `json:"thinking,omitempty"`
+	ReasoningEffort  string             `json:"reasoning_effort,omitempty"` // "low" | "medium" | "high" | "none"
+	ThinkingBudget   *int               `json:"thinking_budget,omitempty"`  // Token budget (ví dụ: 0, 1024, 8192)
+	BudgetTokens     *int               `json:"budget_tokens,omitempty"`    // Alias cho thinking_budget (chuẩn Anthropic / OpenAI o-series)
 	SearchGrounding  *bool              `json:"grounding,omitempty"`
 	CodeInterpreter  *bool              `json:"code_interpreter,omitempty"`
 	Attachments      []GeminiAttachment `json:"attachments,omitempty"`
@@ -209,6 +212,47 @@ type OpenAIChatRequest struct {
 	ParentChoiceID   string             `json:"parent_choice_id,omitempty"`
 	Tools            []OpenAITool       `json:"tools,omitempty"`
 	ToolChoice       any                `json:"tool_choice,omitempty"`
+}
+
+func (r *OpenAIChatRequest) UnmarshalJSON(data []byte) error {
+	type Alias OpenAIChatRequest
+	var raw struct {
+		Alias
+		RawThinking json.RawMessage `json:"thinking"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*r = OpenAIChatRequest(raw.Alias)
+
+	// Xử lý linh hoạt trường thinking: boolean (true/false) hoặc object ({"type": "enabled", "budget_tokens": 2048})
+	if len(raw.RawThinking) > 0 && string(raw.RawThinking) != "null" {
+		var bVal bool
+		if err := json.Unmarshal(raw.RawThinking, &bVal); err == nil {
+			r.Thinking = &bVal
+		} else {
+			var objVal struct {
+				Type         string `json:"type"`
+				BudgetTokens *int   `json:"budget_tokens"`
+			}
+			if err := json.Unmarshal(raw.RawThinking, &objVal); err == nil {
+				if objVal.Type == "disabled" {
+					f := false
+					r.Thinking = &f
+				} else {
+					t := true
+					r.Thinking = &t
+					if objVal.BudgetTokens != nil {
+						r.BudgetTokens = objVal.BudgetTokens
+						if r.ThinkingBudget == nil {
+							r.ThinkingBudget = objVal.BudgetTokens
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (r *OpenAIChatRequest) GetAllImageURLs() []string {
@@ -263,10 +307,15 @@ type OpenAIDelta struct {
 	MediaURLs        []string           `json:"media_urls,omitempty"`
 }
 
+type CompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+}
+
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
 // Các hằng số vị trí trong mảng slots của Google Gemini StreamGenerate (đã xác thực trong docs-2)
@@ -321,6 +370,13 @@ func FlattenMessages(messages []OpenAIMessage) (system string, prompt string) {
 
 // FlattenMessagesForModel gộp System Instruction, tiêm danh tính mô hình chính xác (nếu có), và toàn bộ lịch sử ngữ cảnh
 func FlattenMessagesForModel(messages []OpenAIMessage, modelID string) (system string, prompt string) {
+	return FlattenMessagesForModelWithContext(messages, modelID, false)
+}
+
+// FlattenMessagesForModelWithContext gộp System Instruction, tiêm danh tính mô hình và lịch sử ngữ cảnh.
+// Khi hasRemoteHistory == true (cuộc hội thoại đã tồn tại trên server Google), lược bỏ các lượt chat cũ trước lastUserIdx
+// để tránh trùng lặp ngữ cảnh và tiết kiệm token.
+func FlattenMessagesForModelWithContext(messages []OpenAIMessage, modelID string, hasRemoteHistory bool) (system string, prompt string) {
 	var systemParts []string
 	var dialogParts []string
 
@@ -332,14 +388,30 @@ func FlattenMessagesForModel(messages []OpenAIMessage, modelID string) (system s
 		}
 	}
 
+	// Kiểm tra xem sau lastUserIdx có tin nhắn kết quả tool không (đặc trưng của Agent Loop)
+	hasToolResultAfterUser := false
+	if lastUserIdx >= 0 && lastUserIdx < len(messages)-1 {
+		for i := lastUserIdx + 1; i < len(messages); i++ {
+			if messages[i].Role == "tool" || messages[i].Role == "function" {
+				hasToolResultAfterUser = true
+				break
+			}
+		}
+	}
+
 	for i, m := range messages {
+		// Nếu hội thoại đã có lịch sử trên Google (hasRemoteHistory), bỏ qua các lượt user/assistant trước lastUserIdx
+		if hasRemoteHistory && i < lastUserIdx && m.Role != "system" {
+			continue
+		}
+
 		switch m.Role {
 		case "system":
 			if strings.TrimSpace(m.Content) != "" {
 				systemParts = append(systemParts, m.Content)
 			}
 		case "user":
-			if i == lastUserIdx {
+			if i == lastUserIdx && !hasToolResultAfterUser {
 				prompt = m.Content
 			} else if strings.TrimSpace(m.Content) != "" {
 				dialogParts = append(dialogParts, "User: "+m.Content)
@@ -349,7 +421,11 @@ func FlattenMessagesForModel(messages []OpenAIMessage, modelID string) (system s
 			if len(m.ToolCalls) > 0 {
 				var calls []string
 				for _, tc := range m.ToolCalls {
-					calls = append(calls, fmt.Sprintf("[Invoked Tool %s with arguments: %s]", tc.Function.Name, tc.Function.Arguments))
+					argsStr := tc.Function.Arguments
+					if strings.TrimSpace(argsStr) == "" {
+						argsStr = "{}"
+					}
+					calls = append(calls, fmt.Sprintf("[Invoked Tool %s with arguments: %s]\n<tool_call>\n{\"name\": %q, \"arguments\": %s}\n</tool_call>", tc.Function.Name, argsStr, tc.Function.Name, argsStr))
 				}
 				if asstText != "" {
 					asstText = asstText + "\n" + strings.Join(calls, "\n")
@@ -370,6 +446,19 @@ func FlattenMessagesForModel(messages []OpenAIMessage, modelID string) (system s
 			if strings.TrimSpace(m.Content) != "" {
 				dialogParts = append(dialogParts, m.Role+": "+m.Content)
 			}
+		}
+	}
+
+	// Nếu tin nhắn cuối cùng là kết quả thực thi công cụ, hướng dẫn Gemini tiếp tục tác vụ
+	if hasToolResultAfterUser && prompt == "" {
+		userGoal := ""
+		if lastUserIdx >= 0 {
+			userGoal = messages[lastUserIdx].Content
+		}
+		if userGoal != "" {
+			prompt = fmt.Sprintf("[Tool execution completed. The user's goal was: %q. Based on the tool result(s) above, continue fulfilling the request: call another tool or give the final response.]", userGoal)
+		} else {
+			prompt = "[Tool execution completed. Based on the tool result(s) above, continue the task: call another tool or give the final response.]"
 		}
 	}
 

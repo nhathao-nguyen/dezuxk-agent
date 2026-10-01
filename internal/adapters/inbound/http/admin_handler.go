@@ -17,6 +17,8 @@ type AdminHandler struct {
 	metrics       *domain.ContractMetrics
 	cache         *services.ResponseCache
 	adminCfg      *config.AdminConfig
+	keyUseCase    ports.KeyUseCase
+	profileMgr    ports.ProfileUseCase
 }
 
 func NewAdminHandler(
@@ -35,6 +37,14 @@ func NewAdminHandler(
 	}
 }
 
+func (h *AdminHandler) SetKeyUseCase(k ports.KeyUseCase) {
+	h.keyUseCase = k
+}
+
+func (h *AdminHandler) SetProfileUseCase(pm ports.ProfileUseCase) {
+	h.profileMgr = pm
+}
+
 // AccountSummary tóm tắt trạng thái tài khoản cho Dashboard
 type AccountSummary struct {
 	ID           string `json:"id"`
@@ -51,11 +61,14 @@ type AccountSummary struct {
 func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// 1. Danh sách tài khoản
+	// 1. Danh sách tài khoản: Kết hợp Session Repo & Profile Manager
 	var accounts []AccountSummary
+	seen := make(map[string]bool)
+
 	if h.sessionRepo != nil {
 		allAccs := h.sessionRepo.ListAll(ctx)
 		for _, acc := range allAccs {
+			seen[acc.ID] = true
 			tierStr := "Free"
 			if acc.Tier == 2 {
 				tierStr = "Pro"
@@ -79,6 +92,25 @@ func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 				HasGemini:    hasGemini,
 				LastRefresh:  acc.LastRefresh.Format(time.RFC3339),
 			})
+		}
+	}
+
+	if h.profileMgr != nil {
+		allProfiles := h.profileMgr.ListActiveProfiles()
+		for _, p := range allProfiles {
+			if !seen[p.ID] {
+				seen[p.ID] = true
+				accounts = append(accounts, AccountSummary{
+					ID:           p.ID,
+					Email:        "Chưa đăng nhập",
+					Tier:         "Chờ nạp",
+					IsHealthy:    false,
+					Proxy:        p.Proxy,
+					GeminiStatus: "Chờ đồng bộ CDP",
+					HasGemini:    false,
+					LastRefresh:  p.LastActive.Format(time.RFC3339),
+				})
+			}
 		}
 	}
 
@@ -106,15 +138,27 @@ func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 		alertsList = h.sessionRepo.GetAlerts()
 	}
 
+	// 6. Thống kê sử dụng Token toàn hệ thống
+	var systemUsage []domain.KeyTokenUsage
+	if h.keyUseCase != nil {
+		if u, err := h.keyUseCase.GetSystemTokenUsageHistory(ctx, 7); err == nil {
+			systemUsage = u
+		}
+	}
+	if systemUsage == nil {
+		systemUsage = make([]domain.KeyTokenUsage, 0)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":    "ok",
-		"timestamp": time.Now().Format(time.RFC3339),
-		"accounts":  accounts,
-		"metrics":   metricsSnapshot,
-		"cache":     cacheStats,
-		"models":    models,
-		"alerts":    alertsList,
+		"status":      "ok",
+		"timestamp":   time.Now().Format(time.RFC3339),
+		"accounts":    accounts,
+		"metrics":     metricsSnapshot,
+		"cache":       cacheStats,
+		"models":      models,
+		"alerts":      alertsList,
+		"token_usage": systemUsage,
 	})
 }
 

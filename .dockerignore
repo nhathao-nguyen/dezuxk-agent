@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+.superpowers
+*.exe
+*.exe~
+*.log
+scratch/
+storage/*.db
+storage/*.db-shm
+storage/*.db-wal
+storage/media/*
+profiles/*

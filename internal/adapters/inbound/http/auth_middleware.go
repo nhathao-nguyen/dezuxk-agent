@@ -21,10 +21,15 @@ func VirtualKeyAuthMiddleware(keyUseCase ports.KeyUseCase) func(http.Handler) ht
 				return
 			}
 
-			// 1. Trích xuất Token từ header Authorization hoặc x-api-key
+			// 1. Trích xuất Token từ header Authorization, x-api-key hoặc Cookie dezuxk_admin_token
 			token := r.Header.Get("Authorization")
 			if token == "" {
 				token = r.Header.Get("x-api-key")
+			}
+			if token == "" {
+				if cookie, err := r.Cookie("dezuxk_admin_token"); err == nil && cookie.Value != "" {
+					token = cookie.Value
+				}
 			}
 			if token == "" {
 				writeAuthError(w, http.StatusUnauthorized, "missing_api_key", "Thiếu khóa API trong header Authorization (Bearer <key>) hoặc x-api-key.")

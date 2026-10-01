@@ -19,25 +19,40 @@ var (
 	ErrModelNotAllowed      = errors.New("mô hình không được cấp phép cho khóa API này")
 	ErrRateLimitRPMExceeded = errors.New("vượt quá giới hạn tốc độ RPM của khóa API")
 	ErrDailyQuotaExceeded   = errors.New("vượt quá hạn ngạch yêu cầu trong ngày của khóa API")
+	ErrTokenQuotaExceeded   = errors.New("vượt quá hạn ngạch tổng token cho phép của khóa API")
 	ErrAdminRequired        = errors.New("yêu cầu quyền quản trị (admin)")
 )
 
+// KeyTokenUsage thống kê mức tiêu thụ token theo ngày cho từng khóa hoặc toàn hệ thống
+type KeyTokenUsage struct {
+	KeyID            string `json:"key_id"`
+	Date             string `json:"date"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	TotalTokens      int64  `json:"total_tokens"`
+	RequestCount     int64  `json:"request_count"`
+}
+
 // VirtualKey đại diện cho một khóa API ảo phân quyền trong hệ thống Dezuxk Gateway
 type VirtualKey struct {
-	ID                 string     `json:"id"`
-	KeyHash            string     `json:"-"`
-	KeyPrefix          string     `json:"key_prefix"`
-	Name               string     `json:"name"`
-	Role               string     `json:"role"` // "admin" hoặc "user"
-	RateLimitRPM       int        `json:"rate_limit_rpm"`
-	DailyQuotaRequests int        `json:"daily_quota_requests"`
-	UsedToday          int        `json:"used_today"`
-	LastUsedDate       string     `json:"last_used_date"`
-	AllowedModels      []string   `json:"allowed_models"`
-	AllowedModelsJSON  string     `json:"-"`
-	IsActive           bool       `json:"is_active"`
-	ExpiresAt          *time.Time `json:"expires_at,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
+	ID                    string     `json:"id"`
+	KeyHash               string     `json:"-"`
+	KeyPrefix             string     `json:"key_prefix"`
+	Name                  string     `json:"name"`
+	Role                  string     `json:"role"` // "admin" hoặc "user"
+	RateLimitRPM          int        `json:"rate_limit_rpm"`
+	DailyQuotaRequests    int        `json:"daily_quota_requests"`
+	UsedToday             int        `json:"used_today"`
+	LastUsedDate          string     `json:"last_used_date"`
+	PromptTokensTotal     int64      `json:"prompt_tokens_total"`
+	CompletionTokensTotal int64      `json:"completion_tokens_total"`
+	TotalTokens           int64      `json:"total_tokens"`
+	MaxTokenQuota         int64      `json:"max_token_quota"` // 0 = Không giới hạn
+	AllowedModels         []string   `json:"allowed_models"`
+	AllowedModelsJSON     string     `json:"-"`
+	IsActive              bool       `json:"is_active"`
+	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
 }
 
 // IsModelAllowed kiểm tra xem mô hình có nằm trong danh sách được phép hay không
@@ -90,13 +105,15 @@ type CreateKeyRequest struct {
 	Role               string     `json:"role"`
 	RateLimitRPM       int        `json:"rate_limit_rpm"`
 	DailyQuotaRequests int        `json:"daily_quota_requests"`
+	MaxTokenQuota      int64      `json:"max_token_quota"`
 	AllowedModels      []string   `json:"allowed_models"`
 	ExpiresAt          *time.Time `json:"expires_at"`
 }
 
 type VirtualKeyCreated struct {
 	VirtualKey
-	Key string `json:"key"` // Khóa thô dạng 'sk-dez-...', chỉ hiển thị 1 lần duy nhất khi tạo
+	Key    string `json:"key"`     // Khóa thô dạng 'sk-dez-...', chỉ hiển thị 1 lần duy nhất khi tạo
+	RawKey string `json:"raw_key"` // Tương thích alias raw_key
 }
 
 // HashKey băm khóa bí mật bằng SHA-256

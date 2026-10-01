@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dezuxk AI Gateway - Dashboard & Playground</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="logo-badge">⚡ DEZUXK</div>
+      <div>
+        <h1>AI Gateway Server</h1>
+        <div class="brand-subtitle">Google Gemini $\rightarrow$ OpenAI API Facade</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="status-pill">
+        <span class="status-dot"></span>
+        <span id="headerStatusText">Gateway Trực Tuyến</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" onclick="fetchOverview()" title="Đồng bộ lại">🔄 Tải lại</button>
+      <button class="btn btn-secondary btn-sm" onclick="handleLogout()" title="Đăng xuất">Đăng xuất</button>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="dashboard">📊 Tổng Quan</button>
+    <button class="tab-btn" data-tab="profiles">👥 Tài Khoản & Chrome CDP</button>
+    <button class="tab-btn" data-tab="keys">🔑 Virtual API Keys</button>
+    <button class="tab-btn" data-tab="playground">💬 AI Playground</button>
+  </nav>
+
+  <!-- Main Container -->
+  <main>
+    <!-- Tab 1: Dashboard -->
+    <section id="tab-dashboard" class="tab-content active">
+      <div id="alertBanner" class="alert-banner hidden">
+        <span>⚠️ <strong id="alertText">Phát hiện cảnh báo hệ thống</strong></span>
+        <button class="btn btn-secondary btn-sm" onclick="switchTab('profiles')">Kiểm tra ngay</button>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-title">Tổng Yêu Cầu (Requests)</div>
+          <div class="stat-value" id="statRequests">0</div>
+          <div class="stat-desc">Đã xử lý qua OpenAI Facade</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Mô Hình Khả Dụng</div>
+          <div class="stat-value" id="statModels">0</div>
+          <div class="stat-desc">Đã kích hoạt trong Catalog</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Tài Khoản Google</div>
+          <div class="stat-value" id="statAccounts">0</div>
+          <div class="stat-desc">Trong Failover Pool</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Tổng Token Đã Dùng</div>
+          <div class="stat-value" id="statTokens">0</div>
+          <div class="stat-desc" id="statTokensDesc">0 prompt / 0 completion</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-title">Cache Hit Rate</div>
+          <div class="stat-value" id="statCache">0%</div>
+          <div class="stat-desc">In-Memory LRU Cache (&lt; 10ms)</div>
+        </div>
+      </div>
+
+      <!-- Biểu đồ tiêu thụ Token 7 ngày qua -->
+      <div class="chart-container">
+        <div class="chart-header">
+          <div>
+            <h3 style="font-size:1rem; font-weight:700;">📊 Mức Tiêu Thụ Token 7 Ngày Qua (System Usage)</h3>
+            <span style="font-size:0.75rem; color:var(--text-muted);">Phân tách chi tiết token đầu vào (Prompt) và kết quả suy luận/sinh ra (Completion/Thinking)</span>
+          </div>
+          <div style="display:flex; gap:1rem; font-size:0.75rem;">
+            <span style="display:flex; align-items:center; gap:0.35rem;"><span style="display:inline-block; width:10px; height:10px; background:#38bdf8; border-radius:2px;"></span> Prompt Tokens</span>
+            <span style="display:flex; align-items:center; gap:0.35rem;"><span style="display:inline-block; width:10px; height:10px; background:#818cf8; border-radius:2px;"></span> Completion/Thinking Tokens</span>
+          </div>
+        </div>
+        <div class="chart-bars" id="tokenChartBars">
+          <div style="width:100%; text-align:center; color:var(--text-dim); padding:2rem;">Chưa có dữ liệu giao dịch token...</div>
+        </div>
+      </div>
+
+      <div class="section-header">
+        <h2 class="section-title">🤖 Danh Mục Mô Hình Hoạt Động (Model Catalog)</h2>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Model ID</th>
+              <th>Tên Hiển Thị</th>
+              <th>Dịch Vụ Đích</th>
+              <th>Khả Năng Hỗ Trợ</th>
+              <th>Trạng Thái</th>
+            </tr>
+          </thead>
+          <tbody id="modelsTableBody">
+            <tr><td colspan="5" style="text-align:center;">Đang tải danh mục mô hình...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Tab 2: Profiles & CDP -->
+    <section id="tab-profiles" class="tab-content">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">👥 Quản Lý Thư Mục Profile Chrome & Cookie</h2>
+          <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.2rem;">
+            Mỗi tài khoản Google được phân lập trong 1 thư mục riêng. Trích xuất cookie trực tiếp qua Chrome DevTools Protocol không cần extension.
+          </p>
+        </div>
+        <button class="btn btn-primary" onclick="openCreateProfileModal()">➕ Tạo Profile Mới</button>
+      </div>
+
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Profile ID</th>
+              <th>Tài Khoản Google</th>
+              <th>Hạng (Tier)</th>
+              <th>Trạng Thái Phiên</th>
+              <th>Proxy</th>
+              <th>Hành Động</th>
+            </tr>
+          </thead>
+          <tbody id="profilesTableBody">
+            <tr><td colspan="6" style="text-align:center;">Đang tải danh sách profile...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Tab 3: Virtual API Keys -->
+    <section id="tab-keys" class="tab-content">
+      <div class="section-header">
+        <div>
+          <h2 class="section-title">🔑 Quản Lý Virtual API Keys Đa Người Dùng</h2>
+          <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 0.2rem;">
+            Cung cấp khóa API chuẩn OpenAI (`sk-dezuxk-...`) cho Cursor, NextChat, OpenWebUI với giới hạn tốc độ RPM và hạn ngạch ngày.
+          </p>
+        </div>
+        <button class="btn btn-primary" onclick="openCreateKeyModal()">➕ Tạo Key Mới</button>
+      </div>
+
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Tên / Định Danh</th>
+              <th>Khóa API</th>
+              <th>Vai Trò</th>
+              <th>Giới Hạn RPM</th>
+              <th>Hạn Ngạch Ngày</th>
+              <th>Token Đã Dùng</th>
+              <th>Hạn Ngạch Token</th>
+              <th>Trạng Thái</th>
+              <th>Hành Động</th>
+            </tr>
+          </thead>
+          <tbody id="keysTableBody">
+            <tr><td colspan="9" style="text-align:center;">Đang tải danh sách Virtual API Keys...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Tab 4: AI Playground -->
+    <section id="tab-playground" class="tab-content">
+      <div class="playground-container">
+        <!-- Sidebar Controls -->
+        <div class="playground-sidebar">
+          <div>
+            <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:0.35rem;">MÔ HÌNH (MODEL)</label>
+            <select id="playgroundModel" class="form-select"></select>
+          </div>
+
+          <div style="border-top:1px solid var(--border); padding-top:0.75rem; display:flex; flex-direction:column; gap:0.5rem;">
+            <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted);">TÍNH NĂNG MỞ RỘNG GEMINI</label>
+            
+            <label class="switch-label">
+              <span>🧠 Extended Thinking</span>
+              <label class="switch">
+                <input type="checkbox" id="toggleThinking" checked>
+                <span class="slider"></span>
+              </label>
+            </label>
+
+            <!-- OpenAI reasoning_effort selector -->
+            <div id="reasoningEffortWrapper" style="margin-top:0.2rem; background:rgba(0,0,0,0.2); padding:0.5rem; border-radius:var(--radius-sm); border:1px solid var(--border);">
+              <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:0.25rem;">Mức độ suy luận (reasoning_effort):</label>
+              <select id="selectReasoningEffort" class="form-select" style="font-size:0.78rem; padding:0.3rem 0.5rem;">
+                <option value="" selected>Mặc định (Auto)</option>
+                <option value="low">Low (Nhanh, súc tích ~1k)</option>
+                <option value="medium">Medium (Cân bằng ~8k)</option>
+                <option value="high">High (Sâu sắc, kỹ lưỡng ~32k)</option>
+                <option value="none">Tắt suy luận (None)</option>
+              </select>
+            </div>
+
+            <label class="switch-label">
+              <span>🌐 Search Grounding</span>
+              <label class="switch">
+                <input type="checkbox" id="toggleGrounding" checked>
+                <span class="slider"></span>
+              </label>
+            </label>
+
+            <label class="switch-label">
+              <span>🐍 Code Interpreter</span>
+              <label class="switch">
+                <input type="checkbox" id="toggleCode" checked>
+                <span class="slider"></span>
+              </label>
+            </label>
+          </div>
+
+          <div style="border-top:1px solid var(--border); padding-top:0.75rem;">
+            <label style="font-size:0.8rem; font-weight:600; color:var(--text-muted); display:block; margin-bottom:0.5rem;">GỢI Ý PROMPT MẪU</label>
+            <div style="display:flex; flex-direction:column; gap:0.4rem;">
+              <button class="btn btn-secondary btn-sm" style="text-align:left; justify-content:flex-start;" onclick="insertSamplePrompt('Giải phương trình x^2 - 5x + 6 = 0 và giải thích từng bước tư duy')">💡 Giải toán & Suy luận sâu</button>
+              <button class="btn btn-secondary btn-sm" style="text-align:left; justify-content:flex-start;" onclick="insertSamplePrompt('Giá vàng và tin tức công nghệ hôm nay có gì mới?')">🔍 Tìm kiếm Web thời gian thực</button>
+              <button class="btn btn-secondary btn-sm" style="text-align:left; justify-content:flex-start;" onclick="insertSamplePrompt('Viết mã Python tính dãy số Fibonacci đến số thứ 30 và in kết quả')">🐍 Sandbox thực thi mã Python</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat Area -->
+        <div class="playground-chat">
+          <div class="chat-history" id="chatHistory">
+            <div class="chat-bubble assistant">
+              Xin chào! Tôi là Gemini hoạt động qua <strong>Dezuxk AI Gateway</strong>. Bạn có thể thử nghiệm suy luận sâu (Thinking Stream), tra cứu web trực tiếp hoặc chạy mã Python ngay tại đây.
+            </div>
+          </div>
+          <div class="chat-input-bar">
+            <textarea id="playgroundPrompt" class="chat-input" placeholder="Nhập câu hỏi hoặc yêu cầu... (Nhấn Enter để gửi)"></textarea>
+            <button id="btnSendChat" class="btn btn-primary" onclick="sendPlaygroundChat()">Gửi</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Login Modal -->
+  <div id="loginModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 style="font-size:1.15rem; font-weight:700;">🔐 Đăng Nhập Quản Trị Gateway</h3>
+      </div>
+      <form onsubmit="handleLogin(event)">
+        <div class="form-group">
+          <label>Admin Username</label>
+          <input type="text" id="loginUsername" class="form-input" value="admin">
+        </div>
+        <div class="form-group">
+          <label>Admin Password</label>
+          <input type="password" id="loginPassword" class="form-input" value="dezuxk_admin_secret_pass">
+        </div>
+        <div class="form-group">
+          <label>Hoặc Token Quản Trị (Session Token / API Key)</label>
+          <input type="text" id="loginToken" class="form-input" placeholder="sk-dez-... hoặc dezuxk_secure_admin_session_token_2026">
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.25rem;">
+          <button type="submit" class="btn btn-primary" style="width:100%;">Đăng Nhập</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Create Profile Modal -->
+  <div id="createProfileModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 style="font-size:1.15rem; font-weight:700;">➕ Khởi Tạo Chrome Profile Mới</h3>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('createProfileModal').classList.remove('active')">✕</button>
+      </div>
+      <form onsubmit="handleCreateProfile(event)">
+        <div class="form-group">
+          <label>Tên / ID Profile (Chỉ chữ cái, số, gạch dưới)</label>
+          <input type="text" id="newProfileId" class="form-input" placeholder="ví dụ: my_gemini_account" required>
+        </div>
+        <div class="form-group">
+          <label>Proxy Mạng (Tùy chọn, ví dụ: http://user:pass@ip:port)</label>
+          <input type="text" id="newProfileProxy" class="form-input" placeholder="http://127.0.0.1:1080">
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.25rem;">
+          <button type="button" class="btn btn-secondary" onclick="document.getElementById('createProfileModal').classList.remove('active')">Hủy</button>
+          <button type="submit" class="btn btn-primary">Khởi Tạo Profile</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Set Proxy Modal -->
+  <div id="setProxyModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 style="font-size:1.15rem; font-weight:700;">🌐 Cấu Hình Proxy: <span id="proxyProfileIdLabel" style="color:var(--primary);"></span></h3>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('setProxyModal').classList.remove('active')">✕</button>
+      </div>
+      <form onsubmit="handleSetProxy(event)">
+        <div class="form-group">
+          <label>Địa chỉ Proxy Server (Để trống nếu muốn dùng mạng trực tiếp)</label>
+          <input type="text" id="proxyServerInput" class="form-input" placeholder="http://127.0.0.1:7890 hoặc socks5://...">
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.25rem;">
+          <button type="button" class="btn btn-secondary" onclick="document.getElementById('setProxyModal').classList.remove('active')">Hủy</button>
+          <button type="submit" class="btn btn-primary">Lưu Proxy</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Create API Key Modal -->
+  <div id="createKeyModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 style="font-size:1.15rem; font-weight:700;">🔑 Tạo Virtual API Key Mới</h3>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('createKeyModal').classList.remove('active')">✕</button>
+      </div>
+      <form onsubmit="handleCreateKey(event)">
+        <div class="form-group">
+          <label>Tên / Mục Đích Khóa</label>
+          <input type="text" id="keyName" class="form-input" placeholder="ví dụ: Cursor IDE / NextChat" required>
+        </div>
+        <div class="form-group">
+          <label>Vai Trò (Role)</label>
+          <select id="keyRole" class="form-select">
+            <option value="user">User (Chỉ gọi Chat/Completions & Models)</option>
+            <option value="admin">Admin (Toàn quyền quản trị Gateway & Profiles)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Giới Hạn Tốc Độ (RPM - Requests Per Minute, 0 để không giới hạn)</label>
+          <input type="number" id="keyRPM" class="form-input" value="60" min="0">
+        </div>
+        <div class="form-group">
+          <label>Hạn Ngạch Hàng Ngày (Daily Quota, 0 để không giới hạn)</label>
+          <input type="number" id="keyQuota" class="form-input" value="1000" min="0">
+        </div>
+        <div class="form-group">
+          <label>Hạn Ngạch Token Tối Đa (Max Token Quota, 0 để không giới hạn)</label>
+          <input type="number" id="keyMaxTokens" class="form-input" value="0" min="0" placeholder="0 = Không giới hạn token">
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.25rem;">
+          <button type="button" class="btn btn-secondary" onclick="document.getElementById('createKeyModal').classList.remove('active')">Hủy</button>
+          <button type="submit" class="btn btn-primary">Tạo Khóa</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Created Key Modal (1-Click Copy) -->
+  <div id="createdKeyModal" class="modal-overlay">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 style="font-size:1.15rem; font-weight:700; color:var(--success);">🎉 Đã Tạo Virtual API Key Thành Công!</h3>
+      </div>
+      <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
+        Vui lòng lưu lại khóa này ngay bây giờ. Vì lý do bảo mật, khóa đầy đủ sẽ không hiển thị lại sau khi bạn đóng hộp thoại này.
+      </p>
+      <div class="form-group">
+        <input type="text" id="createdRawKey" class="form-input" readonly style="font-family:monospace; color:var(--primary); font-weight:600;">
+      </div>
+      <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1.25rem;">
+        <button type="button" class="btn btn-primary" onclick="copyCreatedKey()">📋 Sao Chép Key</button>
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('createdKeyModal').classList.remove('active')">Đóng</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

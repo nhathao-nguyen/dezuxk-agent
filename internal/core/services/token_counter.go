@@ -154,9 +154,25 @@ func (tc *TokenCounter) CountCompletionTokens(reply domain.GeminiReply) int {
 func (tc *TokenCounter) CalculateUsage(messages []domain.OpenAIMessage, reply domain.GeminiReply) *domain.OpenAIUsage {
 	promptTokens := tc.CountPromptTokens(messages)
 	completionTokens := tc.CountCompletionTokens(reply)
+
+	reasoningTokens := 0
+	for _, tb := range reply.ThinkingBlocks {
+		if tb.Content != "" {
+			reasoningTokens += tc.CountTextTokens(tb.Content, true)
+		}
+	}
+
+	var details *domain.CompletionTokensDetails
+	if reasoningTokens > 0 {
+		details = &domain.CompletionTokensDetails{
+			ReasoningTokens: reasoningTokens,
+		}
+	}
+
 	return &domain.OpenAIUsage{
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		TotalTokens:      promptTokens + completionTokens,
+		PromptTokens:            promptTokens,
+		CompletionTokens:        completionTokens,
+		TotalTokens:             promptTokens + completionTokens,
+		CompletionTokensDetails: details,
 	}
 }

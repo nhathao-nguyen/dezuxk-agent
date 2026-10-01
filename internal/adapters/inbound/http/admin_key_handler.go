@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"dezuxk-gateway/internal/core/domain"
@@ -130,5 +131,85 @@ func (h *AdminKeyHandler) HandleRevokeKey(w http.ResponseWriter, r *http.Request
 		"success": true,
 		"message": "Khóa API đã được thu hồi thành công.",
 		"id":      id,
+	})
+}
+
+// HandleGetKeyUsageHistory: GET /v1/admin/keys/{id}/usage
+func (h *AdminKeyHandler) HandleGetKeyUsageHistory(w http.ResponseWriter, r *http.Request) {
+	if h.keyUseCase == nil {
+		http.Error(w, `{"error":"Key service unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	days := 7
+	if dStr := r.URL.Query().Get("days"); dStr != "" {
+		if d, err := strconv.Atoi(dStr); err == nil && d > 0 {
+			days = d
+		}
+	}
+
+	history, err := h.keyUseCase.GetTokenUsageHistory(r.Context(), id, days)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": err.Error(),
+				"type":    "internal_error",
+			},
+		})
+		return
+	}
+
+	if history == nil {
+		history = make([]domain.KeyTokenUsage, 0)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"key_id":  id,
+		"days":    days,
+		"history": history,
+	})
+}
+
+// HandleGetSystemUsageHistory: GET /v1/admin/keys/usage/history
+func (h *AdminKeyHandler) HandleGetSystemUsageHistory(w http.ResponseWriter, r *http.Request) {
+	if h.keyUseCase == nil {
+		http.Error(w, `{"error":"Key service unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	days := 7
+	if dStr := r.URL.Query().Get("days"); dStr != "" {
+		if d, err := strconv.Atoi(dStr); err == nil && d > 0 {
+			days = d
+		}
+	}
+
+	history, err := h.keyUseCase.GetSystemTokenUsageHistory(r.Context(), days)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"message": err.Error(),
+				"type":    "internal_error",
+			},
+		})
+		return
+	}
+
+	if history == nil {
+		history = make([]domain.KeyTokenUsage, 0)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"days":    days,
+		"history": history,
 	})
 }

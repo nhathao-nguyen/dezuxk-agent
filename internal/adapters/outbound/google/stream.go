@@ -827,9 +827,24 @@ func dedupeStrings(input []string) []string {
 
 // ReadGeminiStream đọc luồng wrb.fr. Thân phản hồi không đi vào lỗi.
 func ReadGeminiStream(ctx context.Context, body io.Reader, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
+	return ReadGeminiStreamWithThinking(ctx, body, metrics, onDelta, nil)
+}
+
+// ReadGeminiStreamWithThinking đọc luồng wrb.fr và phát cả token nội dung lẫn token suy luận (Thinking/Reasoning) thời gian thực
+func ReadGeminiStreamWithThinking(
+	ctx context.Context,
+	body io.Reader,
+	metrics *domain.ContractMetrics,
+	onDelta func(delta, convID string) error,
+	onReasoning func(delta, convID string) error,
+) (domain.GeminiReply, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	reader := bufio.NewReaderSize(body, 64*1024)
 	var reply domain.GeminiReply
 	var lastFullText string
+	var lastFullThinking string
 	seenMedia := map[string]struct{}{}
 
 	emit := func(delta, convID string) error {
@@ -864,7 +879,7 @@ func ReadGeminiStream(ctx context.Context, body io.Reader, metrics *domain.Contr
 					reply.ChoiceID = meta.ChoiceID
 				}
 				if len(meta.ThinkingBlocks) > 0 {
-					reply.ThinkingBlocks = append(reply.ThinkingBlocks, meta.ThinkingBlocks...)
+					reply.ThinkingBlocks = meta.ThinkingBlocks
 				}
 				if meta.Grounding != nil {
 					reply.Grounding = meta.Grounding
@@ -882,6 +897,31 @@ func ReadGeminiStream(ctx context.Context, body io.Reader, metrics *domain.Contr
 				if !mapped {
 					reply.Unmapped++
 				}
+
+				// Xử lý luồng Thinking/Reasoning thời gian thực
+				var currentThinking string
+				if len(meta.ThinkingBlocks) > 0 {
+					var parts []string
+					for _, tb := range meta.ThinkingBlocks {
+						if strings.TrimSpace(tb.Content) != "" {
+							parts = append(parts, tb.Content)
+						}
+					}
+					currentThinking = strings.Join(parts, "\n\n")
+				} else if meta.ThinkingContent != "" {
+					currentThinking = meta.ThinkingContent
+				}
+
+				if currentThinking != "" && currentThinking != lastFullThinking {
+					deltaThinking := ComputeDelta(currentThinking, lastFullThinking)
+					lastFullThinking = currentThinking
+					if deltaThinking != "" && onReasoning != nil {
+						if callErr := onReasoning(deltaThinking, reply.ConversationID); callErr != nil {
+							return reply, callErr
+						}
+					}
+				}
+
 				if meta.Text != "" && meta.Text != lastFullText {
 					effectiveText := meta.Text
 					if strings.Contains(effectiveText, "<ProductComparisonTable") && !strings.Contains(effectiveText, "</ProductComparisonTable>") {
@@ -927,12 +967,16 @@ func ReadGeminiStream(ctx context.Context, body io.Reader, metrics *domain.Contr
 			return reply, err
 		}
 	}
-	metrics.AddUnmapped(reply.Unmapped)
+	if metrics != nil {
+		metrics.AddUnmapped(reply.Unmapped)
+	}
 	if lastFullText != "" {
 		reply.Text = CleanInternalPlaceholders(lastFullText)
 	}
 	if strings.TrimSpace(reply.Text) == "" && len(reply.MediaURLs) == 0 && len(reply.ThinkingBlocks) == 0 && len(reply.CodeExecutions) == 0 {
-		metrics.AddSchema()
+		if metrics != nil {
+			metrics.AddSchema()
+		}
 		return reply, domain.CodecSchema(domain.OriginStreamGenerate, domain.ServiceGemini, "phản hồi chat không đúng hợp đồng")
 	}
 	return reply, nil

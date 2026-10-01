@@ -294,5 +294,97 @@ Mẫu **iPhone 16 Pro** cao cấp.`
 	}
 }
 
+func TestReadGeminiStreamWithThinking(t *testing.T) {
+	// Chunk 1: Thinking Bước 1
+	chunk1Inner := []interface{}{
+		nil, []interface{}{"c_thk", "r_thk"}, nil, nil,
+		[]interface{}{
+			[]interface{}{
+				"rc_thk", []interface{}{""}, nil, nil, nil,
+				[]interface{}{map[string]interface{}{"thought_content": "Bước 1: Phân tích", "is_thinking": true}},
+			},
+		},
+	}
+	b1, _ := json.Marshal(chunk1Inner)
+	line1, _ := json.Marshal([][]interface{}{{"wrb.fr", "assistant.lamda.BardFrontendService", string(b1)}})
+
+	// Chunk 2: Cumulative thinking: Bước 1 + Bước 2
+	chunk2Inner := []interface{}{
+		nil, []interface{}{"c_thk", "r_thk"}, nil, nil,
+		[]interface{}{
+			[]interface{}{
+				"rc_thk", []interface{}{""}, nil, nil, nil,
+				[]interface{}{map[string]interface{}{"thought_content": "Bước 1: Phân tích\nBước 2: Giải xong", "is_thinking": true}},
+			},
+		},
+	}
+	b2, _ := json.Marshal(chunk2Inner)
+	line2, _ := json.Marshal([][]interface{}{{"wrb.fr", "assistant.lamda.BardFrontendService", string(b2)}})
+
+	// Chunk 3: Final Answer text
+	chunk3Inner := []interface{}{
+		nil, []interface{}{"c_thk", "r_thk"}, nil, nil,
+		[]interface{}{
+			[]interface{}{
+				"rc_thk", []interface{}{"Đáp án: x = 2"}, nil, nil, nil,
+				[]interface{}{map[string]interface{}{"thought_content": "Bước 1: Phân tích\nBước 2: Giải xong", "is_thinking": true}},
+			},
+		},
+	}
+	b3, _ := json.Marshal(chunk3Inner)
+	line3, _ := json.Marshal([][]interface{}{{"wrb.fr", "assistant.lamda.BardFrontendService", string(b3)}})
+
+	streamData := strings.Join([]string{
+		")]}'",
+		"100",
+		string(line1),
+		"120",
+		string(line2),
+		"150",
+		string(line3),
+	}, "\n")
+
+	var reasoningDeltas []string
+	var contentDeltas []string
+
+	onContent := func(delta, convID string) error {
+		contentDeltas = append(contentDeltas, delta)
+		return nil
+	}
+	onReasoning := func(delta, convID string) error {
+		reasoningDeltas = append(reasoningDeltas, delta)
+		return nil
+	}
+
+	reply, err := google.ReadGeminiStreamWithThinking(
+		nil,
+		strings.NewReader(streamData),
+		nil,
+		onContent,
+		onReasoning,
+	)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if len(reasoningDeltas) != 2 {
+		t.Fatalf("expected 2 reasoning deltas, got %d (%+v)", len(reasoningDeltas), reasoningDeltas)
+	}
+	if reasoningDeltas[0] != "Bước 1: Phân tích" {
+		t.Errorf("expected first delta to be 'Bước 1: Phân tích', got %q", reasoningDeltas[0])
+	}
+	if reasoningDeltas[1] != "\nBước 2: Giải xong" {
+		t.Errorf("expected second delta to be '\nBước 2: Giải xong', got %q", reasoningDeltas[1])
+	}
+
+	if len(contentDeltas) != 1 || contentDeltas[0] != "Đáp án: x = 2" {
+		t.Errorf("content deltas mismatch: %+v", contentDeltas)
+	}
+	if reply.ConversationID != "c_thk" {
+		t.Errorf("expected conversation ID c_thk, got %q", reply.ConversationID)
+	}
+}
+
+
 
 

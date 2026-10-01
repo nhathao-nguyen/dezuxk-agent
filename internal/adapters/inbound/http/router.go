@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"dezuxk-gateway/internal/adapters/inbound/web"
 	"dezuxk-gateway/internal/config"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
@@ -51,7 +52,15 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 	if deps.Metrics != nil {
 		r.Use(func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				deps.Metrics.RecordRequest()
+				path := r.URL.Path
+				// Chỉ ghi nhận vào ContractMetrics đối với các yêu cầu AI Gateway thực tế (OpenAI / Gemini Facade),
+				// loại trừ các yêu cầu phục vụ giao diện Web Dashboard, kiểm tra sức khỏe và API quản trị nội bộ.
+				if strings.HasPrefix(path, "/v1/") &&
+					!strings.HasPrefix(path, "/v1/admin") &&
+					!strings.HasPrefix(path, "/v1/profiles") &&
+					path != "/v1/alerts" {
+					deps.Metrics.RecordRequest()
+				}
 				next.ServeHTTP(w, r)
 			})
 		})
@@ -132,6 +141,18 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		})
 	}
 
+	// Web Admin UI Dashboard (Embedded SPA)
+	webHandler := http.StripPrefix("/admin", web.Handler())
+	r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusFound)
+	})
+	r.Get("/admin/*", func(w http.ResponseWriter, r *http.Request) {
+		webHandler.ServeHTTP(w, r)
+	})
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusFound)
+	})
+
 	// 4. Handlers
 	var modelHandler *ModelHandler
 	if deps.ModelRegistry != nil {
@@ -154,6 +175,12 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		adminCfg = &deps.Config.Admin
 	}
 	adminHandler := NewAdminHandler(deps.SessionRepo, deps.ModelRegistry, deps.Metrics, deps.ResponseCache, adminCfg)
+	if deps.KeyUseCase != nil {
+		adminHandler.SetKeyUseCase(deps.KeyUseCase)
+	}
+	if deps.ProfileUseCase != nil {
+		adminHandler.SetProfileUseCase(deps.ProfileUseCase)
+	}
 
 	// Admin Authentication & Overview APIs
 	r.Post("/v1/admin/auth/login", adminHandler.HandleLogin)
@@ -191,6 +218,8 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				admin.Use(RequireAdmin)
 				admin.Post("/", adminHandler.HandleCreateKey)
 				admin.Get("/", adminHandler.HandleListKeys)
+				admin.Get("/usage/history", adminHandler.HandleGetSystemUsageHistory)
+				admin.Get("/{id}/usage", adminHandler.HandleGetKeyUsageHistory)
 				admin.Delete("/{id}", adminHandler.HandleRevokeKey)
 			})
 		}

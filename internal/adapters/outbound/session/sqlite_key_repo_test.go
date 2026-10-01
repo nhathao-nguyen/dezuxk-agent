@@ -135,3 +135,105 @@ func TestSqliteKeyRepository_CRUDAndQuota(t *testing.T) {
 		t.Fatalf("expected ErrKeyRevoked, got %v", err)
 	}
 }
+
+func TestSqliteKeyRepository_TokenUsage(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_tokens.db")
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	repo, err := NewSqliteKeyRepository(db)
+	if err != nil {
+		t.Fatalf("failed to create sqlite key repo: %v", err)
+	}
+
+	ctx := context.Background()
+
+	key := &domain.VirtualKey{
+		ID:            "vk_token_test",
+		KeyHash:       domain.HashKey("sk-dez-tokentest"),
+		KeyPrefix:     "sk-dez-toke...est",
+		Name:          "Token Test Key",
+		Role:          "user",
+		RateLimitRPM:  60,
+		MaxTokenQuota: 50000,
+		IsActive:      true,
+		CreatedAt:     time.Now().UTC(),
+	}
+
+	if err := repo.Save(ctx, key); err != nil {
+		t.Fatalf("save key failed: %v", err)
+	}
+
+	// 1. Ghi nhận lượt dùng token
+	if err := repo.RecordTokenUsage(ctx, key.ID, 500, 1500); err != nil {
+		t.Fatalf("record token usage 1 failed: %v", err)
+	}
+	if err := repo.RecordTokenUsage(ctx, key.ID, 300, 700); err != nil {
+		t.Fatalf("record token usage 2 failed: %v", err)
+	}
+
+	// 2. Kiểm tra tổng lũy kế trong key
+	found, err := repo.FindByID(ctx, key.ID)
+	if err != nil {
+		t.Fatalf("find by ID failed: %v", err)
+	}
+
+	if found.PromptTokensTotal != 800 {
+		t.Errorf("expected prompt tokens 800, got %d", found.PromptTokensTotal)
+	}
+	if found.CompletionTokensTotal != 2200 {
+		t.Errorf("expected completion tokens 2200, got %d", found.CompletionTokensTotal)
+	}
+	if found.TotalTokens != 3000 {
+		t.Errorf("expected total tokens 3000, got %d", found.TotalTokens)
+	}
+	if found.MaxTokenQuota != 50000 {
+		t.Errorf("expected max token quota 50000, got %d", found.MaxTokenQuota)
+	}
+
+	// 3. Lấy lịch sử theo key
+	history, err := repo.GetTokenUsageHistory(ctx, key.ID, 7)
+	if err != nil {
+		t.Fatalf("get token usage history failed: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 history record, got %d", len(history))
+	}
+	if history[0].TotalTokens != 3000 {
+		t.Errorf("expected 3000 total tokens in history, got %d", history[0].TotalTokens)
+	}
+	if history[0].RequestCount != 2 {
+		t.Errorf("expected 2 request counts in history, got %d", history[0].RequestCount)
+	}
+
+	// 4. Lấy lịch sử toàn hệ thống
+	sysHistory, err := repo.GetSystemTokenUsageHistory(ctx, 7)
+	if err != nil {
+		t.Fatalf("get system token usage history failed: %v", err)
+	}
+	if len(sysHistory) != 1 {
+		t.Fatalf("expected 1 system history record, got %d", len(sysHistory))
+	}
+	if sysHistory[0].TotalTokens != 3000 {
+		t.Errorf("expected 3000 total tokens in system history, got %d", sysHistory[0].TotalTokens)
+	}
+
+	// 5. Ghi nhận token cho master key (hỗ trợ Dashboard & Playground)
+	if err := repo.RecordTokenUsage(ctx, "master", 200, 400); err != nil {
+		t.Fatalf("record token usage for master failed: %v", err)
+	}
+	sysHistoryAfterMaster, err := repo.GetSystemTokenUsageHistory(ctx, 7)
+	if err != nil {
+		t.Fatalf("get system token usage history after master failed: %v", err)
+	}
+	if sysHistoryAfterMaster[0].TotalTokens != 3600 {
+		t.Errorf("expected 3600 total tokens in system history after master, got %d", sysHistoryAfterMaster[0].TotalTokens)
+	}
+}
+
+

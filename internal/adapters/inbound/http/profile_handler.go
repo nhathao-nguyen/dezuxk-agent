@@ -28,8 +28,9 @@ func (h *ProfileHandler) HandleListProfiles(w http.ResponseWriter, r *http.Reque
 }
 
 type CreateProfileRequest struct {
-	ID    string `json:"id"`
-	Proxy string `json:"proxy,omitempty"`
+	ID        string `json:"id"`
+	ProfileID string `json:"profile_id"`
+	Proxy     string `json:"proxy,omitempty"`
 }
 
 func (h *ProfileHandler) HandleCreateProfile(w http.ResponseWriter, r *http.Request) {
@@ -39,12 +40,23 @@ func (h *ProfileHandler) HandleCreateProfile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	profileID := strings.TrimSpace(req.ID)
+	if profileID == "" {
+		profileID = strings.TrimSpace(req.ProfileID)
+	}
+	if profileID == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "id profile là bắt buộc"})
+		return
+	}
+
 	var prof *domain.Profile
 	var err error
 	if req.Proxy != "" {
-		prof, err = h.profileMgr.CreateProfileWithProxy(req.ID, req.Proxy)
+		prof, err = h.profileMgr.CreateProfileWithProxy(profileID, req.Proxy)
 	} else {
-		prof, err = h.profileMgr.CreateProfile(req.ID)
+		prof, err = h.profileMgr.CreateProfile(profileID)
 	}
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")

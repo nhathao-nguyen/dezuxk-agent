@@ -142,6 +142,10 @@ func (r *recordingCodec) MaterializeChat(account *domain.ManagedAccount, payload
 }
 
 func (r *recordingCodec) DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
+	return r.DematerializeChatStream(ctx, resp, metrics, onDelta, nil)
+}
+
+func (r *recordingCodec) DematerializeChatStream(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onContent func(delta, convID string) error, onReasoning func(delta, convID string) error) (domain.GeminiReply, error) {
 	if resp != nil && resp.StatusCode != http.StatusOK {
 		return domain.GeminiReply{}, domain.CodecHTTP(domain.OriginStreamGenerate, resp.StatusCode, false, domain.ServiceGemini)
 	}
@@ -150,9 +154,9 @@ func (r *recordingCodec) DematerializeChat(ctx context.Context, resp *http.Respo
 	replyText := r.replyText
 	r.mu.Unlock()
 
-	if onDelta != nil && len(deltas) > 0 {
+	if onContent != nil && len(deltas) > 0 {
 		for _, d := range deltas {
-			if err := onDelta(d, "c_test_123"); err != nil {
+			if err := onContent(d, "c_test_123"); err != nil {
 				return domain.GeminiReply{}, err
 			}
 		}
@@ -575,8 +579,12 @@ func (f *failingStreamCodec) MaterializeChat(account *domain.ManagedAccount, pay
 }
 
 func (f *failingStreamCodec) DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
-	if onDelta != nil {
-		_ = onDelta("chunk-da-gui", "c_mid_stream")
+	return f.DematerializeChatStream(ctx, resp, metrics, onDelta, nil)
+}
+
+func (f *failingStreamCodec) DematerializeChatStream(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onContent func(delta, convID string) error, onReasoning func(delta, convID string) error) (domain.GeminiReply, error) {
+	if onContent != nil {
+		_ = onContent("chunk-da-gui", "c_mid_stream")
 	}
 	// Đứt kết nối giữa chừng sau khi client đã nhận 1 chunk
 	return domain.GeminiReply{}, domain.CodecTransport(domain.OriginStreamGenerate, domain.ServiceGemini, fmt.Errorf("connection reset by peer mid-stream"))

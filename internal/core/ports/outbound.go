@@ -58,6 +58,9 @@ type KeyRepository interface {
 	ListActive(ctx context.Context) ([]*domain.VirtualKey, error)
 	Revoke(ctx context.Context, id string) error
 	ConsumeDailyQuota(ctx context.Context, id string, date string) (int, error)
+	RecordTokenUsage(ctx context.Context, id string, promptTokens, completionTokens int) error
+	GetTokenUsageHistory(ctx context.Context, keyID string, days int) ([]domain.KeyTokenUsage, error)
+	GetSystemTokenUsageHistory(ctx context.Context, days int) ([]domain.KeyTokenUsage, error)
 }
 
 // DerivedSecretRefresher xoay bí mật dẫn xuất (SNlM0e) của một service. Không login lại.
@@ -85,4 +88,6 @@ type TokenExtractor interface {
 type WireCodec interface {
 	MaterializeChat(account *domain.ManagedAccount, payload domain.GeminiPayloadBuilder) (domain.OutboundAttempt, error)
 	DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error)
+	DematerializeChatStream(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onContent func(delta, convID string) error, onReasoning func(delta, convID string) error) (domain.GeminiReply, error)
 }
+
