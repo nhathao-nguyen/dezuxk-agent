@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +31,7 @@ type ChatService struct {
 	leaseWaitTimeout time.Duration
 	rpcRegistry      *domain.RpcRegistry
 	keyUseCase       ports.KeyUseCase
+	chatDefaults     config.ChatDefaultsConfig
 }
 
 func NewChatService(
@@ -83,6 +85,10 @@ func (s *ChatService) SetRpcRegistry(r *domain.RpcRegistry) {
 	if r != nil {
 		s.rpcRegistry = r
 	}
+}
+
+func (s *ChatService) SetChatDefaults(cd config.ChatDefaultsConfig) {
+	s.chatDefaults = cd
 }
 
 func (s *ChatService) ExecuteChatStream(
@@ -442,6 +448,7 @@ func (s *ChatService) streamRound(
 				Choices: []domain.OpenAIChoice{{
 					Index: 0,
 					Delta: domain.OpenAIDelta{
+						Role:      "assistant",
 						ToolCalls: toolCalls,
 					},
 				}},
@@ -684,11 +691,13 @@ func (s *ChatService) postGemini(
 		}
 	}
 
-	isThinking := true // Smart-by-Default: luôn bật suy luận trừ khi có yêu cầu tắt
+	isThinking := s.chatDefaults.DefaultThinking()
 	if req.Thinking != nil {
 		isThinking = *req.Thinking
 	} else if strings.Contains(strings.ToLower(req.Model), "no-thinking") {
 		isThinking = false
+	} else if strings.Contains(strings.ToLower(req.Model), "-thinking") {
+		isThinking = true
 	}
 
 	// Xử lý tham số chuẩn OpenAI reasoning_effort và thinking_budget / budget_tokens
@@ -725,11 +734,11 @@ func (s *ChatService) postGemini(
 	if reasoningInstruction != "" && isThinking {
 		lastUserPrompt = reasoningInstruction + "\n\n" + lastUserPrompt
 	}
-	isGrounding := true
+	isGrounding := s.chatDefaults.DefaultSearchGrounding()
 	if req.SearchGrounding != nil {
 		isGrounding = *req.SearchGrounding
 	}
-	isCodeInterpreter := true
+	isCodeInterpreter := s.chatDefaults.DefaultCodeInterpreter()
 	if req.CodeInterpreter != nil {
 		isCodeInterpreter = *req.CodeInterpreter
 	}
@@ -877,6 +886,34 @@ func boundStream(upstream ports.UpstreamGoogleTransport, ctx context.Context) (c
 	return upstream.BoundStream(ctx)
 }
 
+func isNetworkOrTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "reset") ||
+		strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "refused") ||
+		strings.Contains(errStr, "use of closed") ||
+		strings.Contains(errStr, "stream error") ||
+		strings.Contains(errStr, "handshake") ||
+		strings.Contains(errStr, "tls") ||
+		strings.Contains(errStr, "unexpected eof") ||
+		strings.Contains(errStr, "eof")
+}
+
 func normalizeWireErr(err error) error {
 	if err == nil {
 		return nil
@@ -884,14 +921,30 @@ func normalizeWireErr(err error) error {
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
-	if _, ok := domain.AsCodecError(err); ok {
-		return err
+	if ge, ok := domain.AsGatewayError(err); ok {
+		return ge
 	}
-	if _, ok := domain.AsGatewayError(err); ok {
-		return err
+	if ce, ok := domain.AsCodecError(err); ok {
+		return ce
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+
+	// 1. Lỗi ngắt kết nối mạng / Timeout -> Trả về ClassUpstreamUnavailable với Retryable = true để kích hoạt Failover
+	if isNetworkOrTimeoutErr(err) {
 		return domain.CodecTransport(domain.OriginStreamGenerate, domain.ServiceGemini, err)
 	}
-	return domain.CodecSchema(domain.OriginStreamGenerate, domain.ServiceGemini, "luồng phản hồi không đúng hợp đồng")
+
+	// 2. Chỉ trả về ClassSchemaUnexpected khi nhận được HTTP 200 từ Google nhưng nội dung JSON bị rỗng hoàn toàn
+	errStr := strings.ToLower(err.Error())
+	if strings.Contains(errStr, "empty") || strings.Contains(errStr, "rỗng") {
+		return domain.CodecSchema(domain.OriginStreamGenerate, domain.ServiceGemini, "nhận được HTTP 200 từ Google nhưng nội dung JSON bị rỗng hoàn toàn")
+	}
+
+	// Mặc định đối với lỗi đọc wire / I/O không xác định, coi là lỗi upstream transport để kích hoạt Failover
+	return domain.CodecTransport(domain.OriginStreamGenerate, domain.ServiceGemini, err)
 }
+
+// NormalizeWireErr chuẩn hóa lỗi từ wire codec để hỗ trợ kiểm thử và phân loại lỗi
+func NormalizeWireErr(err error) error {
+	return normalizeWireErr(err)
+}
+

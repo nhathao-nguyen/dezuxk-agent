@@ -15,12 +15,15 @@ import (
 	adaptersHTTP "dezuxk-gateway/internal/adapters/inbound/http"
 	"dezuxk-gateway/internal/adapters/outbound/alerts"
 	"dezuxk-gateway/internal/adapters/outbound/google"
+	"dezuxk-gateway/internal/adapters/outbound/mcp"
 	"dezuxk-gateway/internal/adapters/outbound/session"
 	"dezuxk-gateway/internal/adapters/outbound/storage"
+	"dezuxk-gateway/internal/adapters/outbound/tools"
 	"dezuxk-gateway/internal/config"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/core/services"
+	"dezuxk-gateway/internal/core/services/agent"
 )
 
 // Run khởi động toàn bộ hạ tầng Dezuxk AI Gateway ở chế độ Headless Daemon
@@ -149,6 +152,7 @@ func Run(configPath string, portOverride int) error {
 	// Khởi tạo các Gemini Services nâng cao (Production)
 	geminiHistoryService := services.NewGeminiHistoryService(sessionRepo, upstreamTransport, rpcRegistry, metrics)
 	geminiQuotaService := services.NewGeminiQuotaService(sessionRepo, upstreamTransport, rpcRegistry)
+	profileManager.SetQuotaUseCase(geminiQuotaService)
 	geminiUploadService := services.NewGeminiUploadService(sessionRepo, upstreamTransport, rpcRegistry)
 	geminiCanvasService := services.NewGeminiCanvasService(sessionRepo, upstreamTransport, rpcRegistry)
 	geminiFeedbackService := services.NewGeminiFeedbackService(sessionRepo, upstreamTransport, rpcRegistry)
@@ -168,6 +172,7 @@ func Run(configPath string, portOverride int) error {
 	if keyService != nil {
 		chatService.SetKeyUseCase(keyService)
 	}
+	chatService.SetChatDefaults(cfg.ChatDefaults)
 
 	if sr, ok := sessionRepo.(interface{ SetCoolingDuration(time.Duration) }); ok {
 		sr.SetCoolingDuration(cfg.Failover.GetCoolingDuration())
@@ -198,6 +203,72 @@ func Run(configPath string, portOverride int) error {
 	}
 	rateLimiter := adaptersHTTP.NewIPRateLimiter(maxReqs, time.Duration(windowSecs)*time.Second, cfg.Server.TrustedProxies)
 
+	// Khởi tạo Autonomous Agent Tool Registry, Checkpoint Repo & Runners
+	toolRegistry := tools.NewToolRegistry()
+	tools.RegisterDefaultTools(toolRegistry, ".")
+	agentRunner := agent.NewRunner(chatService, toolRegistry, nil)
+
+	var checkpointRepo ports.CheckpointRepository
+	var memoryRepo ports.MemoryRepository
+	if sqliteRepo != nil {
+		cpRepo, err := session.NewSqliteCheckpointRepository(sqliteRepo.DB())
+		if err == nil {
+			checkpointRepo = cpRepo
+		}
+		mRepo, err := session.NewSqliteMemoryRepository(sqliteRepo.DB())
+		if err == nil {
+			memoryRepo = mRepo
+		}
+	}
+	if checkpointRepo == nil {
+		checkpointRepo = session.NewMemoryCheckpointRepository()
+	}
+	if memoryRepo == nil {
+		memoryRepo = session.NewMemoryMemoryRepository()
+	}
+
+	// Khởi tạo 3-Tier Memory Manager (Working, Recall, Archival)
+	initialCore := domain.CoreMemory{
+		Persona:        "Dezuxk Autonomous Engineering Agent (Tự trị • Kiểm chứng • Chuẩn chỉ)",
+		ProjectContext: "Hexagonal Clean Architecture, Zero Hardcoding, SQLite WAL persistence, Extended Thinking",
+	}
+	memoryService := agent.NewMemoryManager(memoryRepo, chatService, "gemini-3.8-flash", initialCore)
+	agentRunner.SetMemoryService(memoryService)
+	tools.RegisterMemoryTools(toolRegistry, memoryService)
+
+	// Đăng ký Chrome CDP Browser Tools (Web Automation)
+	tools.RegisterBrowserTools(toolRegistry, 9222, filepath.Join(".", ".dezuxk", "screenshots"))
+
+	// Khởi tạo Isolated Sub-agents Supervisor & đăng ký invoke_subagent tool
+	subagentSupervisor := agent.NewSubagentSupervisor(chatService, toolRegistry, nil, memoryService)
+	tools.RegisterSubagentTool(toolRegistry, subagentSupervisor)
+
+	// Tự động kết nối và nạp các công cụ từ danh mục MCP Servers (Model Context Protocol)
+	if len(cfg.MCPServers) > 0 {
+		for sName, sCfg := range cfg.MCPServers {
+			if strings.TrimSpace(sCfg.Command) == "" {
+				continue
+			}
+			mcpClient, err := mcp.StartStdioMCPClient(context.Background(), sName, sCfg.Command, sCfg.Args...)
+			if err != nil {
+				log.Printf("[MCP] Không thể kết nối MCP Server %s: %v", sName, err)
+				continue
+			}
+			mcpTools, err := mcpClient.ListTools(context.Background())
+			if err != nil {
+				log.Printf("[MCP] Không thể lấy danh sách tools từ MCP Server %s: %v", sName, err)
+				continue
+			}
+			for _, def := range mcpTools {
+				adapter := mcp.NewMCPToolAdapter(mcpClient, def, domain.PermissionSafe)
+				toolRegistry.RegisterTool(adapter)
+				log.Printf("[MCP] Đã đăng ký tool: %s (%s)", adapter.Name(), adapter.Description())
+			}
+		}
+	}
+
+	graphRunner := agent.NewGraphEngine(chatService, toolRegistry, checkpointRepo, nil, 3)
+
 	httpRouter := adaptersHTTP.BuildRouter(adaptersHTTP.RouterDependencies{
 		Config:                cfg,
 		ModelRegistry:         modelRegistry,
@@ -215,6 +286,12 @@ func Run(configPath string, portOverride int) error {
 		KeyUseCase:            keyService,
 		AlertDispatcher:       alertDispatcher,
 		ResponseCache:         responseCache,
+		AgentRunner:           agentRunner,
+		GraphRunner:           graphRunner,
+		ToolRegistry:          toolRegistry,
+		CheckpointRepo:        checkpointRepo,
+		MemoryService:         memoryService,
+		SubagentSupervisor:    subagentSupervisor,
 	})
 
 	// 8. Khởi động GeminiChatGoldenJob và Proactive Session Keep-Alive Worker
@@ -222,6 +299,7 @@ func Run(configPath string, portOverride int) error {
 	defer goldenCancel()
 	startGeminiChatGoldenRunner(goldenCtx, wire, upstreamTransport, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
 	startProactiveKeepAliveRunner(goldenCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
+	startStartupTierDiscovery(goldenCtx, sessionRepo, geminiQuotaService)
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpServer := &http.Server{
@@ -238,6 +316,8 @@ func Run(configPath string, portOverride int) error {
 		log.Printf("[Server] Web Dashboard UI:  http://%s/admin/", serverAddr)
 		log.Printf("[Server] Admin Overview API: http://%s/v1/admin/overview", serverAddr)
 		log.Printf("[Server] OpenAI API Base:    http://%s/v1", serverAddr)
+		log.Printf("[Server] Agent Engine API:   http://%s/v1/agent/run", serverAddr)
+		log.Printf("[Server] Agent Memory API:   http://%s/v1/agent/memory/core", serverAddr)
 		log.Printf("[Server] Profiles API:       http://%s/v1/profiles", serverAddr)
 		log.Printf("[Server] Health API:         http://%s/health", serverAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -408,3 +488,43 @@ func startProactiveKeepAliveRunner(
 		}
 	}()
 }
+
+// startStartupTierDiscovery tự động truy vấn Google RPC otAQ7b để xác thực và cập nhật chính xác cấp độ Tier (Pro/Ultra/Free) cho toàn bộ tài khoản ngay khi khởi động
+func startStartupTierDiscovery(
+	ctx context.Context,
+	repo ports.SessionRepository,
+	geminiQuota ports.GeminiQuotaUseCase,
+) {
+	if geminiQuota == nil || repo == nil {
+		return
+	}
+	go func() {
+		// Chờ 2 giây để HTTP Server và các cấu phần hoàn tất lắng nghe
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
+
+		accounts := repo.ListAll(ctx)
+		if len(accounts) == 0 {
+			return
+		}
+
+		log.Printf("[Startup Tier Discovery] Bắt đầu tự động quét và xác thực cấp độ gói cho %d tài khoản từ Google...", len(accounts))
+		for _, acc := range accounts {
+			if !acc.IsHealthy || !acc.ServiceReady(domain.ServiceGemini) {
+				continue
+			}
+			quotaCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			tierInfo, err := geminiQuota.GetAccountTierForAccount(quotaCtx, acc)
+			cancel()
+			if err != nil {
+				log.Printf("[Startup Tier Discovery Warning] Không thể tra cứu Tier cho %s: %v", acc.ID, err)
+			} else {
+				log.Printf("[Startup Tier Discovery Success] Tài khoản %s đã được xác thực từ Google: %s (Tier %d)", acc.ID, tierInfo.TierCode, acc.Tier)
+			}
+		}
+	}()
+}
+

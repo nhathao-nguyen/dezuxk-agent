@@ -27,8 +27,42 @@ type Config struct {
 	Security   SecurityConfig               `yaml:"security"`
 	Alerts     AlertsConfig                 `yaml:"alerts"`
 	Cache      CacheConfig                  `yaml:"cache"`
-	Admin      AdminConfig                  `yaml:"admin"`
-	Rpcs       map[string]RpcOverrideConfig `yaml:"rpcs"`
+	Admin        AdminConfig                  `yaml:"admin"`
+	ChatDefaults ChatDefaultsConfig           `yaml:"chat_defaults"`
+	MCPServers   map[string]MCPServerConfig   `yaml:"mcp_servers"`
+	Rpcs         map[string]RpcOverrideConfig `yaml:"rpcs"`
+}
+
+type ChatDefaultsConfig struct {
+	Thinking        *bool `yaml:"thinking"`
+	SearchGrounding *bool `yaml:"search_grounding"`
+	CodeInterpreter *bool `yaml:"code_interpreter"`
+}
+
+func (c ChatDefaultsConfig) DefaultThinking() bool {
+	if c.Thinking != nil {
+		return *c.Thinking
+	}
+	return false
+}
+
+func (c ChatDefaultsConfig) DefaultSearchGrounding() bool {
+	if c.SearchGrounding != nil {
+		return *c.SearchGrounding
+	}
+	return false
+}
+
+func (c ChatDefaultsConfig) DefaultCodeInterpreter() bool {
+	if c.CodeInterpreter != nil {
+		return *c.CodeInterpreter
+	}
+	return false
+}
+
+type MCPServerConfig struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
 }
 
 // Operations là công tắc từng operation nội bộ. Khóa thiếu nghĩa là bật.

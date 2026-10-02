@@ -230,7 +230,7 @@ func (r *SqliteKeyRepository) ConsumeDailyQuota(ctx context.Context, id string, 
 	var (
 		dailyQuota int
 		usedToday  int
-		lastDate   string
+		lastDate   sql.NullString
 		isActive   int
 	)
 	err := r.db.QueryRowContext(ctx,
@@ -248,7 +248,7 @@ func (r *SqliteKeyRepository) ConsumeDailyQuota(ctx context.Context, id string, 
 	}
 
 	// Nếu ngày mới -> reset used_today về 0
-	if lastDate != date {
+	if lastDate.String != date {
 		usedToday = 0
 	}
 
@@ -285,7 +285,8 @@ type rowScanner interface {
 func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error) {
 	var (
 		k           domain.VirtualKey
-		allowedJSON string
+		allowedJSON sql.NullString
+		lastUsed    sql.NullString
 		isActiveInt int
 		expiresAt   sql.NullTime
 	)
@@ -299,7 +300,7 @@ func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error
 		&k.RateLimitRPM,
 		&k.DailyQuotaRequests,
 		&k.UsedToday,
-		&k.LastUsedDate,
+		&lastUsed,
 		&allowedJSON,
 		&isActiveInt,
 		&expiresAt,
@@ -316,15 +317,16 @@ func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error
 		return nil, err
 	}
 
+	k.LastUsedDate = lastUsed.String
 	k.IsActive = (isActiveInt == 1)
 	if expiresAt.Valid {
 		t := expiresAt.Time.UTC()
 		k.ExpiresAt = &t
 	}
 
-	k.AllowedModelsJSON = allowedJSON
-	if allowedJSON != "" {
-		_ = json.Unmarshal([]byte(allowedJSON), &k.AllowedModels)
+	k.AllowedModelsJSON = allowedJSON.String
+	if allowedJSON.Valid && allowedJSON.String != "" {
+		_ = json.Unmarshal([]byte(allowedJSON.String), &k.AllowedModels)
 	}
 	if len(k.AllowedModels) == 0 {
 		k.AllowedModels = []string{"*"}

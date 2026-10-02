@@ -36,6 +36,13 @@ type RouterDependencies struct {
 	KeyUseCase      ports.KeyUseCase
 	AlertDispatcher ports.AlertDispatcher
 	ResponseCache   *services.ResponseCache
+
+	AgentRunner        ports.AgentRunner
+	GraphRunner        ports.GraphWorkflowRunner
+	ToolRegistry       ports.ToolRegistry
+	CheckpointRepo     ports.CheckpointRepository
+	MemoryService      ports.MemoryService
+	SubagentSupervisor ports.SubagentSupervisor
 }
 
 func BuildRouter(deps RouterDependencies) http.Handler {
@@ -230,6 +237,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 		if chatHandler != nil {
 			v1.Post("/chat/completions", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleChatCompletions))
+			v1.Post("/responses", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleResponses))
 		}
 
 		// Profile Management (Quản lý Profile cục bộ - Yêu cầu quyền Quản trị viên)
@@ -277,6 +285,33 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				v1.Post("/gemini/canvas/{id}/delta", geminiHandler.HandleUpdateCanvasDelta)
 				v1.Post("/gemini/canvas/{id}/publish", geminiHandler.HandlePublishCanvas)
 			}
+		}
+
+		// Autonomous Agent Engine Endpoints
+		if deps.AgentRunner != nil || deps.GraphRunner != nil {
+			agentHandler := NewAgentHandler(deps.AgentRunner, deps.GraphRunner, deps.ToolRegistry, deps.CheckpointRepo, deps.MemoryService)
+			if deps.SubagentSupervisor != nil {
+				agentHandler.SetSubagentSupervisor(deps.SubagentSupervisor)
+			}
+			v1.Route("/agent", func(ag chi.Router) {
+				ag.Post("/run", agentHandler.HandleRun)
+				ag.Post("/run/stream", agentHandler.HandleRunStream)
+				ag.Get("/tools", agentHandler.HandleListTools)
+				ag.Get("/checkpoints/{taskId}", agentHandler.HandleGetCheckpoints)
+				ag.Get("/subagents", agentHandler.HandleListSubagents)
+				ag.Post("/subagents/run", agentHandler.HandleInvokeSubagent)
+				ag.Route("/sandbox", func(sb chi.Router) {
+					sb.Get("/diff/{taskId}", agentHandler.HandleSandboxDiff)
+					sb.Post("/merge", agentHandler.HandleSandboxMerge)
+					sb.Post("/rollback", agentHandler.HandleSandboxRollback)
+				})
+				ag.Route("/memory", func(mem chi.Router) {
+					mem.Get("/core", agentHandler.HandleGetCoreMemory)
+					mem.Post("/core", agentHandler.HandleUpdateCoreMemory)
+					mem.Get("/search", agentHandler.HandleSearchArchival)
+					mem.Post("/store", agentHandler.HandleStoreArchival)
+				})
+			})
 		}
 
 		// Alerts API

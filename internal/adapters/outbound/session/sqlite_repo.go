@@ -102,10 +102,7 @@ func (r *SqliteSessionRepository) migrate() error {
 		id TEXT PRIMARY KEY,
 		email TEXT,
 		cookies_json TEXT,
-		flow_sn_token TEXT,
 		gemini_sn_token TEXT,
-		flow_project_id TEXT,
-		flow_session_token TEXT,
 		user_agent TEXT,
 		proxy TEXT,
 		credits_balance INTEGER DEFAULT 0,
@@ -147,15 +144,19 @@ func (r *SqliteSessionRepository) migrate() error {
 	}
 	// Đảm bảo tương thích với database SQLite đã tồn tại trước đó
 	_, _ = r.db.Exec("ALTER TABLE sessions ADD COLUMN proxy TEXT;")
-	_, _ = r.db.Exec("DELETE FROM session_alerts WHERE service = 'flow';")
+	_, _ = r.db.Exec("ALTER TABLE sessions ADD COLUMN success_count INTEGER DEFAULT 0;")
+	_, _ = r.db.Exec("ALTER TABLE sessions ADD COLUMN failure_count INTEGER DEFAULT 0;")
+	_, _ = r.db.Exec("ALTER TABLE sessions ADD COLUMN consecutive_failures INTEGER DEFAULT 0;")
+	_, _ = r.db.Exec("ALTER TABLE sessions ADD COLUMN health_score REAL DEFAULT 1.0;")
 	return nil
 }
 
 func (r *SqliteSessionRepository) loadPersistedSessions() error {
 	rows, err := r.db.Query(`
-		SELECT id, email, cookies_json, flow_sn_token, gemini_sn_token, 
-		       flow_project_id, flow_session_token, user_agent, 
-		       COALESCE(proxy, ''), credits_balance, tier, is_healthy, updated_at
+		SELECT id, email, cookies_json, gemini_sn_token, user_agent, 
+		       COALESCE(proxy, ''), credits_balance, tier, is_healthy, updated_at,
+		       COALESCE(success_count, 0), COALESCE(failure_count, 0),
+		       COALESCE(consecutive_failures, 0), COALESCE(health_score, 1.0)
 		FROM sessions
 	`)
 	if err != nil {
@@ -164,14 +165,19 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var id, email, cookiesJSON, flowSN, geminiSN, projectID, sessToken, ua, proxy string
+		var id, email, cookiesJSON, geminiSN, ua, proxy string
 		var credits, tier, healthyInt int
 		var updatedAt time.Time
+		var successCount, failureCount int64
+		var consecutiveFailures int
+		var healthScore float64
 
 		if err := rows.Scan(
-			&id, &email, &cookiesJSON, &flowSN, &geminiSN,
-			&projectID, &sessToken, &ua, &proxy, &credits,
+			&id, &email, &cookiesJSON, &geminiSN,
+			&ua, &proxy, &credits,
 			&tier, &healthyInt, &updatedAt,
+			&successCount, &failureCount,
+			&consecutiveFailures, &healthScore,
 		); err != nil {
 			return err
 		}
@@ -185,15 +191,19 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 		}
 
 		acc := &domain.ManagedAccount{
-			ID:           id,
-			Email:        email,
-			Jar:          domain.NewCookieJar(cookieMap),
-			GeminiSNlM0e: geminiSN,
-			UserAgent:    ua,
-			ProxyURL:     proxy,
-			Tier:         tier,
-			IsHealthy:    healthyInt == 1,
-			LastRefresh:  updatedAt,
+			ID:                  id,
+			Email:               email,
+			Jar:                 domain.NewCookieJar(cookieMap),
+			GeminiSNlM0e:        geminiSN,
+			UserAgent:           ua,
+			ProxyURL:            proxy,
+			Tier:                tier,
+			IsHealthy:           healthyInt == 1,
+			LastRefresh:         updatedAt,
+			SuccessCount:        successCount,
+			FailureCount:        failureCount,
+			ConsecutiveFailures: consecutiveFailures,
+			HealthScore:         healthScore,
 		}
 
 		r.accounts[id] = acc
@@ -201,10 +211,10 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 		r.promote(acc)
 	}
 
-	// Nạp các alert gần đây (bỏ qua các dịch vụ đã loại bỏ như flow)
+	// Nạp các alert gần đây
 	alertRows, err := r.db.Query(`
 		SELECT account_id, service, reason, status_code, action_required, created_at 
-		FROM session_alerts WHERE service != 'flow' ORDER BY id DESC LIMIT 50
+		FROM session_alerts ORDER BY id DESC LIMIT 50
 	`)
 	if err == nil {
 		defer alertRows.Close()
@@ -253,28 +263,32 @@ func (r *SqliteSessionRepository) Save(ctx context.Context, account *domain.Mana
 
 	query := `
 	INSERT INTO sessions (
-		id, email, cookies_json, flow_sn_token, gemini_sn_token, 
-		flow_project_id, flow_session_token, user_agent, proxy, credits_balance, 
-		tier, is_healthy, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		id, email, cookies_json, gemini_sn_token, 
+		user_agent, proxy, credits_balance, 
+		tier, is_healthy, updated_at,
+		success_count, failure_count, consecutive_failures, health_score
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		email = excluded.email,
 		cookies_json = excluded.cookies_json,
-		flow_sn_token = excluded.flow_sn_token,
 		gemini_sn_token = excluded.gemini_sn_token,
-		flow_project_id = excluded.flow_project_id,
-		flow_session_token = excluded.flow_session_token,
 		user_agent = excluded.user_agent,
 		proxy = excluded.proxy,
 		credits_balance = excluded.credits_balance,
 		tier = excluded.tier,
 		is_healthy = excluded.is_healthy,
-		updated_at = excluded.updated_at;
+		updated_at = excluded.updated_at,
+		success_count = excluded.success_count,
+		failure_count = excluded.failure_count,
+		consecutive_failures = excluded.consecutive_failures,
+		health_score = excluded.health_score;
 	`
 	_, err := r.db.ExecContext(ctx, query,
-		account.ID, account.Email, cookiesStored, "", account.GeminiSNlM0e,
-		"", "", account.UserAgent, account.ProxyURL, 0,
+		account.ID, account.Email, cookiesStored, account.GeminiSNlM0e,
+		account.UserAgent, account.ProxyURL, 0,
 		account.Tier, healthyInt, time.Now(),
+		account.SuccessCount, account.FailureCount,
+		account.ConsecutiveFailures, account.GetHealthScore(),
 	)
 	return err
 }
@@ -349,23 +363,26 @@ func (r *SqliteSessionRepository) GetAvailable(ctx context.Context, service doma
 		var paused domain.ErrorClass
 		n := len(r.order)
 
-		// Thuật toán Weighted Least-Connections + Round-Robin tie-breaking
+		// Thuật toán Dynamic Health-Scored Load Balancing (kết hợp Health Score & In-Flight Reqs)
 		var bestAcc *domain.ManagedAccount
 		var bestIdx int = -1
-		var minInFlight int64 = 1<<62 - 1
+		var maxScore float64 = -1e9
 
 		for i := 0; i < n; i++ {
 			idx := (r.cursor + i) % n
 			acc := r.accounts[r.order[idx]]
 			if r.usable(acc, service, minCredits) {
 				inFlight := acc.InFlightReqs
-				if inFlight < minInFlight {
-					minInFlight = inFlight
+				health := acc.GetHealthScore()
+				// Điểm tổng hợp: Điểm sức khỏe cao + in-flight thấp nhất sẽ được ưu tiên điều phối trước
+				compositeScore := health - (0.25 * float64(inFlight))
+				if compositeScore > maxScore {
+					maxScore = compositeScore
 					bestAcc = acc
 					bestIdx = idx
-					if inFlight == 0 {
-						break
-					}
+				} else if compositeScore == maxScore && bestAcc != nil && inFlight < bestAcc.InFlightReqs {
+					bestAcc = acc
+					bestIdx = idx
 				}
 			}
 			if acc != nil && acc.ServiceState(service) == domain.StateRefreshing {
@@ -413,17 +430,40 @@ func (r *SqliteSessionRepository) Release(account *domain.ManagedAccount, err er
 	if account.InFlightReqs > 0 {
 		account.InFlightReqs--
 	}
-	class, service, ok := domain.ClassifiedFailure(err)
-	if !ok {
+
+	// Trường hợp yêu cầu thành công: Ghi nhận success và hồi phục điểm sức khỏe
+	if err == nil {
+		account.RecordSuccess()
+		_, _ = r.db.Exec(
+			`UPDATE sessions SET success_count = ?, consecutive_failures = 0, health_score = ?, updated_at = ? WHERE id = ?`,
+			account.SuccessCount, account.GetHealthScore(), time.Now(), account.ID,
+		)
 		return
 	}
 
+	class, service, ok := domain.ClassifiedFailure(err)
+	if !ok {
+		account.RecordFailure(domain.ErrorClass(""), 500)
+		_, _ = r.db.Exec(
+			`UPDATE sessions SET failure_count = ?, consecutive_failures = ?, health_score = ?, updated_at = ? WHERE id = ?`,
+			account.FailureCount, account.ConsecutiveFailures, account.GetHealthScore(), time.Now(), account.ID,
+		)
+		return
+	}
+
+	statusCode := 500
+	if class == domain.ClassRateLimited {
+		statusCode = http.StatusTooManyRequests
+	} else if class == domain.ClassExpired || class == domain.ClassUnauthenticated {
+		statusCode = http.StatusUnauthorized
+	} else if class == domain.ClassUpstreamUnavailable {
+		statusCode = http.StatusServiceUnavailable
+	}
+	account.RecordFailure(class, statusCode)
+
 	if (class == domain.ClassRateLimited || class == domain.ClassUpstreamUnavailable) && service != "" {
-		cooldown := r.coolingDuration
-		if cooldown <= 0 {
-			cooldown = rateLimitCooldown
-		}
-		account.CoolService(service, time.Now().Add(cooldown), class)
+		dynamicCooldown := account.GetDynamicCooldown(r.coolingDuration)
+		account.CoolService(service, time.Now().Add(dynamicCooldown), class)
 
 		// Ghi nhận cảnh báo Proxy khi gặp lỗi kết nối và tài khoản có cấu hình proxy
 		if account.GetProxy() != "" && class == domain.ClassUpstreamUnavailable {
@@ -436,6 +476,10 @@ func (r *SqliteSessionRepository) Release(account *domain.ManagedAccount, err er
 				CreatedAt:      time.Now(),
 			})
 		}
+		_, _ = r.db.Exec(
+			`UPDATE sessions SET failure_count = ?, consecutive_failures = ?, health_score = ?, updated_at = ? WHERE id = ?`,
+			account.FailureCount, account.ConsecutiveFailures, account.GetHealthScore(), time.Now(), account.ID,
+		)
 		return
 	}
 
@@ -450,7 +494,10 @@ func (r *SqliteSessionRepository) Release(account *domain.ManagedAccount, err er
 			ActionRequired: "Vui lòng mở Chrome đăng nhập lại qua API /v1/profiles/" + account.ID + "/launch hoặc /v1/profiles/" + account.ID + "/sync",
 			CreatedAt:      time.Now(),
 		})
-		_, _ = r.db.Exec(`UPDATE sessions SET is_healthy = 0, updated_at = ? WHERE id = ?`, time.Now(), account.ID)
+		_, _ = r.db.Exec(
+			`UPDATE sessions SET failure_count = ?, consecutive_failures = ?, health_score = 0, is_healthy = 0, updated_at = ? WHERE id = ?`,
+			account.FailureCount, account.ConsecutiveFailures, time.Now(), account.ID,
+		)
 	}
 }
 

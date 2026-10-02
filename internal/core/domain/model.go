@@ -178,7 +178,7 @@ func ParseActiveModelsResponse(raw string, metrics *ContractMetrics) (map[string
 		if metrics != nil {
 			metrics.AddSchema()
 		}
-		return nil, CodecSchema("yBhWQ", ServiceFlow, "phản hồi yBhWQ không đúng hợp đồng")
+		return nil, CodecSchema("yBhWQ", ServiceGemini, "phản hồi yBhWQ không đúng hợp đồng")
 	}
 
 	result := make(map[string]bool)

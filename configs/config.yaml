@@ -119,4 +119,14 @@ admin:
   password: "dezuxk_admin_secret_pass"
   session_token: "dezuxk_secure_admin_session_token_2026"
 
+# Cấu hình mặc định cho hội thoại (Smart Defaults)
+# Tắt mặc định để phản hồi tức thì (~1s). Bật qua tham số request khi cần suy luận sâu hoặc tìm kiếm web.
+chat_defaults:
+  thinking: false
+  search_grounding: false
+  code_interpreter: false
+
+# Danh mục MCP Servers chạy ngoài qua Stdio (Model Context Protocol)
+mcp_servers: {}
+
 

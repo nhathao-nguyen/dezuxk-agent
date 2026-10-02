@@ -46,6 +46,13 @@ type ProfileManager struct {
 	extractor     ports.TokenExtractor
 	client        *http.Client
 	vault         *Vault
+	quotaUseCase  ports.GeminiQuotaUseCase
+}
+
+func (pm *ProfileManager) SetQuotaUseCase(qu ports.GeminiQuotaUseCase) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.quotaUseCase = qu
 }
 
 type StoredProfileSession struct {
@@ -538,6 +545,28 @@ func (pm *ProfileManager) IngestLiveCookiesWithProxy(
 		}
 	}
 
+	// Tự động truy vấn và xác thực Tier thực tế từ Google (Pro / Ultra / Free) ngay khi đồng bộ
+	account.Tier = 1
+	pm.mu.RLock()
+	qu := pm.quotaUseCase
+	pm.mu.RUnlock()
+
+	if qu != nil {
+		qCtx, qCancel := context.WithTimeout(ctx, 15*time.Second)
+		tierInfo, err := qu.GetAccountTierForAccount(qCtx, account)
+		qCancel()
+		if err != nil {
+			log.Printf("[Profile %s Warning] Không thể tra cứu Tier từ Google: %v", profileID, err)
+		} else if tierInfo != nil {
+			if tierInfo.TierCode == "GOOGLE_AI_PRO" || tierInfo.TierCode == "GOOGLE_ONE_AI_PREMIUM" {
+				account.Tier = 2
+			} else if tierInfo.TierCode == "WORKSPACE_ENTERPRISE" {
+				account.Tier = 3
+			}
+			log.Printf("[Profile %s] Đã tự động xác thực cấp độ gói từ Google: %s (Tier %d)", profileID, tierInfo.TierCode, account.Tier)
+		}
+	}
+
 	// Lưu vào bộ nhớ Session Repository
 	if err := pm.sessionRepo.Save(ctx, account); err != nil {
 		return nil, err
@@ -568,6 +597,7 @@ func (pm *ProfileManager) IngestLiveCookiesWithProxy(
 		GeminiSNlM0e:     account.GeminiSNlM0e,
 		UserAgent:        userAgent,
 		GeminiQuota:      "",
+		Tier:             account.Tier,
 		UpdatedAt:        time.Now(),
 	}
 	if encCookies == "" {

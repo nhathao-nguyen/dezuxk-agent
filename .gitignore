@@ -14,3 +14,14 @@ dezuxk
 
 # Temporary scratch folder
 scratch/
+
+# Agent Worktrees Sandbox
+.dezuxk/
+
+# Logs
+*.log
+server.log
+
+# Temporary test project
+test_project/
+

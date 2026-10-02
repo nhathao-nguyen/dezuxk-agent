@@ -1,0 +1,650 @@
+package http
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"time"
+
+	"dezuxk-gateway/internal/adapters/outbound/sandbox"
+	"dezuxk-gateway/internal/core/domain"
+	"dezuxk-gateway/internal/core/ports"
+
+	"github.com/go-chi/chi/v5"
+)
+
+// AgentHandler xử lý các yêu cầu tác vụ tự trị qua REST API
+type AgentHandler struct {
+	runner         ports.AgentRunner
+	graphRunner    ports.GraphWorkflowRunner
+	toolReg        ports.ToolRegistry
+	checkpointRepo ports.CheckpointRepository
+	memorySvc      ports.MemoryService
+	subagentSup    ports.SubagentSupervisor
+}
+
+// NewAgentHandler khởi tạo AgentHandler
+func NewAgentHandler(
+	runner ports.AgentRunner,
+	graphRunner ports.GraphWorkflowRunner,
+	toolReg ports.ToolRegistry,
+	checkpointRepo ports.CheckpointRepository,
+	memorySvc ports.MemoryService,
+) *AgentHandler {
+	return &AgentHandler{
+		runner:         runner,
+		graphRunner:    graphRunner,
+		toolReg:        toolReg,
+		checkpointRepo: checkpointRepo,
+		memorySvc:      memorySvc,
+	}
+}
+
+// AgentRunRequest cấu trúc payload gửi lên /v1/agent/run
+type AgentRunRequest struct {
+	Goal         string `json:"goal"`
+	Workflow     string `json:"workflow,omitempty"` // "graph" (mặc định) | "react"
+	ResumeTaskID string `json:"resume_task_id,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Workspace    string `json:"workspace,omitempty"`
+	Supervised   bool   `json:"supervised,omitempty"`
+	MaxSteps     int    `json:"max_steps,omitempty"`
+	UseSandbox   bool   `json:"use_sandbox,omitempty"`
+	AutoMerge    bool   `json:"auto_merge,omitempty"`
+}
+
+// HandleRun xử lý POST /v1/agent/run
+func (h *AgentHandler) HandleRun(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var req AgentRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Payload JSON không hợp lệ: " + err.Error(),
+		})
+		return
+	}
+
+	if req.ResumeTaskID == "" && req.Goal == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Trường 'goal' (hoặc 'resume_task_id') là bắt buộc",
+		})
+		return
+	}
+
+	opts := domain.AgentRunOptions{
+		Model:      req.Model,
+		Workspace:  req.Workspace,
+		Supervised: req.Supervised,
+		MaxSteps:   req.MaxSteps,
+		UseSandbox: req.UseSandbox,
+		AutoMerge:  req.AutoMerge,
+	}
+
+	startTime := time.Now()
+
+	// 1. Nếu chọn chế độ State Machine Graph hoặc Resume task
+	if (req.Workflow == "graph" || req.Workflow == "" || req.ResumeTaskID != "") && h.graphRunner != nil {
+		var graphState *domain.AgentGraphState
+		var err error
+
+		if req.ResumeTaskID != "" {
+			graphState, err = h.graphRunner.ResumeGraph(r.Context(), req.ResumeTaskID, opts)
+		} else {
+			graphState, err = h.graphRunner.RunGraph(r.Context(), req.Goal, opts)
+		}
+
+		elapsed := time.Since(startTime)
+		if err != nil && graphState == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":        err.Error(),
+				"elapsed_time": elapsed.String(),
+			})
+			return
+		}
+
+		responsePayload := map[string]any{
+			"workflow":     "graph",
+			"task_id":      graphState.TaskID,
+			"graph_state":  graphState,
+			"elapsed_time": elapsed.String(),
+			"success":      graphState.IsCompleted && graphState.CurrentNode == domain.NodeKindComplete,
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(responsePayload)
+		return
+	}
+
+	// 2. Chế độ phẳng ReAct Runner
+	if h.runner == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Agent Runner chưa được cấu hình trên máy chủ này",
+		})
+		return
+	}
+
+	state, err := h.runner.Run(r.Context(), req.Goal, opts)
+	elapsed := time.Since(startTime)
+
+	if err != nil && state == nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":        err.Error(),
+			"elapsed_time": elapsed.String(),
+		})
+		return
+	}
+
+	responsePayload := map[string]any{
+		"workflow":     "react",
+		"state":        state,
+		"elapsed_time": elapsed.String(),
+		"success":      state.IsCompleted && state.StopReason == "completed",
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(responsePayload)
+}
+
+// HandleRunStream xử lý POST /v1/agent/run/stream qua Server-Sent Events (SSE)
+func (h *AgentHandler) HandleRunStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming không được hỗ trợ bởi server", http.StatusInternalServerError)
+		return
+	}
+
+	var req AgentRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Payload JSON không hợp lệ: " + err.Error(),
+		})
+		return
+	}
+
+	if req.ResumeTaskID == "" && req.Goal == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Trường 'goal' (hoặc 'resume_task_id') là bắt buộc",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	sendSSE := func(event string, data any) {
+		bytes, err := json.Marshal(data)
+		if err != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, bytes)
+		flusher.Flush()
+	}
+
+	// Gắn LiveOutput callback vào context để stream terminal output từ shell_tools theo thời gian thực
+	streamCtx := domain.WithLiveOutput(r.Context(), func(streamType string, chunk string) {
+		sendSSE("terminal_output", map[string]any{
+			"type":      streamType,
+			"chunk":     chunk,
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
+	})
+
+	opts := domain.AgentRunOptions{
+		Model:      req.Model,
+		Workspace:  req.Workspace,
+		Supervised: req.Supervised,
+		MaxSteps:   req.MaxSteps,
+		UseSandbox: req.UseSandbox,
+		AutoMerge:  req.AutoMerge,
+		OnProgress: func(step int, kind string, message string) {
+			sseEvent := "progress"
+			switch kind {
+			case "node_change", "node_plan", "node_execute", "node_verify", "node_fix", "node_complete":
+				sseEvent = kind
+			case "plan_created":
+				sseEvent = "plan_created"
+			case "reasoning":
+				sseEvent = "reasoning"
+			case "thinking":
+				sseEvent = "thinking"
+			case "tool_start":
+				sseEvent = "tool_start"
+			case "tool_end":
+				sseEvent = "tool_end"
+			case "verify_exec":
+				sseEvent = "verify_exec"
+			case "verify_pass":
+				sseEvent = "verify_pass"
+			case "verify_fail":
+				sseEvent = "verify_fail"
+			case "approval_wait":
+				sseEvent = "approval_wait"
+			case "enforce_action":
+				sseEvent = "enforce_action"
+			case "checkpoint":
+				sseEvent = "checkpoint"
+			case "sandbox_created":
+				sseEvent = "sandbox_created"
+			case "git_diff":
+				sseEvent = "git_diff"
+			}
+
+			sendSSE(sseEvent, map[string]any{
+				"step":      step,
+				"kind":      kind,
+				"message":   message,
+				"timestamp": time.Now().Format(time.RFC3339),
+			})
+		},
+	}
+
+	sendSSE("run_start", map[string]any{
+		"workflow":  req.Workflow,
+		"goal":      req.Goal,
+		"model":     req.Model,
+		"workspace": req.Workspace,
+		"timestamp": time.Now().Format(time.RFC3339),
+	})
+
+	if (req.Workflow == "graph" || req.Workflow == "" || req.ResumeTaskID != "") && h.graphRunner != nil {
+		var graphState *domain.AgentGraphState
+		var err error
+		if req.ResumeTaskID != "" {
+			graphState, err = h.graphRunner.ResumeGraph(streamCtx, req.ResumeTaskID, opts)
+		} else {
+			graphState, err = h.graphRunner.RunGraph(streamCtx, req.Goal, opts)
+		}
+
+		if err != nil {
+			sendSSE("error", map[string]any{
+				"error": err.Error(),
+				"state": graphState,
+			})
+			return
+		}
+
+		sendSSE("run_complete", map[string]any{
+			"workflow":    "graph",
+			"task_id":     graphState.TaskID,
+			"graph_state": graphState,
+			"success":     graphState.IsCompleted && graphState.CurrentNode == domain.NodeKindComplete,
+		})
+		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	if h.runner != nil {
+		state, err := h.runner.Run(streamCtx, req.Goal, opts)
+		if err != nil {
+			sendSSE("error", map[string]any{
+				"error": err.Error(),
+				"state": state,
+			})
+			return
+		}
+
+		sendSSE("run_complete", map[string]any{
+			"workflow": "react",
+			"state":    state,
+			"success":  state.IsCompleted && state.StopReason == "completed",
+		})
+		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	sendSSE("error", map[string]string{"error": "Không có runner phù hợp"})
+}
+
+// HandleListTools xử lý GET /v1/agent/tools
+func (h *AgentHandler) HandleListTools(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if h.toolReg == nil {
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tools": []any{},
+		})
+		return
+	}
+
+	toolsList := h.toolReg.ListTools()
+	var dtos []map[string]any
+	for _, t := range toolsList {
+		dtos = append(dtos, map[string]any{
+			"name":        t.Name(),
+			"description": t.Description(),
+			"parameters":  t.Parameters(),
+			"permission":  t.Permission(),
+		})
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"tools": dtos,
+		"total": len(dtos),
+	})
+}
+
+// HandleGetCheckpoints xử lý GET /v1/agent/checkpoints/{taskId}
+func (h *AgentHandler) HandleGetCheckpoints(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	taskID := chi.URLParam(r, "taskId")
+
+	if h.checkpointRepo == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Checkpoint repository không khả dụng",
+		})
+		return
+	}
+
+	list, err := h.checkpointRepo.ListCheckpoints(r.Context(), taskID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"task_id":     taskID,
+		"checkpoints": list,
+		"total":       len(list),
+	})
+}
+
+// HandleGetCoreMemory xử lý GET /v1/agent/memory/core
+func (h *AgentHandler) HandleGetCoreMemory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.memorySvc == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "MemoryService chưa được kích hoạt"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(h.memorySvc.GetCoreMemory())
+}
+
+// HandleUpdateCoreMemory xử lý POST /v1/agent/memory/core
+func (h *AgentHandler) HandleUpdateCoreMemory(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.memorySvc == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "MemoryService chưa được kích hoạt"})
+		return
+	}
+
+	var payload struct {
+		Target  string `json:"target"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "JSON không hợp lệ: " + err.Error()})
+		return
+	}
+
+	h.memorySvc.UpdateCoreMemory(func(core *domain.CoreMemory) {
+		switch payload.Target {
+		case "scratchpad":
+			core.Scratchpad = payload.Content
+		case "human_profile":
+			core.HumanProfile = payload.Content
+		case "project_context":
+			core.ProjectContext = payload.Content
+		case "persona":
+			core.Persona = payload.Content
+		}
+	})
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"core":    h.memorySvc.GetCoreMemory(),
+	})
+}
+
+// HandleSearchArchival xử lý GET /v1/agent/memory/search?q=...
+func (h *AgentHandler) HandleSearchArchival(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.memorySvc == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "MemoryService chưa được kích hoạt"})
+		return
+	}
+
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Thiếu tham số 'q'"})
+		return
+	}
+
+	results, err := h.memorySvc.SearchArchival(r.Context(), query, 10)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"query":   query,
+		"results": results,
+		"total":   len(results),
+	})
+}
+
+// HandleStoreArchival xử lý POST /v1/agent/memory/store
+func (h *AgentHandler) HandleStoreArchival(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.memorySvc == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "MemoryService chưa được kích hoạt"})
+		return
+	}
+
+	var payload struct {
+		Key     string   `json:"key"`
+		Content string   `json:"content"`
+		Tags    []string `json:"tags"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "JSON không hợp lệ: " + err.Error()})
+		return
+	}
+
+	if payload.Key == "" || payload.Content == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Trường 'key' và 'content' là bắt buộc"})
+		return
+	}
+
+	if err := h.memorySvc.StoreArchival(r.Context(), payload.Key, payload.Content, payload.Tags); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"message": "Đã lưu vào Archival Memory thành công",
+		"key":     payload.Key,
+	})
+}
+
+// SetSubagentSupervisor thiết lập supervisor điều phối sub-agents
+func (h *AgentHandler) SetSubagentSupervisor(sup ports.SubagentSupervisor) {
+	h.subagentSup = sup
+}
+
+// HandleListSubagents xử lý GET /v1/agent/subagents
+func (h *AgentHandler) HandleListSubagents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.subagentSup == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "SubagentSupervisor chưa được kích hoạt"})
+		return
+	}
+
+	roles := h.subagentSup.ListRoles()
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"roles": roles,
+		"total": len(roles),
+	})
+}
+
+// SubagentRunRequest chứa tham số gửi tới POST /v1/agent/subagents/run
+type SubagentRunRequest struct {
+	Role       string `json:"role"`
+	Prompt     string `json:"prompt"`
+	Context    string `json:"context,omitempty"`
+	Workspace  string `json:"workspace,omitempty"`
+	Model      string `json:"model,omitempty"`
+	Supervised bool   `json:"supervised,omitempty"`
+}
+
+// HandleInvokeSubagent xử lý POST /v1/agent/subagents/run
+func (h *AgentHandler) HandleInvokeSubagent(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if h.subagentSup == nil {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "SubagentSupervisor chưa được kích hoạt"})
+		return
+	}
+
+	var req SubagentRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "JSON không hợp lệ: " + err.Error()})
+		return
+	}
+
+	if req.Prompt == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Tham số 'prompt' không được để trống"})
+		return
+	}
+
+	result, err := h.subagentSup.InvokeSubagent(r.Context(), domain.SubagentTask{
+		Role:       domain.SubagentRole(req.Role),
+		Prompt:     req.Prompt,
+		Context:    req.Context,
+		Workspace:  req.Workspace,
+		Model:      req.Model,
+		Supervised: req.Supervised,
+	})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":  err.Error(),
+			"result": result,
+		})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// HandleSandboxDiff xử lý GET /v1/agent/sandbox/diff/{taskId}
+func (h *AgentHandler) HandleSandboxDiff(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	taskID := chi.URLParam(r, "taskId")
+	mgr := sandbox.GetDefaultManager()
+	sb := mgr.GetSandbox(taskID)
+	if sb == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Không tìm thấy sandbox cho task " + taskID})
+		return
+	}
+	diff, err := mgr.GetDiff(r.Context(), sb)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"task_id":   taskID,
+		"branch":    sb.BranchName,
+		"worktree":  sb.WorktreePath,
+		"is_active": sb.IsActive,
+		"git_diff":  diff,
+	})
+}
+
+// HandleSandboxMerge xử lý POST /v1/agent/sandbox/merge
+func (h *AgentHandler) HandleSandboxMerge(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Yêu cầu cung cấp task_id hợp lệ"})
+		return
+	}
+	mgr := sandbox.GetDefaultManager()
+	sb := mgr.GetSandbox(req.TaskID)
+	if sb == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Không tìm thấy sandbox cho task " + req.TaskID})
+		return
+	}
+	if err := mgr.ApplyMerge(r.Context(), sb); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"message": fmt.Sprintf("Đã gộp thành công nhánh %s vào nhánh chính và xóa bỏ worktree.", sb.BranchName),
+		"task_id": req.TaskID,
+	})
+}
+
+// HandleSandboxRollback xử lý POST /v1/agent/sandbox/rollback
+func (h *AgentHandler) HandleSandboxRollback(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	var req struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TaskID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Yêu cầu cung cấp task_id hợp lệ"})
+		return
+	}
+	mgr := sandbox.GetDefaultManager()
+	sb := mgr.GetSandbox(req.TaskID)
+	if sb == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Không tìm thấy sandbox cho task " + req.TaskID})
+		return
+	}
+	if err := mgr.Rollback(r.Context(), sb); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"message": fmt.Sprintf("Đã hủy bỏ toàn bộ thay đổi và xóa worktree của task %s.", req.TaskID),
+		"task_id": req.TaskID,
+	})
+}
+
+
+

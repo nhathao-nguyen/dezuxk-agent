@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 )
 
@@ -19,18 +20,97 @@ const (
 )
 
 var (
-	geminiTemplateOnce sync.Once
+	geminiTemplateMu   sync.RWMutex
 	geminiBaseSlots    []any
 	geminiThinkSlots   []any
 	geminiTemplateErr  error
+	geminiTemplatesInit bool
 )
 
+// GeminiTemplateConfig định nghĩa cấu trúc lưu trữ chuỗi template cho gemini
+type GeminiTemplateConfig struct {
+	Description     string `json:"description,omitempty"`
+	Version         string `json:"version,omitempty"`
+	NewChatTemplate string `json:"new_chat_template"`
+	ThinkingTemplate string `json:"thinking_template"`
+}
+
+// LoadGeminiTemplatesFromFile nạp schema Gemini từ file JSON bên ngoài
+func LoadGeminiTemplatesFromFile(filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+	var cfg GeminiTemplateConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+	return SetGeminiTemplates(cfg.NewChatTemplate, cfg.ThinkingTemplate)
+}
+
+// SetGeminiTemplates cập nhật trực tiếp chuỗi mẫu new_chat và thinking vào runtime
+func SetGeminiTemplates(newChatFreq, thinkingFreq string) error {
+	baseSlots, err := geminiSlotsFromFreq(newChatFreq)
+	if err != nil {
+		return err
+	}
+	thinkSlots, err := geminiSlotsFromFreq(thinkingFreq)
+	if err != nil {
+		return err
+	}
+
+	geminiTemplateMu.Lock()
+	geminiBaseSlots = baseSlots
+	geminiThinkSlots = thinkSlots
+	geminiTemplateErr = nil
+	geminiTemplatesInit = true
+	geminiTemplateMu.Unlock()
+	return nil
+}
+
 func loadGeminiTemplates() {
+	geminiTemplateMu.Lock()
+	defer geminiTemplateMu.Unlock()
+
+	if geminiTemplatesInit {
+		return
+	}
+
+	// Thử nạp từ configs/gemini_template.json nếu tồn tại
+	candidates := []string{
+		"configs/gemini_template.json",
+		"../configs/gemini_template.json",
+		"../../configs/gemini_template.json",
+	}
+	if envPath := os.Getenv("GEMINI_TEMPLATE_CONFIG_PATH"); envPath != "" {
+		candidates = append([]string{envPath}, candidates...)
+	}
+
+	for _, p := range candidates {
+		if data, err := os.ReadFile(p); err == nil {
+			var cfg GeminiTemplateConfig
+			if err := json.Unmarshal(data, &cfg); err == nil && cfg.NewChatTemplate != "" && cfg.ThinkingTemplate != "" {
+				base, err1 := geminiSlotsFromFreq(cfg.NewChatTemplate)
+				think, err2 := geminiSlotsFromFreq(cfg.ThinkingTemplate)
+				if err1 == nil && err2 == nil {
+					geminiBaseSlots = base
+					geminiThinkSlots = think
+					geminiTemplateErr = nil
+					geminiTemplatesInit = true
+					return
+				}
+			}
+		}
+	}
+
+	// Fallback sang mẫu cố định đã được kiểm thử
 	geminiBaseSlots, geminiTemplateErr = geminiSlotsFromFreq(geminiNewChatFreq)
 	if geminiTemplateErr != nil {
+		geminiTemplatesInit = true
 		return
 	}
 	geminiThinkSlots, geminiTemplateErr = geminiSlotsFromFreq(geminiThinkingFreq)
+	geminiTemplatesInit = true
 }
 
 func geminiSlotsFromFreq(freq string) ([]any, error) {
@@ -58,7 +138,17 @@ func geminiSlotsFromFreq(freq string) ([]any, error) {
 }
 
 func cloneGeminiSlots(thinking bool) ([]any, error) {
-	geminiTemplateOnce.Do(loadGeminiTemplates)
+	geminiTemplateMu.RLock()
+	init := geminiTemplatesInit
+	geminiTemplateMu.RUnlock()
+
+	if !init {
+		loadGeminiTemplates()
+	}
+
+	geminiTemplateMu.RLock()
+	defer geminiTemplateMu.RUnlock()
+
 	if geminiTemplateErr != nil {
 		return nil, geminiTemplateErr
 	}

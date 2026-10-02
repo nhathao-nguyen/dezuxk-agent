@@ -24,6 +24,7 @@ type StreamToolFilter struct {
 
 	buffer           strings.Builder
 	emittedToolCalls []domain.OpenAIToolCall
+	hasEmittedRole   bool
 }
 
 func NewStreamToolFilter(hasTools bool, w io.Writer, flusher func(), flushed *bool, created int64, model, cID string) *StreamToolFilter {
@@ -56,6 +57,11 @@ func (f *StreamToolFilter) emitContent(content string) error {
 	if content == "" {
 		return nil
 	}
+	delta := domain.OpenAIDelta{Content: content}
+	if !f.hasEmittedRole {
+		delta.Role = "assistant"
+		f.hasEmittedRole = true
+	}
 	chunk := domain.OpenAIChatResponse{
 		ID:             "chatcmpl-" + f.conversationID,
 		Object:         "chat.completion.chunk",
@@ -64,7 +70,7 @@ func (f *StreamToolFilter) emitContent(content string) error {
 		ConversationID: f.conversationID,
 		Choices: []domain.OpenAIChoice{{
 			Index: 0,
-			Delta: domain.OpenAIDelta{Content: content},
+			Delta: delta,
 		}},
 	}
 	b, err := json.Marshal(chunk)
@@ -87,6 +93,11 @@ func (f *StreamToolFilter) emitToolCalls(calls []domain.OpenAIToolCall) error {
 	if len(calls) == 0 {
 		return nil
 	}
+	delta := domain.OpenAIDelta{ToolCalls: calls}
+	if !f.hasEmittedRole {
+		delta.Role = "assistant"
+		f.hasEmittedRole = true
+	}
 	chunk := domain.OpenAIChatResponse{
 		ID:             "chatcmpl-" + f.conversationID,
 		Object:         "chat.completion.chunk",
@@ -95,7 +106,7 @@ func (f *StreamToolFilter) emitToolCalls(calls []domain.OpenAIToolCall) error {
 		ConversationID: f.conversationID,
 		Choices: []domain.OpenAIChoice{{
 			Index: 0,
-			Delta: domain.OpenAIDelta{ToolCalls: calls},
+			Delta: delta,
 		}},
 	}
 	b, err := json.Marshal(chunk)

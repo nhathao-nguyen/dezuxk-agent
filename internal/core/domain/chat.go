@@ -89,7 +89,7 @@ type OpenAIFunctionDef struct {
 }
 
 type OpenAIToolCall struct {
-	Index    int                    `json:"index,omitempty"`
+	Index    int                    `json:"index"`
 	ID       string                 `json:"id"`
 	Type     string                 `json:"type"`
 	Function OpenAIFunctionCallData `json:"function"`
@@ -296,6 +296,32 @@ type OpenAIChoice struct {
 	FinishReason *string       `json:"finish_reason"`
 }
 
+func (c OpenAIChoice) MarshalJSON() ([]byte, error) {
+	// Nếu có thông điệp hoàn chỉnh (non-streaming), chỉ serialize message, bỏ qua delta
+	if c.Message.Role != "" || c.Message.Content != "" || len(c.Message.ToolCalls) > 0 {
+		return json.Marshal(&struct {
+			Index        int           `json:"index"`
+			Message      OpenAIMessage `json:"message"`
+			FinishReason *string       `json:"finish_reason"`
+		}{
+			Index:        c.Index,
+			Message:      c.Message,
+			FinishReason: c.FinishReason,
+		})
+	}
+
+	// Nếu là luồng streaming SSE, chỉ serialize delta, bỏ qua message
+	return json.Marshal(&struct {
+		Index        int         `json:"index"`
+		Delta        OpenAIDelta `json:"delta"`
+		FinishReason *string     `json:"finish_reason"`
+	}{
+		Index:        c.Index,
+		Delta:        c.Delta,
+		FinishReason: c.FinishReason,
+	})
+}
+
 type OpenAIDelta struct {
 	Role             string             `json:"role,omitempty"`
 	Content          string             `json:"content,omitempty"`
@@ -406,7 +432,7 @@ func FlattenMessagesForModelWithContext(messages []OpenAIMessage, modelID string
 		}
 
 		switch m.Role {
-		case "system":
+		case "system", "developer":
 			if strings.TrimSpace(m.Content) != "" {
 				systemParts = append(systemParts, m.Content)
 			}

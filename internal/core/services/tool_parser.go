@@ -31,6 +31,16 @@ func generateToolCallID() string {
 	return "call_" + hex.EncodeToString(b)
 }
 
+// RepairMalformedJSON sửa các lỗi cú pháp phổ biến của JSON sinh bởi LLM
+func RepairMalformedJSON(s string) string {
+	return repairMalformedJSON(s)
+}
+
+// SanitizeJSONStringLiterals sửa các ký tự điều khiển chưa được escape trong chuỗi string JSON
+func SanitizeJSONStringLiterals(s string) string {
+	return sanitizeJSONStringLiterals(s)
+}
+
 // repairMalformedJSON sửa các lỗi cú pháp phổ biến của JSON sinh bởi LLM:
 // 1. Dấu phẩy thừa ở cuối (trailing commas) trước } hoặc ]
 // 2. Chuyển đổi nháy đơn sang nháy kép khi cần

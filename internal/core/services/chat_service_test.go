@@ -2,6 +2,7 @@ package services_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -398,5 +399,36 @@ func TestChatService_ExecuteChatStream_RealtimeThinking(t *testing.T) {
 		t.Errorf("expected reasoning tokens to stream BEFORE answer content, but idxReasoning=%d, idxContent=%d", idxReasoning, idxContent)
 	}
 }
+
+func TestNormalizeWireErr(t *testing.T) {
+	// 1. Timeout / DeadlineExceeded -> ClassUpstreamUnavailable, Retryable = true
+	errTimeout := services.NormalizeWireErr(context.DeadlineExceeded)
+	ceTimeout, ok := domain.AsCodecError(errTimeout)
+	if !ok || ceTimeout.Class != domain.ClassUpstreamUnavailable || !ceTimeout.Retryable {
+		t.Fatalf("expected ClassUpstreamUnavailable with Retryable=true for timeout, got: %+v", errTimeout)
+	}
+
+	// 2. Network disconnect / connection reset -> ClassUpstreamUnavailable, Retryable = true
+	errNet := services.NormalizeWireErr(errors.New("read: connection reset by peer"))
+	ceNet, ok := domain.AsCodecError(errNet)
+	if !ok || ceNet.Class != domain.ClassUpstreamUnavailable || !ceNet.Retryable {
+		t.Fatalf("expected ClassUpstreamUnavailable with Retryable=true for connection reset, got: %+v", errNet)
+	}
+
+	// 3. io.ErrUnexpectedEOF -> ClassUpstreamUnavailable, Retryable = true
+	errEOF := services.NormalizeWireErr(io.ErrUnexpectedEOF)
+	ceEOF, ok := domain.AsCodecError(errEOF)
+	if !ok || ceEOF.Class != domain.ClassUpstreamUnavailable || !ceEOF.Retryable {
+		t.Fatalf("expected ClassUpstreamUnavailable with Retryable=true for UnexpectedEOF, got: %+v", errEOF)
+	}
+
+	// 4. HTTP 200 with empty JSON payload -> ClassSchemaUnexpected
+	errEmptySchema := services.NormalizeWireErr(domain.CodecSchema(domain.OriginStreamGenerate, domain.ServiceGemini, "phản hồi chat không đúng hợp đồng"))
+	ceEmpty, ok := domain.AsCodecError(errEmptySchema)
+	if !ok || ceEmpty.Class != domain.ClassSchemaUnexpected {
+		t.Fatalf("expected ClassSchemaUnexpected for empty 200 payload, got: %+v", errEmptySchema)
+	}
+}
+
 
 

@@ -47,14 +47,17 @@ func (h *AdminHandler) SetProfileUseCase(pm ports.ProfileUseCase) {
 
 // AccountSummary tóm tắt trạng thái tài khoản cho Dashboard
 type AccountSummary struct {
-	ID           string `json:"id"`
-	Email        string `json:"email"`
-	Tier         string `json:"tier"`
-	IsHealthy    bool   `json:"is_healthy"`
-	Proxy        string `json:"proxy"`
-	GeminiStatus string `json:"gemini_status"`
-	HasGemini    bool   `json:"has_gemini"`
-	LastRefresh  string `json:"last_refresh"`
+	ID           string  `json:"id"`
+	Email        string  `json:"email"`
+	Tier         string  `json:"tier"`
+	IsHealthy    bool    `json:"is_healthy"`
+	Proxy        string  `json:"proxy"`
+	GeminiStatus string  `json:"gemini_status"`
+	HasGemini    bool    `json:"has_gemini"`
+	LastRefresh  string  `json:"last_refresh"`
+	HealthScore  float64 `json:"health_score"`
+	SuccessCount int64   `json:"success_count"`
+	FailureCount int64   `json:"failure_count"`
 }
 
 // HandleOverview trả về tổng hợp tài khoản, metrics RPM, cache stats, drift alerts và GPU models
@@ -91,6 +94,9 @@ func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 				GeminiStatus: string(acc.ServiceState(domain.ServiceGemini)),
 				HasGemini:    hasGemini,
 				LastRefresh:  acc.LastRefresh.Format(time.RFC3339),
+				HealthScore:  acc.GetHealthScore(),
+				SuccessCount: acc.SuccessCount,
+				FailureCount: acc.FailureCount,
 			})
 		}
 	}
@@ -109,6 +115,9 @@ func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 					GeminiStatus: "Chờ đồng bộ CDP",
 					HasGemini:    false,
 					LastRefresh:  p.LastActive.Format(time.RFC3339),
+					HealthScore:  0,
+					SuccessCount: 0,
+					FailureCount: 0,
 				})
 			}
 		}
