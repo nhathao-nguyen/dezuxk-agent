@@ -109,8 +109,14 @@ func TestConfig_ProductionSecretsValidation(t *testing.T) {
 		t.Error("expected error when admin session token uses default in production")
 	}
 
-	// 4. Proper secrets must pass
+	// 4. Missing APIKey in production must fail
 	cfg.Admin.SessionToken = "super-secret-random-admin-session-token-998877"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error when server.api_key is missing in production")
+	}
+
+	// 5. Proper secrets must pass
+	cfg.Server.APIKey = "dezuxk-prod-api-key-test"
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("expected valid production config to pass, got: %v", err)
 	}

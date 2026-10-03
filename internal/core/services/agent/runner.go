@@ -121,6 +121,25 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		opts.Supervised = true
 	}
 
+	if opts.MaxSteps <= 0 {
+		opts.MaxSteps = 25
+	}
+	if opts.MaxToolCalls <= 0 {
+		opts.MaxToolCalls = 50
+	}
+	if opts.MaxRepeatedCalls <= 0 {
+		opts.MaxRepeatedCalls = 3
+	}
+	if opts.MaxExecutionDuration <= 0 {
+		opts.MaxExecutionDuration = 10 * time.Minute
+	}
+	if opts.MaxConsecutiveFailures <= 0 {
+		opts.MaxConsecutiveFailures = 5
+	}
+
+	execCtx, cancelExec := context.WithTimeout(ctx, opts.MaxExecutionDuration)
+	defer cancelExec()
+
 	if opts.Model == "" {
 		opts.Model = "gemini-3.8-flash"
 	}
@@ -128,7 +147,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		opts.Workspace = "."
 	}
 
-	ctx = domain.WithWorkspace(ctx, opts.Workspace)
+	execCtx = domain.WithWorkspace(execCtx, opts.Workspace)
 
 	state := &domain.AgentState{
 		TaskID:      generateTaskID(),
@@ -144,13 +163,13 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	var sb *sandbox.Sandbox
 	sandboxMgr := sandbox.GetDefaultManager()
 	if opts.UseSandbox {
-		createdSb, err := sandboxMgr.CreateSandbox(ctx, state.TaskID, opts.Workspace)
+		createdSb, err := sandboxMgr.CreateSandbox(execCtx, state.TaskID, opts.Workspace)
 		if err == nil && createdSb != nil && createdSb.IsGit {
 			sb = createdSb
 			opts.Workspace = sb.WorktreeWorkspace
 			state.WorktreePath = sb.WorktreePath
 			state.BranchName = sb.BranchName
-			ctx = domain.WithWorkspace(ctx, opts.Workspace)
+			execCtx = domain.WithWorkspace(execCtx, opts.Workspace)
 			if opts.OnProgress != nil {
 				opts.OnProgress(0, "sandbox_created", fmt.Sprintf("Đã khởi tạo Git Worktree Sandbox: %s (Nhánh: %s)", sb.WorktreePath, sb.BranchName))
 			}
@@ -161,18 +180,18 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		if sb == nil {
 			return
 		}
-		diff, _ := sandboxMgr.GetDiff(ctx, sb)
+		diff, _ := sandboxMgr.GetDiff(context.Background(), sb)
 		state.GitDiff = diff
 		if opts.OnProgress != nil && diff != "" {
 			opts.OnProgress(state.CurrentStep, "git_diff", diff)
 		}
 
-		if state.IsCompleted && state.StopReason == "completed" {
+		if state.IsCompleted && state.StopReason == domain.StopReasonCompleted {
 			if opts.AutoMerge {
-				_ = sandboxMgr.ApplyMerge(ctx, sb)
+				_ = sandboxMgr.ApplyMerge(context.Background(), sb)
 			}
 		} else {
-			_ = sandboxMgr.Rollback(ctx, sb)
+			_ = sandboxMgr.Rollback(context.Background(), sb)
 		}
 	}
 	defer finalizeSandbox()
@@ -186,14 +205,23 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 
 	openAITools := r.tools.ToOpenAITools()
 
+	var lastToolSig string
+	var repeatedToolCount int
+	var consecutiveFailures int
+
 	for step := 1; step <= opts.MaxSteps; step++ {
 		state.CurrentStep = step
 		state.UpdatedAt = time.Now()
 
-		if ctx.Err() != nil {
-			state.StopReason = "interrupted"
-			state.Error = ctx.Err().Error()
-			return state, ctx.Err()
+		if execCtx.Err() != nil {
+			if execCtx.Err() == context.DeadlineExceeded || (ctx.Err() == nil && execCtx.Err() != nil) {
+				state.StopReason = domain.StopReasonTimeout
+				state.Error = "Đã vượt quá thời lượng thực thi tối đa (max execution duration)"
+			} else {
+				state.StopReason = domain.StopReasonCancelled
+				state.Error = "Tác vụ đã bị hủy bởi người dùng hoặc hệ thống"
+			}
+			return state, execCtx.Err()
 		}
 
 		if opts.OnProgress != nil {
@@ -202,7 +230,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 
 		// Tự động nén ngữ cảnh nếu vượt quá 12 tin nhắn (Tier 2 Recall Memory)
 		if r.memorySvc != nil && len(state.Messages) > 12 {
-			if compacted, err := r.memorySvc.CompactConversation(ctx, state.Messages, 12); err == nil {
+			if compacted, err := r.memorySvc.CompactConversation(execCtx, state.Messages, 12); err == nil {
 				state.Messages = compacted
 			}
 		}
@@ -214,9 +242,17 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			Stream:   false,
 		}
 
-		resp, err := r.chatUseCase.ExecuteChatSync(ctx, chatReq)
+		resp, err := r.chatUseCase.ExecuteChatSync(execCtx, chatReq)
 		if err != nil {
-			state.StopReason = "error"
+			if strings.Contains(strings.ToLower(err.Error()), "circuit breaker") || strings.Contains(strings.ToLower(err.Error()), "unavailable") {
+				state.StopReason = domain.StopReasonUpstreamUnavailable
+			} else if execCtx.Err() == context.DeadlineExceeded {
+				state.StopReason = domain.StopReasonTimeout
+			} else if execCtx.Err() == context.Canceled {
+				state.StopReason = domain.StopReasonCancelled
+			} else {
+				state.StopReason = "error"
+			}
 			state.Error = fmt.Sprintf("Lỗi gọi mô hình tại bước %d: %v", step, err)
 			return state, err
 		}
@@ -272,7 +308,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			}
 
 			// Tự động chạy compiler check / linter trước khi cho phép báo cáo hoàn tất
-			summary, hasLintError := linter.CheckWorkspace(ctx, opts.Workspace)
+			summary, hasLintError := linter.CheckWorkspace(execCtx, opts.Workspace)
 			if hasLintError && step < opts.MaxSteps {
 				state.Messages = append(state.Messages, assistantMsg)
 				state.Messages = append(state.Messages, domain.OpenAIMessage{
@@ -286,7 +322,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			}
 
 			state.IsCompleted = true
-			state.StopReason = "completed"
+			state.StopReason = domain.StopReasonCompleted
 			state.FinalAnswer = assistantMsg.Content
 			state.Steps = append(state.Steps, stepRecord)
 			state.Messages = append(state.Messages, assistantMsg)
@@ -305,6 +341,31 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			toolName := tc.Function.Name
 			toolArgs := tc.Function.Arguments
 
+			// 1. Kiểm tra vòng lặp vô hạn (Loop Detection)
+			sig := fmt.Sprintf("%s:%s", toolName, strings.TrimSpace(toolArgs))
+			if sig == lastToolSig {
+				repeatedToolCount++
+			} else {
+				lastToolSig = sig
+				repeatedToolCount = 1
+			}
+
+			if repeatedToolCount > opts.MaxRepeatedCalls {
+				state.StopReason = domain.StopReasonRepeatedToolLoop
+				state.Error = fmt.Sprintf("Phát hiện vòng lặp vô hạn: công cụ '%s' với tham số trùng lặp đã được gọi liên tiếp %d lần.", toolName, repeatedToolCount)
+				state.Steps = append(state.Steps, stepRecord)
+				return state, nil
+			}
+
+			// 2. Kiểm tra tổng số lượt gọi công cụ tối đa
+			state.TotalToolCalls++
+			if state.TotalToolCalls > opts.MaxToolCalls {
+				state.StopReason = domain.StopReasonMaxToolCallsReached
+				state.Error = fmt.Sprintf("Đã vượt quá giới hạn tổng số lời gọi công cụ tối đa (%d).", opts.MaxToolCalls)
+				state.Steps = append(state.Steps, stepRecord)
+				return state, nil
+			}
+
 			if opts.OnProgress != nil {
 				opts.OnProgress(step, "tool_start", fmt.Sprintf("Thực thi công cụ: %s (%s)", toolName, toolArgs))
 			}
@@ -316,12 +377,22 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 				}
 			}
 
-			// Thực thi công cụ tuyệt đối thông qua Policy Engine
-			toolOutput, execErr := r.getPolicyEngine().ExecuteTool(ctx, toolName, toolArgs)
+			// Thực thi công cụ tuyệt đối thông qua Policy Engine với ngữ cảnh có thời hạn
+			toolOutput, execErr := r.getPolicyEngine().ExecuteTool(execCtx, toolName, toolArgs)
 			if execErr != nil {
+				consecutiveFailures++
 				if toolOutput == "" {
 					toolOutput = fmt.Sprintf("LỖI THỰC THI [%s]: %v", toolName, execErr)
 				}
+				if consecutiveFailures >= opts.MaxConsecutiveFailures {
+					state.StopReason = domain.StopReasonVerificationFailed
+					state.Error = fmt.Sprintf("Đã vượt quá số lỗi công cụ liên tiếp cho phép (%d): %v", opts.MaxConsecutiveFailures, execErr)
+					stepRecord.ToolResults = append(stepRecord.ToolResults, toolOutput)
+					state.Steps = append(state.Steps, stepRecord)
+					return state, nil
+				}
+			} else {
+				consecutiveFailures = 0
 			}
 
 			stepRecord.ToolResults = append(stepRecord.ToolResults, toolOutput)
@@ -340,7 +411,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	}
 
 	// Hết số bước tối đa
-	state.StopReason = "max_steps_reached"
+	state.StopReason = domain.StopReasonMaxStepsReached
 	state.FinalAnswer = fmt.Sprintf("Đã đạt giới hạn %d bước thực thi tối đa mà chưa nhận được kết luận từ mô hình.", opts.MaxSteps)
 	return state, nil
 }

@@ -171,7 +171,25 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 
 		if _, alreadyTried := triedAccounts[account.ID]; alreadyTried {
 			s.sessionRepo.Release(account, nil)
-			break
+			// Kiểm tra xem đã thử hết tất cả tài khoản trong hệ thống chưa
+			allAccs := s.sessionRepo.ListAll(ctx)
+			allTried := true
+			for _, a := range allAccs {
+				if _, ok := triedAccounts[a.ID]; !ok {
+					allTried = false
+					break
+				}
+			}
+			if allTried {
+				break
+			}
+			// Nếu còn tài khoản chưa thử, đợi nhẹ để bộ điều phối giải phóng lượt chọn
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(25 * time.Millisecond):
+			}
+			continue
 		}
 		triedAccounts[account.ID] = struct{}{}
 
@@ -228,6 +246,7 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 
 		// 2. Thành công
 		if callErr == nil {
+			account.RecordSuccess(0)
 			s.sessionRepo.ReleaseWriteLease(account, domain.ServiceGemini)
 			s.sessionRepo.Release(account, nil)
 			return nil
@@ -237,13 +256,22 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 		lastErr = callErr
 		class, _, _ := domain.ClassifiedFailure(callErr)
 
-		if class == domain.ClassRateLimited || class == domain.ClassUpstreamUnavailable {
-			cooldown := s.failoverConfig.GetCoolingDuration()
-			if cooldown <= 0 {
-				cooldown = 60 * time.Second
-			}
+		coolingDuration := s.failoverConfig.GetCoolingDuration()
+		if coolingDuration <= 0 {
+			coolingDuration = 60 * time.Second
+		}
+
+		account.RecordFailure(class, 0)
+		if class == domain.ClassRateLimited {
 			_ = account.MoveService(domain.ServiceGemini, domain.StateCooling)
-			account.CoolService(domain.ServiceGemini, time.Now().Add(cooldown), class)
+			account.CoolService(domain.ServiceGemini, time.Now().Add(coolingDuration), class)
+			account.SetCooldown(time.Now().Add(coolingDuration))
+		} else if class == domain.ClassUpstreamUnavailable {
+			_ = account.MoveService(domain.ServiceGemini, domain.StateCooling)
+			account.CoolService(domain.ServiceGemini, time.Now().Add(coolingDuration), class)
+			account.SetCooldown(time.Now().Add(coolingDuration))
+		} else if class == domain.ClassExpired {
+			account.HealthStatus = domain.HealthStatusAuthExpired
 		}
 
 		s.sessionRepo.ReleaseWriteLease(account, domain.ServiceGemini)

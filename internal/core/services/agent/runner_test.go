@@ -185,3 +185,94 @@ func TestAgentRunner_Supervised_Rejection(t *testing.T) {
 		t.Errorf("Không tìm thấy thông báo từ chối quyền trong lịch sử tool result")
 	}
 }
+
+func TestAgentRunner_LoopDetection(t *testing.T) {
+	tempDir := t.TempDir()
+	reg := tools.NewToolRegistry()
+	tools.RegisterDefaultTools(reg, tempDir)
+
+	// Mô hình liên tục gọi tool lặp lại cùng tham số
+	loopResp := &domain.OpenAIChatResponse{
+		Choices: []domain.OpenAIChoice{
+			{
+				Message: domain.OpenAIMessage{
+					Role: "assistant",
+					ToolCalls: []domain.OpenAIToolCall{
+						{
+							ID:   "call_loop",
+							Type: "function",
+							Function: domain.OpenAIFunctionCallData{
+								Name:      "read_file",
+								Arguments: `{"path": "nonexistent.txt"}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	mockChat := &MockChatUseCase{
+		responses: []*domain.OpenAIChatResponse{loopResp, loopResp, loopResp, loopResp, loopResp},
+	}
+
+	runner := NewRunner(mockChat, reg, &MockApprovalProvider{ApproveAll: true})
+	ctx := context.Background()
+
+	state, err := runner.Run(ctx, "Test loop guardrail", domain.AgentRunOptions{
+		MaxSteps:         10,
+		MaxRepeatedCalls: 3,
+		Workspace:        tempDir,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if state.StopReason != domain.StopReasonRepeatedToolLoop {
+		t.Fatalf("expected StopReason %s, got %s", domain.StopReasonRepeatedToolLoop, state.StopReason)
+	}
+}
+
+func TestAgentRunner_MaxToolCallsReached(t *testing.T) {
+	tempDir := t.TempDir()
+	reg := tools.NewToolRegistry()
+	tools.RegisterDefaultTools(reg, tempDir)
+
+	mockChat := &MockChatUseCase{
+		responses: []*domain.OpenAIChatResponse{
+			{
+				Choices: []domain.OpenAIChoice{
+					{
+						Message: domain.OpenAIMessage{
+							Role: "assistant",
+							ToolCalls: []domain.OpenAIToolCall{
+								{ID: "c1", Type: "function", Function: domain.OpenAIFunctionCallData{Name: "read_file", Arguments: `{"path": "a.txt"}`}},
+								{ID: "c2", Type: "function", Function: domain.OpenAIFunctionCallData{Name: "read_file", Arguments: `{"path": "b.txt"}`}},
+								{ID: "c3", Type: "function", Function: domain.OpenAIFunctionCallData{Name: "read_file", Arguments: `{"path": "c.txt"}`}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	runner := NewRunner(mockChat, reg, &MockApprovalProvider{ApproveAll: true})
+	ctx := context.Background()
+
+	state, err := runner.Run(ctx, "Test max tool calls", domain.AgentRunOptions{
+		MaxSteps:     5,
+		MaxToolCalls: 2, // Đặt giới hạn 2 lời gọi
+		Workspace:    tempDir,
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if state.StopReason != domain.StopReasonMaxToolCallsReached {
+		t.Fatalf("expected StopReason %s, got %s", domain.StopReasonMaxToolCallsReached, state.StopReason)
+	}
+}
+

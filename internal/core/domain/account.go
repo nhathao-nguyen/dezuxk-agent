@@ -88,6 +88,19 @@ func (cj *CookieJar) GetAll() map[string]string {
 	return res
 }
 
+// AccountHealthStatus biểu diễn 7 trạng thái chuẩn của tài khoản/session theo production-grade spec
+type AccountHealthStatus string
+
+const (
+	HealthStatusHealthy        AccountHealthStatus = "healthy"
+	HealthStatusDegraded       AccountHealthStatus = "degraded"
+	HealthStatusCooldown       AccountHealthStatus = "cooldown"
+	HealthStatusAuthExpired    AccountHealthStatus = "auth_expired"
+	HealthStatusQuotaExhausted AccountHealthStatus = "quota_exhausted"
+	HealthStatusRateLimited    AccountHealthStatus = "rate_limited"
+	HealthStatusUnavailable    AccountHealthStatus = "unavailable"
+)
+
 // ManagedAccount đại diện cho một danh tính người dùng Google Gemini
 type ManagedAccount struct {
 	ID                  string
@@ -100,10 +113,15 @@ type ManagedAccount struct {
 	ProxyURL            string
 	InFlightReqs        int64
 	IsHealthy           bool
+	HealthStatus        AccountHealthStatus // 7 trạng thái chuẩn
 	LastRefresh         time.Time
 	SuccessCount        int64
 	FailureCount        int64
 	ConsecutiveFailures int
+	Count429            int64
+	Count403            int64
+	AvgLatencyMs        float64
+	CooldownUntil       time.Time
 	LastSuccessAt       time.Time
 	LastFailureAt       time.Time
 	HealthScore         float64 // Điểm số từ 0.0 đến 1.0 (mặc định 1.0)
@@ -132,6 +150,22 @@ func (a *ManagedAccount) getHealthScoreLocked() float64 {
 	return a.HealthScore
 }
 
+// GetHealthStatus trả về trạng thái chuẩn hóa hiện tại của tài khoản
+func (a *ManagedAccount) GetHealthStatus() AccountHealthStatus {
+	if a == nil {
+		return HealthStatusUnavailable
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.HealthStatus == "" {
+		if a.IsHealthy {
+			return HealthStatusHealthy
+		}
+		return HealthStatusUnavailable
+	}
+	return a.HealthStatus
+}
+
 // GetStats trả về các chỉ số thống kê của tài khoản một cách thread-safe
 func (a *ManagedAccount) GetStats() (success int64, failure int64, consecutive int, health float64) {
 	if a == nil {
@@ -142,8 +176,26 @@ func (a *ManagedAccount) GetStats() (success int64, failure int64, consecutive i
 	return a.SuccessCount, a.FailureCount, a.ConsecutiveFailures, a.getHealthScoreLocked()
 }
 
+// GetExtendedStats trả về đầy đủ các chỉ số thống kê bao gồm 429, 403, latency và cooldown
+func (a *ManagedAccount) GetExtendedStats() (status AccountHealthStatus, c429, c403 int64, avgLatency float64, cooldown time.Time) {
+	if a == nil {
+		return HealthStatusUnavailable, 0, 0, 0, time.Time{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	st := a.HealthStatus
+	if st == "" {
+		if a.IsHealthy {
+			st = HealthStatusHealthy
+		} else {
+			st = HealthStatusUnavailable
+		}
+	}
+	return st, a.Count429, a.Count403, a.AvgLatencyMs, a.CooldownUntil
+}
+
 // RecordSuccess ghi nhận một yêu cầu thành công (HTTP 200 OK)
-func (a *ManagedAccount) RecordSuccess() {
+func (a *ManagedAccount) RecordSuccess(latencies ...time.Duration) {
 	if a == nil {
 		return
 	}
@@ -154,6 +206,16 @@ func (a *ManagedAccount) RecordSuccess() {
 	a.ConsecutiveFailures = 0
 	a.LastSuccessAt = time.Now()
 	a.IsHealthy = true
+	a.HealthStatus = HealthStatusHealthy
+
+	if len(latencies) > 0 && latencies[0] > 0 {
+		ms := float64(latencies[0].Milliseconds())
+		if a.AvgLatencyMs <= 0 {
+			a.AvgLatencyMs = ms
+		} else {
+			a.AvgLatencyMs = a.AvgLatencyMs*0.8 + ms*0.2
+		}
+	}
 
 	// Hồi phục dần điểm sức khỏe theo thuật toán EWMA
 	cur := a.getHealthScoreLocked()
@@ -181,16 +243,50 @@ func (a *ManagedAccount) RecordFailure(class ErrorClass, statusCode int) {
 	case class == ClassExpired || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		a.HealthScore = 0.0
 		a.IsHealthy = false
+		a.Count403++
+		a.HealthStatus = HealthStatusAuthExpired
 	case class == ClassRateLimited || statusCode == http.StatusTooManyRequests:
 		// 429: Phạt 30% điểm, sàn tối thiểu 0.05
 		a.HealthScore = math.Max(0.05, cur*0.70)
+		a.Count429++
+		a.HealthStatus = HealthStatusRateLimited
 	case class == ClassUpstreamUnavailable || statusCode == http.StatusBadGateway || statusCode == http.StatusServiceUnavailable:
 		// 502/503: Phạt 20% điểm, sàn tối thiểu 0.10
 		a.HealthScore = math.Max(0.10, cur*0.80)
+		a.HealthStatus = HealthStatusUnavailable
 	default:
 		// Lỗi mạng hoặc timeout khác: Phạt 15%
 		a.HealthScore = math.Max(0.10, cur*0.85)
+		if a.ConsecutiveFailures >= 2 {
+			a.HealthStatus = HealthStatusDegraded
+		}
 	}
+}
+
+// SetCooldown thiết lập thời điểm hết hạn cooldown cho tài khoản
+func (a *ManagedAccount) SetCooldown(until time.Time) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.CooldownUntil = until
+	if time.Now().Before(until) {
+		a.HealthStatus = HealthStatusCooldown
+	}
+}
+
+// IsInCooldown kiểm tra xem tài khoản có đang trong thời gian nghỉ cooldown không
+func (a *ManagedAccount) IsInCooldown() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.CooldownUntil.IsZero() {
+		return false
+	}
+	return time.Now().Before(a.CooldownUntil)
 }
 
 // GetDynamicCooldown tính toán thời gian chờ thích ứng dựa trên số lần thất bại liên tiếp kèm Jitter (±20%)

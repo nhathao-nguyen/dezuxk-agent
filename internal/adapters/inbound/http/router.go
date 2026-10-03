@@ -45,13 +45,21 @@ type RouterDependencies struct {
 	CheckpointRepo     ports.CheckpointRepository
 	MemoryService      ports.MemoryService
 	SubagentSupervisor ports.SubagentSupervisor
+	AgentJobService    ports.AgentJobService
+	AgentRunRepo       ports.AgentRunRepository
 }
 
 func BuildRouter(deps RouterDependencies) http.Handler {
 	r := chi.NewRouter()
 
 	// 1. Core Middlewares
-	r.Use(middleware.RequestID)
+	enableLog := false
+	if deps.Config != nil && deps.Config.Server.EnableRequestLog {
+		enableLog = true
+	}
+	r.Use(RequestTraceMiddleware(enableLog))
+	r.Use(MaxBodySizeMiddleware(50 * 1024 * 1024)) // 50MB trần tối đa cho toàn bộ requests
+
 	var trustedProxies []string
 	if deps.Config != nil && len(deps.Config.Server.TrustedProxies) > 0 {
 		trustedProxies = deps.Config.Server.TrustedProxies
@@ -96,21 +104,43 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 	}
 	r.Use(limiter.Middleware())
 
-	// 3. Dynamic CORS
+	// 3. Dynamic CORS Hardening
 	allowedOrigins := []string{"*"}
+	allowCredentials := false
 	if deps.Config != nil && len(deps.Config.Server.AllowedOrigins) > 0 {
 		allowedOrigins = deps.Config.Server.AllowedOrigins
+		allowCredentials = true
+		for _, o := range allowedOrigins {
+			if strings.TrimSpace(o) == "*" {
+				allowCredentials = false
+				break
+			}
+		}
+	}
+	if deps.Config != nil && deps.Config.IsProduction() {
+		var cleanOrigins []string
+		for _, o := range allowedOrigins {
+			if strings.TrimSpace(o) != "*" && strings.TrimSpace(o) != "" {
+				cleanOrigins = append(cleanOrigins, strings.TrimSpace(o))
+			}
+		}
+		allowedOrigins = cleanOrigins
+		allowCredentials = len(cleanOrigins) > 0
 	}
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link", "Content-Range", "Accept-Ranges"},
-		AllowCredentials: true,
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-API-Key", "Idempotency-Key"},
+		ExposedHeaders:   []string{"Link", "Content-Range", "Accept-Ranges", "Retry-After", "X-Request-Id"},
+		AllowCredentials: allowCredentials,
 		MaxAge:           300,
 	}))
 
-	// 4. Health check endpoints (Tích hợp cảnh báo phiên / Alerts)
+	// 4. Prometheus Metrics Endpoint
+	metricsExporter := NewPrometheusMetricsExporter(deps.SessionRepo, deps.ModelRegistry, deps.AgentRunRepo, deps.Metrics)
+	r.Method(http.MethodGet, "/metrics", metricsExporter)
+
+	// 5. Health & Liveness Check (Liveness Probe)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		activeModels := 0
@@ -254,14 +284,31 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				})
 			})
 		} else {
-			// Môi trường dev/test không cấu hình khóa xác thực: gán DefaultInternalIdentity
-			v1.Use(func(next http.Handler) http.Handler {
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					identity := domain.DefaultInternalIdentity()
-					ctx := domain.ContextWithTenantIdentity(r.Context(), identity)
-					next.ServeHTTP(w, r.WithContext(ctx))
+			// Trong production mode, tuyệt đối không cho phép fallback sang DefaultInternalIdentity
+			if deps.Config != nil && deps.Config.IsProduction() {
+				v1.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusUnauthorized)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"error": map[string]any{
+								"message": "Authentication required. Server is running in production mode.",
+								"type":    "authentication_error",
+								"code":    "api_key_required",
+							},
+						})
+					})
 				})
-			})
+			} else {
+				// Môi trường dev/test không cấu hình khóa xác thực: gán DefaultInternalIdentity
+				v1.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						identity := domain.DefaultInternalIdentity()
+						ctx := domain.ContextWithTenantIdentity(r.Context(), identity)
+						next.ServeHTTP(w, r.WithContext(ctx))
+					})
+				})
+			}
 		}
 
 		// Quản trị nội bộ Virtual API Keys
@@ -339,10 +386,19 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			if deps.SubagentSupervisor != nil {
 				agentHandler.SetSubagentSupervisor(deps.SubagentSupervisor)
 			}
+			if deps.AgentJobService != nil && deps.AgentRunRepo != nil {
+				agentHandler.SetJobService(deps.AgentJobService, deps.AgentRunRepo)
+			}
 			v1.Route("/agent", func(ag chi.Router) {
 				ag.Use(RequireScope(domain.ScopeAgent))
 				ag.Post("/run", agentHandler.HandleRun)
 				ag.Post("/run/stream", agentHandler.HandleRunStream)
+				ag.Post("/runs", agentHandler.HandleCreateRun)
+				ag.Get("/runs", agentHandler.HandleListRuns)
+				ag.Get("/runs/{id}", agentHandler.HandleGetRun)
+				ag.Post("/runs/{id}/cancel", agentHandler.HandleCancelRun)
+				ag.Post("/runs/{id}/resume", agentHandler.HandleResumeRun)
+				ag.Get("/runs/{id}/events", agentHandler.HandleStreamRunEvents)
 				ag.Get("/tools", agentHandler.HandleListTools)
 				ag.Get("/checkpoints/{taskId}", agentHandler.HandleGetCheckpoints)
 				ag.Get("/subagents", agentHandler.HandleListSubagents)

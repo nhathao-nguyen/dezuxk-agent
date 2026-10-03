@@ -23,6 +23,8 @@ type AgentHandler struct {
 	checkpointRepo ports.CheckpointRepository
 	memorySvc      ports.MemoryService
 	subagentSup    ports.SubagentSupervisor
+	jobService     ports.AgentJobService
+	runRepo        ports.AgentRunRepository
 }
 
 // NewAgentHandler khởi tạo AgentHandler
@@ -40,6 +42,12 @@ func NewAgentHandler(
 		checkpointRepo: checkpointRepo,
 		memorySvc:      memorySvc,
 	}
+}
+
+// SetJobService cấu hình Async Job Service và Repository cho Durable Agent Jobs
+func (h *AgentHandler) SetJobService(js ports.AgentJobService, repo ports.AgentRunRepository) {
+	h.jobService = js
+	h.runRepo = repo
 }
 
 // AgentRunRequest cấu trúc payload gửi lên /v1/agent/run
@@ -702,6 +710,253 @@ func (h *AgentHandler) HandleSandboxRollback(w http.ResponseWriter, r *http.Requ
 		"task_id": req.TaskID,
 	})
 }
+
+// HandleCreateRun xử lý POST /v1/agent/runs (Async Job Submission)
+func (h *AgentHandler) HandleCreateRun(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if h.jobService == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Async Agent Job System chưa được kích hoạt trên gateway",
+		})
+		return
+	}
+
+	var req AgentRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Payload JSON không hợp lệ: " + err.Error(),
+		})
+		return
+	}
+
+	if strings.TrimSpace(req.Goal) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Trường 'goal' là bắt buộc khi khởi tạo agent run",
+		})
+		return
+	}
+
+	opts, err := h.resolveEffectiveOptions(r.Context(), req)
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	idempKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	run, err := h.jobService.SubmitRun(r.Context(), req.Goal, opts, idempKey)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Lỗi khởi tạo agent run: " + err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(run)
+}
+
+// HandleGetRun xử lý GET /v1/agent/runs/{id}
+func (h *AgentHandler) HandleGetRun(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if h.jobService == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Async Agent Job System chưa được kích hoạt trên gateway",
+		})
+		return
+	}
+
+	runID := chi.URLParam(r, "id")
+	run, err := h.jobService.GetRun(r.Context(), runID)
+	if err != nil || run == nil {
+		w.WriteHeader(http.StatusNotFound)
+		msg := "Không tìm thấy agent run"
+		if err != nil {
+			msg = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": msg,
+		})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(run)
+}
+
+// HandleListRuns xử lý GET /v1/agent/runs
+func (h *AgentHandler) HandleListRuns(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if h.runRepo == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Agent Run Repository chưa được cấu hình",
+		})
+		return
+	}
+
+	tenantID := "default"
+	if id, ok := domain.TenantIdentityFromContext(r.Context()); ok && id.TenantID != "" {
+		tenantID = id.TenantID
+	}
+
+	runs, err := h.runRepo.List(r.Context(), tenantID, 50, 0)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Lỗi lấy danh sách runs: " + err.Error(),
+		})
+		return
+	}
+
+	if runs == nil {
+		runs = []*domain.AgentRun{}
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data":  runs,
+		"count": len(runs),
+	})
+}
+
+// HandleCancelRun xử lý POST /v1/agent/runs/{id}/cancel
+func (h *AgentHandler) HandleCancelRun(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if h.jobService == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Async Agent Job System chưa được kích hoạt trên gateway",
+		})
+		return
+	}
+
+	runID := chi.URLParam(r, "id")
+	if err := h.jobService.CancelRun(r.Context(), runID); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Lỗi khi hủy agent run: " + err.Error(),
+		})
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"run_id":  runID,
+		"status":  domain.RunStatusCancelled,
+	})
+}
+
+// HandleResumeRun xử lý POST /v1/agent/runs/{id}/resume
+func (h *AgentHandler) HandleResumeRun(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if h.jobService == nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Async Agent Job System chưa được kích hoạt trên gateway",
+		})
+		return
+	}
+
+	runID := chi.URLParam(r, "id")
+	var req struct {
+		Feedback string `json:"feedback,omitempty"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	newRun, err := h.jobService.ResumeRun(r.Context(), runID, req.Feedback)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": "Không thể resume agent run: " + err.Error(),
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(newRun)
+}
+
+// HandleStreamRunEvents xử lý GET /v1/agent/runs/{id}/events (SSE)
+func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Request) {
+	if h.jobService == nil || h.runRepo == nil {
+		http.Error(w, "Async Agent Job System chưa được kích hoạt trên gateway", http.StatusServiceUnavailable)
+		return
+	}
+
+	runID := chi.URLParam(r, "id")
+	run, err := h.jobService.GetRun(r.Context(), runID)
+	if err != nil || run == nil {
+		http.Error(w, "Không tìm thấy agent run", http.StatusNotFound)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming không được hỗ trợ", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// 1. Gửi các sự kiện lịch sử đã lưu trước đó
+	existingEvents, _ := h.runRepo.GetEvents(r.Context(), runID, 0)
+	var lastID int64
+	for _, ev := range existingEvents {
+		lastID = ev.ID
+		data, _ := json.Marshal(ev)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	// Nếu run đã kết thúc thì dừng SSE stream luôn
+	if run.Status == domain.RunStatusCompleted || run.Status == domain.RunStatusFailed || run.Status == domain.RunStatusCancelled {
+		_, _ = fmt.Fprintf(w, "event: done\ndata: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	// 2. Subscribe sự kiện theo thời gian thực
+	eventsCh, unsubscribe, err := h.jobService.SubscribeEvents(r.Context(), runID)
+	if err != nil {
+		return
+	}
+	defer unsubscribe()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, ok := <-eventsCh:
+			if !ok {
+				_, _ = fmt.Fprintf(w, "event: done\ndata: [DONE]\n\n")
+				flusher.Flush()
+				return
+			}
+			if ev.ID > lastID {
+				lastID = ev.ID
+				data, _ := json.Marshal(ev)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
 
 
 

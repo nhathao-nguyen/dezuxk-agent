@@ -334,4 +334,104 @@ Tuyệt đối không dồn code vào một file duy nhất, hệ thống phân 
     * `tabs/logs.js`: Điều khiển bảng nhật ký request thời gian thực.
     * `app.js`: Điểm vào chính, chuyển đổi tab và vòng lặp tự động đồng bộ (3 giây).
 
+---
+
+## 9. Production-Grade Hardening & Multi-Platform AI Agent Gateway
+
+### 9.1. Luồng Chuẩn Toàn Trình (End-to-End Orchestration Flow)
+
+```mermaid
+flowchart TD
+    Client["Third-party Client\n(OpenAI SDK, Cursor, Cline, Roo Code, Antigravity)"]
+    Gateway["Dezuxk AI Gateway Facade\n(Auth, CORS, Rate Limit, Concurrency, Tracing)"]
+    AgentOrch["Agent Orchestrator\n(ReAct / State Machine Graph / Async Job System)"]
+    Policy["Tool Execution Policy Engine\n(Scope, Path Sandboxing, Human-in-the-Loop, Timeout)"]
+    Tools["Tool Registry\n(File System, AST Grep, Shell, Chrome Browser, MCP, Memory)"]
+    ResilientClient["Resilient Upstream Client\n(Backoff, Jitter, Circuit Breaker, Retry Budget)"]
+    Failover["Session & Account Health Manager\n(EWMA Latency, 7 Health States, Pluggable Selection Strategy)"]
+    Gemini["Google Gemini Web Upstream"]
+
+    Client -->|REST / SSE Request| Gateway
+    Gateway -->|Validated Context| AgentOrch
+    AgentOrch -->|Select Account & Execute Model| ResilientClient
+    ResilientClient -->|Health & Lease Tracking| Failover
+    Failover -->|Authenticated Protocol| Gemini
+    Gemini -->|Streaming / Tool Calls| ResilientClient
+    ResilientClient -->|Model Output| AgentOrch
+    AgentOrch -->|Dispatch Tool Call| Policy
+    Policy -->|Sandbox Check & Approval| Tools
+    Tools -->|Tool Output| Policy
+    Policy -->|Normalized Tool Result| AgentOrch
+    AgentOrch -->|Loop & Re-evaluation| ResilientClient
+    AgentOrch -->|Final Response / SSE Events| Client
+```
+
+### 9.2. Upstream Resilience & Circuit Breaker (P0)
+* **ResilientUpstreamClient**: Bọc toàn bộ outbound traffic sang Google Web.
+  * **Exponential Backoff**: Khởi đầu 250ms -> 500ms -> 1s -> 2s với random jitter (±20%) nhằm triệt tiêu hiện tượng thundering herd.
+  * **Phân loại lỗi thông minh**: Tự động retry trên lỗi mạng, connection reset, timeout, HTTP 429, 500, 502, 503, 504; không retry mù quáng với 400 (Bad Request), 401 (Auth Expired), hoặc payload không hợp lệ.
+  * **Tôn trọng Header `Retry-After`**: Tự động đọc và tạm hoãn đúng số giây upstream yêu cầu.
+  * **Circuit Breaker 3 trạng thái (`Closed`, `Half-Open`, `Open`)**: Khi số lỗi liên tiếp vượt ngưỡng `FailureThreshold` (mặc định 5), mạch ngắt chuyển sang `Open` chặn đứng request gây nghẽn, sau `ResetTimeout` (mặc định 30s) chuyển sang `Half-Open` để thăm dò hồi phục.
+
+### 9.3. Gemini Account & Session Failover (P0)
+* **7 Trạng thái chuẩn hóa**: `healthy`, `degraded`, `cooldown`, `auth_expired`, `quota_exhausted`, `rate_limited`, `unavailable`.
+* **Chỉ số giám sát**: Đếm lỗi liên tiếp, thời điểm thành công/thất bại gần nhất, số lần 429/403, EWMA Average Latency, và thời hạn Cooldown.
+* **4 Chiến lược điều phối xoay vòng linh hoạt (`AccountSelectionStrategy`)**:
+  * `WeightedHealthScoreStrategy`: Tính điểm sức khỏe dựa trên tỷ lệ lỗi và độ trễ phản hồi.
+  * `RoundRobinStrategy`: Luân phiên đều giữa các tài khoản khả dụng.
+  * `LeastFailuresStrategy`: Ưu tiên tài khoản có số lần lỗi ít nhất.
+  * `LeastLatencyStrategy`: Ưu tiên tài khoản có tốc độ phản hồi nhanh nhất.
+* **Failover Loop an toàn**: Tự động đánh dấu tài khoản lỗi, chuyển cooldown, và chuyển tiếp sang tài khoản khả dụng tiếp theo mà không làm gián đoạn request của client.
+
+### 9.4. Production Auth & CORS Security (P0)
+* **Khóa bảo mật Production**: Khi chạy cờ `environment: production`, Gateway bắt buộc cấu hình `server.api_key` và `security.master_key`; từ chối khởi động nếu thiếu. Request từ client thiếu xác thực nhận mã HTTP 401, tuyệt đối không âm thầm fallback sang quyền quản trị.
+* **CORS Hardening**: Cấm hoàn toàn wildcard `AllowedOrigins: ["*"]` trong môi trường Production. Không cho phép kết hợp `AllowCredentials: true` với wildcard origin.
+* **Zero Raw Secret Logging**: Toàn bộ Authorization headers, Gemini cookies (`__Secure-1PSID`, `__Secure-1PSIDTS`), CSRF tokens (`SNlM0e`, `cfb2h`), và master key đều được loại trừ hoặc ẩn danh (`MaskAccountID`) trước khi ghi log.
+
+### 9.5. Agent Loop Safety Guardrails (P0)
+* **Loop Detection**: Tự động theo dõi các cặp `tool_name + arguments` liên tiếp. Nếu lặp lại quá `MaxRepeatedCalls` (mặc định 3 lần) mà không thay đổi ngữ cảnh, hệ thống lập tức ngắt vòng lặp với lý do `repeated_tool_loop`.
+* **Max Tool Calls**: Giới hạn tổng số lần gọi công cụ cho toàn bộ vòng đời nhiệm vụ (mặc định 50).
+* **Max Consecutive Failures**: Tự động dừng nếu công cụ liên tục trả về lỗi quá 5 lần (`verification_failed`).
+* **Thời hạn thực thi tối đa (Execution Deadline)**: Ngắt tác vụ với `timeout` nếu vượt quá `MaxExecutionDuration`.
+* **9 Stop Reasons chuẩn hóa**: `completed`, `max_steps_reached`, `max_tool_calls_reached`, `repeated_tool_loop`, `timeout`, `cancelled`, `upstream_unavailable`, `policy_denied`, `verification_failed`.
+
+### 9.6. Durable Agent Job System & Checkpointing (P1)
+* **Bất đồng bộ hóa (Async Job API)**:
+  * `POST /v1/agent/runs`: Khởi tạo tác vụ chạy nền, trả ngay HTTP 202 `{ "id": "...", "status": "queued" }`.
+  * `GET /v1/agent/runs/{id}`: Tra cứu trạng thái và toàn bộ các bước thực thi.
+  * `GET /v1/agent/runs`: Liệt kê các tác vụ của tenant.
+  * `POST /v1/agent/runs/{id}/cancel`: Hủy tác vụ đang chạy nền.
+  * `POST /v1/agent/runs/{id}/resume`: Tiếp tục tác vụ với phản hồi bổ sung từ người dùng.
+  * `GET /v1/agent/runs/{id}/events`: Stream SSE thời gian thực tiến trình của tác vụ (`thinking`, `tool_start`, `tool_end`, `completed`).
+* **Tương thích hoàn toàn (Backward Compatibility)**: Duy trì đầy đủ endpoint đồng bộ `POST /v1/agent/run` và `POST /v1/agent/run/stream`.
+* **Bền vững hóa với SQLite Checkpointing**: Lưu trữ bản ghi `agent_runs` và `agent_run_events` trên cơ sở dữ liệu SQLite (WAL mode), đảm bảo không mất trạng thái khi máy chủ khởi động lại.
+* **Cơ chế Idempotency**: Header `Idempotency-Key` ngăn chặn việc khởi tạo lặp tác vụ khi client gửi lại request do timeout mạng.
+
+### 9.7. Tool Calling Normalization & Execution Policy (P1)
+* **Canonical Internal Representation**: `ToolCall` và `ToolResult` chuẩn hóa độc lập với định dạng OpenAI hay Gemini.
+* **Bộ tự sửa lỗi JSON tham số (`RepairJSONArguments`)**: Tự động loại bỏ markdown code fence, sửa trailing commas, tự động đóng các ngoặc bị thiếu do LLM cắt ngắn chuỗi.
+* **Khử trùng lặp ID**: Tự động phát hiện và sinh ID duy nhất cho các tool call bị trùng hoặc thiếu ID.
+* **Chính sách phân quyền tập trung (`PolicyEngine`)**: Toàn bộ thao tác thực thi công cụ bắt buộc đi qua Policy Layer kiểm soát phạm vi tenant, thư mục làm việc (path traversal sandboxing), quyền shell/browser, xác nhận Human-in-the-Loop đối với các lệnh phá hủy, và per-tool timeout (shell: 120s, browser: 45s, filesystem: 15s).
+
+### 9.8. Đa Tầng Rate Limiting & Concurrency Control (P1)
+* **Định danh đa tầng**: Giới hạn tần suất không chỉ theo IP mà ưu tiên theo API Key / Tenant ID.
+* **Kiểm soát đồng thời (Concurrency Limiter)**: Giới hạn số lượng request song song đồng thời trên mỗi client để chống cạn kiệt tài nguyên phiên.
+* **Dynamic Retry-After**: Tự động tính toán chính xác số giây cần chờ và phản hồi chuẩn HTTP 429.
+* **Max Request Body Size**: Giới hạn trần tối đa dung lượng request (50MB) bảo vệ máy chủ khỏi tấn công DoS payload lớn.
+
+### 9.9. Giám Sát & Observability Toàn Diện (P2)
+* **Prometheus Metrics Exporter (`GET /metrics`)**: Xuất dữ liệu chuẩn Prometheus format:
+  * `gateway_requests_total`
+  * `gateway_errors_total`
+  * `gateway_models_active`
+  * `gemini_account_health_score{account_id, status}`
+  * `gemini_account_failures_total{account_id, status, code}`
+  * `gemini_account_avg_latency_ms{account_id}`
+  * `agent_runs_total{status}`
+* **Liveness vs Readiness Probes**:
+  * `GET /health` (Liveness): Trả về HTTP 200 `status: "ok"` kiểm tra tiến trình máy chủ còn hoạt động.
+  * `GET /ready` (Readiness): Kiểm tra kết nối cơ sở dữ liệu SQLite, kho lưu trữ phiên tài khoản, và danh mục mô hình khả dụng.
+* **Graceful Shutdown**: Lắng nghe tín hiệu `SIGINT` / `SIGTERM`, dừng nhận request mới, đợi 15 giây cho các tác vụ in-flight và agent jobs kết thúc an toàn, sau đó đóng kết nối cơ sở dữ liệu SQLite.
+
+
 

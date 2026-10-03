@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"time"
 
 	"dezuxk-gateway/internal/core/domain"
 )
@@ -73,6 +74,41 @@ type SubagentSupervisor interface {
 	GetRoleDescriptor(role domain.SubagentRole) (*domain.SubagentDescriptor, bool)
 	ListRoles() []domain.SubagentDescriptor
 }
+
+// AgentRunRepository giao diện lưu trữ trạng thái bền vững của các tác vụ Agent (Durable Agent Job)
+type AgentRunRepository interface {
+	Create(ctx context.Context, run *domain.AgentRun) error
+	Update(ctx context.Context, run *domain.AgentRun) error
+	Get(ctx context.Context, runID string) (*domain.AgentRun, error)
+	List(ctx context.Context, tenantID string, limit, offset int) ([]*domain.AgentRun, error)
+	AppendEvent(ctx context.Context, event *domain.AgentRunEvent) error
+	GetEvents(ctx context.Context, runID string, afterID int64) ([]domain.AgentRunEvent, error)
+	Cancel(ctx context.Context, runID string) error
+	FindByTenantAndIdempotencyKey(ctx context.Context, tenantID, key string) (*domain.AgentRun, error)
+}
+
+// AgentJobService giao diện điều phối hàng đợi và thực thi tác vụ Agent chạy nền (Async Job Engine)
+type AgentJobService interface {
+	SubmitRun(ctx context.Context, goal string, opts domain.AgentRunOptions, idempotencyKey string) (*domain.AgentRun, error)
+	GetRun(ctx context.Context, runID string) (*domain.AgentRun, error)
+	CancelRun(ctx context.Context, runID string) error
+	ResumeRun(ctx context.Context, runID string, feedback string) (*domain.AgentRun, error)
+	SubscribeEvents(ctx context.Context, runID string) (<-chan domain.AgentRunEvent, func(), error)
+}
+
+// DistributedLockProvider giao diện khóa phân tán hỗ trợ môi trường multi-instance
+type DistributedLockProvider interface {
+	AcquireLock(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	ReleaseLock(ctx context.Context, key string) error
+}
+
+// SharedStateStore giao diện lưu trữ key-value phân tán giữa nhiều node gateway
+type SharedStateStore interface {
+	Get(ctx context.Context, key string) ([]byte, error)
+	Set(ctx context.Context, key string, val []byte, ttl time.Duration) error
+	Delete(ctx context.Context, key string) error
+}
+
 
 
 

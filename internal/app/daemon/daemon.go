@@ -117,8 +117,9 @@ func Run(configPath string, portOverride int) error {
 
 	metrics := domain.NewContractMetrics()
 
-	// 4. Khởi tạo Outbound Adapters
-	upstreamTransport := google.NewGoogleTransportAdapter(cfg)
+	// 4. Khởi tạo Outbound Adapters với lớp bọc Upstream Resilience (Circuit Breaker, Backoff, Jitter, Retry-After)
+	rawUpstream := google.NewGoogleTransportAdapter(cfg)
+	upstreamTransport := google.NewResilientUpstreamClient(rawUpstream)
 
 	// 5. Khởi tạo Profile Manager (Mỗi tài khoản Google 1 folder riêng, lưu cookies & cấu hình)
 	profileManager, err := session.NewProfileManager(cfg, sessionRepo, modelRegistry, tokenExtractor, vault)
@@ -213,6 +214,7 @@ func Run(configPath string, portOverride int) error {
 
 	var checkpointRepo ports.CheckpointRepository
 	var memoryRepo ports.MemoryRepository
+	var agentRunRepo ports.AgentRunRepository
 	if sqliteRepo != nil {
 		cpRepo, err := session.NewSqliteCheckpointRepository(sqliteRepo.DB())
 		if err == nil {
@@ -222,6 +224,10 @@ func Run(configPath string, portOverride int) error {
 		if err == nil {
 			memoryRepo = mRepo
 		}
+		arRepo, err := session.NewSqliteAgentRunRepository(sqliteRepo.DB())
+		if err == nil {
+			agentRunRepo = arRepo
+		}
 	}
 	if checkpointRepo == nil {
 		checkpointRepo = session.NewMemoryCheckpointRepository()
@@ -229,6 +235,10 @@ func Run(configPath string, portOverride int) error {
 	if memoryRepo == nil {
 		memoryRepo = session.NewMemoryMemoryRepository()
 	}
+	if agentRunRepo == nil {
+		agentRunRepo = session.NewMemoryAgentRunRepository()
+	}
+	agentJobService := agent.NewJobService(agentRunRepo, agentRunner)
 
 	// Khởi tạo 3-Tier Memory Manager (Working, Recall, Archival)
 	initialCore := domain.CoreMemory{
@@ -296,6 +306,8 @@ func Run(configPath string, portOverride int) error {
 		CheckpointRepo:        checkpointRepo,
 		MemoryService:         memoryService,
 		SubagentSupervisor:    subagentSupervisor,
+		AgentJobService:       agentJobService,
+		AgentRunRepo:          agentRunRepo,
 	})
 
 	// 8. Khởi động GeminiChatGoldenJob và Proactive Session Keep-Alive Worker
@@ -336,12 +348,16 @@ func Run(configPath string, portOverride int) error {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[Server] Shutting down gracefully...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	log.Println("[Server] Shutting down gracefully (15s drain)...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("force shutdown error: %w", err)
+	}
+
+	if sqliteRepo != nil {
+		_ = sqliteRepo.Close()
 	}
 
 	log.Println("[Server] Gateway đã dừng hoàn toàn sạch sẽ.")

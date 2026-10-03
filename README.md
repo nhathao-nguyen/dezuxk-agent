@@ -8,9 +8,25 @@
 
 ## 🌟 Tính Năng Nổi Bật
 
-* **Tương thích chuẩn OpenAI API (`/v1`)**:
-  * Hỗ trợ đầy đủ `/v1/chat/completions` (cả chế độ **Sync** và **Real-time SSE Streaming**).
-  * Danh mục mô hình động `/v1/models` đồng bộ tự động theo quyền hạn tài khoản.
+* **Tương thích chuẩn OpenAI API (`/v1`) & Multi-Platform Client Support**:
+  * Hỗ trợ đầy đủ `/v1/chat/completions` (cả chế độ **Sync** và **Real-time SSE Streaming**), `/v1/responses` (OpenAI Codex CLI), và `/v1/models`.
+  * Hoạt động ổn định với **OpenAI Python / Node.js SDK**, **Cursor**, **Cline**, **Roo Code**, **Codex CLI**, **Antigravity**, và các Agent Framework bên thứ ba.
+* **Hệ Thống Tác Vụ Tự Trị Bền Vững (Durable Agent Job System)**:
+  * Khởi tạo tác vụ chạy nền bất đồng bộ qua `POST /v1/agent/runs`, tra cứu `GET /v1/agent/runs/{id}`, hủy `POST /v1/agent/runs/{id}/cancel`, resume `POST /v1/agent/runs/{id}/resume`, và stream tiến trình thời gian thực qua SSE `GET /v1/agent/runs/{id}/events`.
+  * Hỗ trợ header `Idempotency-Key` ngăn chặn trùng lặp tác vụ khi client thử lại request.
+  * Lưu trữ và phục hồi Snapshot trạng thái bền vững trên cơ sở dữ liệu SQLite (WAL Mode).
+* **Khả Năng Chịu Lỗi Cấp Sản Xuất (Upstream Resilience & Failover)**:
+  * **Resilient Upstream Client**: Tự động thử lại (Retry) có giới hạn với thuật toán **Exponential Backoff** (250ms -> 2s) và **Random Jitter (±20%)**, tôn trọng header `Retry-After` từ máy chủ Google.
+  * **Circuit Breaker 3 trạng thái (`Closed`, `Half-Open`, `Open`)**: Tự động ngắt mạch khi lỗi dồn dập bảo vệ gateway không bị tắc nghẽn.
+  * **Quản lý sức khỏe phiên Google (7 trạng thái)**: Theo dõi tỷ lệ lỗi, 429 count, 403 count, EWMA Average Latency, và hỗ trợ 4 thuật toán xoay vòng linh hoạt (`WeightedHealthScore`, `RoundRobin`, `LeastFailures`, `LeastLatency`).
+* **Hàng Rào Bảo Vệ An Toàn Cho Agent (Loop Detection & Policy Engine)**:
+  * Phát hiện và tự động ngắt các vòng lặp vô hạn (**Loop Detection**) khi agent gọi trùng lặp công cụ.
+  * Kiểm soát phân quyền thực thi qua **Policy Layer** duy nhất: sandboxing đường dẫn tệp, giới hạn thời gian chạy cho từng công cụ (Per-tool Timeout), và xác nhận Human-in-the-Loop đối với các lệnh phá hủy hệ thống.
+* **Giám Sát & Vận Hành Chuẩn Cloud-Native (Observability)**:
+  * Xuất chỉ số giám sát chuẩn Prometheus qua endpoint `GET /metrics`.
+  * Phân tách rành mạch **Liveness Probe** (`GET /health`) và **Readiness Probe** (`GET /ready`).
+  * Truyền vết định danh toàn trình qua headers `X-Request-ID` và `X-Trace-ID`.
+  * Cơ chế tắt máy chủ an toàn (**Graceful Shutdown** với thời gian xả 15 giây).
 * **Các tính năng Gemini độc quyền**:
   * 🧠 **Extended Thinking Mode (Suy luận sâu)**: Bật cờ `"thinking": true` để Gemini suy nghĩ từng bước trước khi trả lời.
   * 🌐 **Search Grounding (Truy vấn Web thời gian thực)**: Bật cờ `"grounding": true` để Gemini tự động tìm kiếm Google Search và trả về trích dẫn nguồn (`sources`, `favicon`, `domain`).
@@ -18,16 +34,14 @@
   * 👁️ **Multimodal Vision (Phân tích hình ảnh)**: Tự động phân giải ảnh Base64 (`data:image/...`) hoặc Image URL trong `messages` và upload qua Google SCOTTY protocol.
 * **Bộ nhớ đệm phản hồi siêu tốc (< 10ms)**:
   * Tích hợp **In-Memory LRU Caching + TTL**. Các câu hỏi lặp lại được phản hồi tức thì từ RAM, trả về header `X-Cache: HIT`.
-* **Quản lý đa tài khoản & Khả năng chịu lỗi cao (Resilience & Failover)**:
-  * **Tự động chuyển tài khoản (Next-Account Failover)**: Khi tài khoản hiện tại chạm ngưỡng giới hạn (429 Rate Limit hoặc Quota), hệ thống tự động đưa tài khoản vào hàng chờ Cooldown và chuyển ngay sang tài khoản khả dụng tiếp theo.
-  * **Khóa chống nghẽn (Write-Lease)**: Bảo đảm mỗi tài khoản chỉ xử lý 1 tác vụ ghi tại một thời điểm, loại bỏ nguy cơ bị Google WAF đánh cờ vi phạm.
 * **Trích xuất Cookie tự động qua Chrome CDP**:
   * Quản lý mỗi tài khoản Google trong một thư mục Profile Chrome riêng biệt (`profiles/`).
   * Tự động kết nối WebSocket CDP (`Network.getAllCookies`) để trích xuất cookie trực tiếp từ RAM trình duyệt mà không cần cài extension.
   * Tự động bắt tay lấy CSRF Token `SNlM0e` và tự xoay vòng token `__Secure-1PSIDTS`.
 * **Bảo mật cấp doanh nghiệp**:
   * **Mã hóa đối xứng AES-256-GCM (Encryption at Rest)** cho toàn bộ Cookie và thông tin đăng nhập trong SQLite và đĩa cứng qua module Vault.
-  * **Virtual API Keys đa người dùng**: Hỗ trợ phân quyền `admin` / `user`, giới hạn tốc độ (Rate Limit RPM) và hạn ngạch ngày (Daily Quota) cho từng client.
+  * **Zero Raw Secret Logging**: Tuyệt đối không ghi nhật ký cookie, Authorization header, CSRF token hay master key.
+  * **Virtual API Keys đa người dùng**: Hỗ trợ phân quyền `admin` / `user`, giới hạn tốc độ đa tầng (Rate Limit RPM) và giới hạn kết nối đồng thời (Concurrency Limit).
 
 ---
 

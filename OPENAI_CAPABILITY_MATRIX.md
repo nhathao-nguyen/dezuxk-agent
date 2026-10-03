@@ -6,10 +6,20 @@ Tài liệu này xác định chi tiết ma trận tương thích giữa Dezuxk 
 
 | Endpoint | Method | Hỗ trợ | Ghi chú tương thích |
 | :--- | :--- | :---: | :--- |
-| `/v1/chat/completions` | POST | **100%** | Hỗ trợ cả Synchronous và SSE Streaming (`text/event-stream`). |
+| `/v1/chat/completions` | POST | **100%** | Hỗ trợ cả Synchronous và SSE Streaming (`text/event-stream`), tool calling, vision. |
 | `/v1/responses` | POST | **100%** | Hỗ trợ OpenAI Responses API (dùng cho OpenAI Codex CLI). |
 | `/v1/models` | GET | **100%** | Trả về danh sách mô hình dạng OpenAI standard. |
-| `/ready` | GET | **100%** | Endpoint kiểm tra sức khỏe phụ thuộc (Database, Gemini Session). |
+| `/v1/agent/run` | POST | **100%** | Synchronous Agent ReAct Loop và State Machine Graph. |
+| `/v1/agent/run/stream` | POST | **100%** | Synchronous SSE Streaming Agent execution. |
+| `/v1/agent/runs` | POST | **100%** | Async Durable Agent Job Submission (trả ngay HTTP 202 `{id, status}`). |
+| `/v1/agent/runs/{id}` | GET | **100%** | Tra cứu trạng thái và lịch sử bước chạy của Agent Run. |
+| `/v1/agent/runs` | GET | **100%** | Liệt kê danh sách Agent Runs theo tenant. |
+| `/v1/agent/runs/{id}/cancel` | POST | **100%** | Hủy tác vụ Agent đang chạy nền. |
+| `/v1/agent/runs/{id}/resume` | POST | **100%** | Tiếp tục Agent Run với phản hồi bổ sung từ người dùng. |
+| `/v1/agent/runs/{id}/events` | GET | **100%** | Server-Sent Events (SSE) theo dõi sự kiện thời gian thực của tác vụ. |
+| `/metrics` | GET | **100%** | Prometheus Metrics Exporter (text/plain 0.0.4) cho Grafana/Datadog. |
+| `/health` | GET | **100%** | Liveness Probe kiểm tra tiến trình máy chủ còn hoạt động (`status: ok`). |
+| `/ready` | GET | **100%** | Readiness Probe kiểm tra SQLite DB, session pool, và active models. |
 
 ---
 
@@ -42,10 +52,15 @@ Tài liệu này xác định chi tiết ma trận tương thích giữa Dezuxk 
 | **Finish Reason** | `"stop"`, `"tool_calls"`, `"length"` | Trả về `"tool_calls"` khi có lệnh gọi tool, `"stop"` khi hoàn thành |
 | **Tool Calling Stream** | Delta chứa `tool_calls` array kèm `index`, `id`, `function` | Lọc sạch thẻ XML rò rỉ, phát chunk `tool_calls` chuẩn |
 | **Usage Statistics** | `prompt_tokens`, `completion_tokens`, `total_tokens` | Tính toán chính xác theo token counter |
-| **Error Format** | `{"error": {"message": ..., "type": ..., "code": ...}}` | Trả về đúng HTTP status code và payload chuẩn OpenAI SDK |
+| **Error Format** | `{"error": {"message": ..., "type": ..., "code": ...}}` | Trả về đúng HTTP status code (400, 401, 403, 429, 503) và payload chuẩn OpenAI SDK |
+| **Retry-After Header** | Header `Retry-After: <seconds>` trên HTTP 429 | Tính toán động chính xác số giây cần chờ |
+| **Idempotency** | Header `Idempotency-Key` | Tránh duplicate jobs khi client gửi lại request |
+| **Trace Propagation** | Headers `X-Request-ID`, `X-Trace-ID` | Theo vết toàn trình từ client qua gateway đến model |
 
 ---
 
 ## 4. Documented Compatibility Fallbacks
 
 - **OpenAI Codex CLI Fallback**: Khi `Accept` header chứa `text/event-stream` hoặc `User-Agent` chứa `codex`, gateway tự động kích hoạt chế độ streaming event translator tương thích chuẩn Responses API.
+- **Malformed Tool Arguments Repair**: Gateway tự động sửa cú pháp JSON bị lỗi từ mô hình (loại bỏ markdown fence, sửa trailing comma, đóng ngoặc bị cắt ngắn) trước khi chuyển sang lớp thực thi công cụ.
+

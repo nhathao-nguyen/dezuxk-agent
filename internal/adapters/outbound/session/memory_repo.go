@@ -39,12 +39,30 @@ type MemorySessionRepository struct {
 	alerts          []domain.SessionAlert
 	coolingDuration time.Duration
 	alertDispatcher ports.AlertDispatcher
+	strategy        ports.AccountSelectionStrategy
 }
 
 func (r *MemorySessionRepository) SetAlertDispatcher(d ports.AlertDispatcher) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.alertDispatcher = d
+}
+
+// SetSelectionStrategy thiết lập chiến lược lựa chọn tài khoản
+func (r *MemorySessionRepository) SetSelectionStrategy(s ports.AccountSelectionStrategy) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.strategy = s
+}
+
+// GetSelectionStrategy lấy chiến lược lựa chọn tài khoản hiện tại
+func (r *MemorySessionRepository) GetSelectionStrategy() ports.AccountSelectionStrategy {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.strategy == nil {
+		return NewWeightedHealthScoreStrategy()
+	}
+	return r.strategy
 }
 
 func NewMemorySessionRepository(refresher ports.DerivedSecretRefresher) *MemorySessionRepository {
@@ -55,6 +73,7 @@ func NewMemorySessionRepository(refresher ports.DerivedSecretRefresher) *MemoryS
 		refresher:       refresher,
 		alerts:          make([]domain.SessionAlert, 0),
 		coolingDuration: rateLimitCooldown,
+		strategy:        NewWeightedHealthScoreStrategy(),
 	}
 }
 
@@ -152,26 +171,13 @@ func (r *MemorySessionRepository) GetAvailable(ctx context.Context, service doma
 		var paused domain.ErrorClass
 		n := len(r.order)
 
-		// Thuật toán Weighted Least-Connections + Round-Robin tie-breaking:
-		// Chọn tài khoản khả dụng có số in-flight requests thấp nhất để cân bằng tải đều.
-		var bestAcc *domain.ManagedAccount
-		var bestIdx int = -1
-		var minInFlight int64 = 1<<62 - 1
-
+		// Thu thập tất cả các tài khoản khả dụng
+		var candidates []*domain.ManagedAccount
 		for i := 0; i < n; i++ {
 			idx := (r.cursor + i) % n
 			acc := r.accounts[r.order[idx]]
 			if r.usable(acc, service, minCredits) {
-				inFlight := acc.InFlightReqs
-				if inFlight < minInFlight {
-					minInFlight = inFlight
-					bestAcc = acc
-					bestIdx = idx
-					if inFlight == 0 {
-						// Nếu tài khoản hoàn toàn rảnh rỗi (0 in-flight), chọn ngay theo Round-Robin
-						break
-					}
-				}
+				candidates = append(candidates, acc)
 			}
 			if acc != nil && acc.ServiceState(service) == domain.StateRefreshing {
 				if flight, ok := r.refreshing[refreshKey{acc.ID, service}]; ok {
@@ -183,11 +189,18 @@ func (r *MemorySessionRepository) GetAvailable(ctx context.Context, service doma
 			}
 		}
 
-		if bestAcc != nil {
-			bestAcc.InFlightReqs++
-			r.cursor = (bestIdx + 1) % n
-			r.mu.Unlock()
-			return bestAcc, nil
+		if len(candidates) > 0 {
+			strat := r.strategy
+			if strat == nil {
+				strat = NewWeightedHealthScoreStrategy()
+			}
+			bestAcc, err := strat.Select(ctx, candidates)
+			if err == nil && bestAcc != nil {
+				bestAcc.InFlightReqs++
+				r.cursor = (r.cursor + 1) % n
+				r.mu.Unlock()
+				return bestAcc, nil
+			}
 		}
 		r.mu.Unlock()
 
@@ -218,17 +231,33 @@ func (r *MemorySessionRepository) Release(account *domain.ManagedAccount, err er
 	if account.InFlightReqs > 0 {
 		account.InFlightReqs--
 	}
-	class, service, ok := domain.ClassifiedFailure(err)
-	if !ok {
+
+	if err == nil {
+		account.RecordSuccess()
 		return
 	}
 
+	class, service, ok := domain.ClassifiedFailure(err)
+	if !ok {
+		account.RecordFailure(domain.ErrorClass(""), 500)
+		return
+	}
+
+	statusCode := 500
+	if class == domain.ClassRateLimited {
+		statusCode = http.StatusTooManyRequests
+	} else if class == domain.ClassExpired || class == domain.ClassUnauthenticated {
+		statusCode = http.StatusUnauthorized
+	} else if class == domain.ClassUpstreamUnavailable {
+		statusCode = http.StatusServiceUnavailable
+	}
+	account.RecordFailure(class, statusCode)
+
 	if (class == domain.ClassRateLimited || class == domain.ClassUpstreamUnavailable) && service != "" {
-		cooldown := r.coolingDuration
-		if cooldown <= 0 {
-			cooldown = rateLimitCooldown
-		}
-		account.CoolService(service, time.Now().Add(cooldown), class)
+		dynamicCooldown := account.GetDynamicCooldown(r.coolingDuration)
+		cdUntil := time.Now().Add(dynamicCooldown)
+		account.CoolService(service, cdUntil, class)
+		account.SetCooldown(cdUntil)
 
 		// Ghi nhận cảnh báo Proxy khi gặp lỗi kết nối và tài khoản có cấu hình proxy
 		if account.GetProxy() != "" && class == domain.ClassUpstreamUnavailable {
@@ -247,6 +276,7 @@ func (r *MemorySessionRepository) Release(account *domain.ManagedAccount, err er
 	// Ghi nhận cảnh báo khi session hết hạn hoặc bị từ chối xác thực (401/403/Expired)
 	if class == domain.ClassExpired || class == domain.ClassUnauthenticated {
 		account.IsHealthy = false
+		account.HealthStatus = domain.HealthStatusAuthExpired
 		r.addAlertLocked(domain.SessionAlert{
 			AccountID:      account.ID,
 			Service:        service,

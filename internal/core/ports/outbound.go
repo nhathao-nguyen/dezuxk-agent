@@ -39,6 +39,18 @@ type SessionRepository interface {
 	ClearAlerts(accountID string)
 }
 
+// AccountSelectionStrategy định nghĩa thuật toán lựa chọn tài khoản từ danh sách ứng viên khả dụng
+type AccountSelectionStrategy interface {
+	Name() string
+	Select(ctx context.Context, candidates []*domain.ManagedAccount) (*domain.ManagedAccount, error)
+}
+
+// SessionSelectionConfigurable cho phép cấu hình chiến lược lựa chọn tài khoản cho SessionRepository
+type SessionSelectionConfigurable interface {
+	SetSelectionStrategy(strategy AccountSelectionStrategy)
+	GetSelectionStrategy() AccountSelectionStrategy
+}
+
 // SessionAlertNotifier cho phép đăng ký bộ phát cảnh báo Webhook cho Session Repository
 type SessionAlertNotifier interface {
 	SetAlertDispatcher(dispatcher AlertDispatcher)

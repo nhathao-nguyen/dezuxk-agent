@@ -497,6 +497,9 @@ func (c *Config) Validate() error {
 	}
 
 	if c.IsProduction() {
+		if strings.TrimSpace(c.Server.APIKey) == "" {
+			return errors.New("server.api_key bắt buộc phải được cấu hình trong môi trường production")
+		}
 		if strings.TrimSpace(c.Security.MasterKey) == "" {
 			return errors.New("security.master_key bắt buộc phải được cấu hình trong môi trường production")
 		}
@@ -506,6 +509,11 @@ func (c *Config) Validate() error {
 			}
 			if strings.TrimSpace(c.Admin.SessionToken) == "" || c.Admin.SessionToken == "dezuxk_admin_token" || c.Admin.SessionToken == "dezuxk_secure_admin_session_token_2026" {
 				return errors.New("admin.session_token không được để trống hoặc dùng token mặc định trong môi trường production")
+			}
+		}
+		for _, origin := range c.Server.AllowedOrigins {
+			if strings.TrimSpace(origin) == "*" {
+				return errors.New("server.allowed_origins không được chứa wildcard '*' khi chạy trong môi trường production")
 			}
 		}
 	}

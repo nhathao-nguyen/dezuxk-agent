@@ -171,15 +171,15 @@ func (p *PolicyEngine) ExecuteTool(ctx context.Context, toolName string, argsJSO
 		return "", fmt.Errorf("%w: tenant %q đạt giới hạn %d tác vụ đồng thời", ErrConcurrencyLimit, identity.TenantID, identity.MaxConcurrentRuns)
 	}
 
-	// 4. Áp dụng giới hạn thời gian chạy tối đa (Runtime Timeout)
-	timeout := identity.MaxToolRuntime
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
+	// 4. Chuẩn hóa và tự động sửa các lỗi JSON tham số nếu có
+	argsJSON = RepairJSONArguments(argsJSON)
+
+	// 5. Áp dụng giới hạn thời gian chạy tối đa theo loại công cụ (Per-Tool Timeout)
+	timeout := p.resolveToolTimeout(toolName, identity.MaxToolRuntime)
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// 5. Thực thi công cụ
+	// 6. Thực thi công cụ
 	output, err := targetTool.Execute(execCtx, argsJSON)
 	if err != nil {
 		if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
@@ -189,6 +189,24 @@ func (p *PolicyEngine) ExecuteTool(ctx context.Context, toolName string, argsJSO
 	}
 
 	return output, nil
+}
+
+func (p *PolicyEngine) resolveToolTimeout(toolName string, tenantMax time.Duration) time.Duration {
+	if tenantMax > 0 {
+		return tenantMax
+	}
+	switch {
+	case toolName == "run_command":
+		return 120 * time.Second
+	case strings.HasPrefix(toolName, "browser_"):
+		return 45 * time.Second
+	case strings.HasPrefix(toolName, "read_") || strings.HasPrefix(toolName, "write_") || toolName == "replace_file_content":
+		return 15 * time.Second
+	case toolName == "grep_code" || strings.HasPrefix(toolName, "memory_"):
+		return 30 * time.Second
+	default:
+		return 60 * time.Second
+	}
 }
 
 func (p *PolicyEngine) getTenantSemaphore(tenantID string, maxRuns int) chan struct{} {
