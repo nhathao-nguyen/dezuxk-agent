@@ -1,6 +1,7 @@
 package google_test
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -357,7 +358,7 @@ func TestReadGeminiStreamWithThinking(t *testing.T) {
 	}
 
 	reply, err := google.ReadGeminiStreamWithThinking(
-		nil,
+		context.Background(),
 		strings.NewReader(streamData),
 		nil,
 		onContent,

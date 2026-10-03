@@ -262,6 +262,9 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 		r.order = append(r.order, id)
 		r.promote(acc)
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 
 	// Nạp các alert gần đây
 	alertRows, err := r.db.Query(`
@@ -277,6 +280,9 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 				a.Service = domain.ServiceKind(s)
 				r.alerts = append(r.alerts, a)
 			}
+		}
+		if err := alertRows.Err(); err != nil {
+			return err
 		}
 	}
 

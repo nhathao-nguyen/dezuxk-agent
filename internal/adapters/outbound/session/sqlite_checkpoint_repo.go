@@ -208,6 +208,9 @@ func (r *SqliteCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 		_ = json.Unmarshal([]byte(planJSON), &cp.PlanSnapshot)
 		list = append(list, &cp)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lỗi đọc dòng checkpoints: %w", err)
+	}
 
 	return list, nil
 }

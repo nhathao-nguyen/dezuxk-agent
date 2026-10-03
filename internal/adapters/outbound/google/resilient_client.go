@@ -145,14 +145,10 @@ func (c *ResilientUpstreamClient) DoRequest(
 
 	maxRetries := c.cfg.MaxRetries
 	var lastErr error
-	var lastResp *http.Response
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		// Kiểm tra context cancellation
 		if ctx.Err() != nil {
-			if lastResp != nil && lastResp.Body != nil {
-				_ = lastResp.Body.Close()
-			}
 			return nil, ctx.Err()
 		}
 
@@ -230,7 +226,7 @@ func (c *ResilientUpstreamClient) DoRequest(
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return lastResp, nil
+	return nil, nil
 }
 
 // canRetryBudget kiểm tra xem tỷ lệ retry hiện tại có vượt quá ngân sách cho phép không

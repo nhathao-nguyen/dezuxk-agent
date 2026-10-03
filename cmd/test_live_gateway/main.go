@@ -314,6 +314,10 @@ func (r *TestRunner) testChatStreaming() {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		r.logFail("Chat Stream", fmt.Errorf("stream scan error: %w", err))
+		return
+	}
 
 	details := fmt.Sprintf("TTFT (First Token): %d ms | Chunks: %d | Nội dung: %s",
 		firstTokenLatency, chunksReceived, strings.ReplaceAll(sb.String(), "\n", " "))

@@ -251,7 +251,11 @@ func GenerateIsolatedChatCacheKey(p IsolatedChatCacheKeyParams) string {
 	if kid == "" {
 		kid = "default"
 	}
-	b.WriteString("tid:" + tid + "|kid:" + kid + "|")
+	b.WriteString("tid:")
+	b.WriteString(tid)
+	b.WriteString("|kid:")
+	b.WriteString(kid)
+	b.WriteString("|")
 	b.WriteString(strings.TrimSpace(p.Model))
 	b.WriteString("|")
 	b.WriteString(strings.TrimSpace(p.SystemPrompt))
@@ -261,7 +265,9 @@ func GenerateIsolatedChatCacheKey(p IsolatedChatCacheKeyParams) string {
 	b.WriteString(fmt.Sprintf("th:%v|gr:%v|ci:%v|", p.Thinking, p.Grounding, p.CodeInterpreter))
 	if p.ResponseFormat != nil {
 		rfJSON, _ := json.Marshal(p.ResponseFormat)
-		b.WriteString("rf:" + string(rfJSON) + "|")
+		b.WriteString("rf:")
+		b.Write(rfJSON)
+		b.WriteString("|")
 	}
 
 	for _, m := range p.Messages {

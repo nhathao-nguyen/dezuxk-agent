@@ -60,6 +60,9 @@ func getTableColumns(db *sql.DB, tableName string) (map[string]bool, error) {
 		}
 		cols[strings.ToLower(name)] = true
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return cols, nil
 }
 
@@ -608,6 +611,9 @@ func (r *SqliteAgentRunRepository) GetEvents(ctx context.Context, runID string, 
 		}
 		events = append(events, ev)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
 
@@ -632,6 +638,9 @@ func (r *SqliteAgentRunRepository) GetEventsForTenant(ctx context.Context, tenan
 			return nil, err
 		}
 		events = append(events, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return events, nil
 }

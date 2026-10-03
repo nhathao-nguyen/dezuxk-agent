@@ -321,6 +321,9 @@ func (r *SqliteMemoryRepository) ListAll(ctx context.Context) ([]domain.Archival
 		_ = json.Unmarshal([]byte(embedJSON), &item.Embedding)
 		list = append(list, item)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	return list, nil
 }
@@ -421,6 +424,9 @@ func (r *SqliteMemoryRepository) SearchFTS(ctx context.Context, query string, to
 			MatchType: "fts",
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lỗi đọc kết quả FTS5: %w", err)
+	}
 
 	return results, nil
 }
@@ -476,6 +482,9 @@ func (r *SqliteMemoryRepository) searchKeywordFallback(ctx context.Context, quer
 			Score:     1.0,
 			MatchType: "fts",
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("lỗi đọc kết quả fallback: %w", err)
 	}
 	return results, nil
 }

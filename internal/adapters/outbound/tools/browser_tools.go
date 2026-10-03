@@ -160,12 +160,10 @@ func (c *BrowserCDPController) executeCDPCommandWithSession(ctx context.Context,
 			}
 		}
 
-		if readErr != nil && attempt == 0 {
+		if attempt == 0 {
 			continue
 		}
-		if readErr != nil {
-			return nil, fmt.Errorf("lỗi đọc phản hồi từ CDP: %w", readErr)
-		}
+		return nil, fmt.Errorf("lỗi đọc phản hồi từ CDP: %w", readErr)
 	}
 
 	return nil, fmt.Errorf("không thể thực thi lệnh CDP sau khi thử kết nối lại")

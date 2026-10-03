@@ -192,7 +192,7 @@ func TestResponseCache_Concurrency(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			k := fmt.Sprintf("k-%d", id%10)
-			cache.Set(k, []byte(fmt.Sprintf("val-%d", id)), "text/plain", nil)
+			cache.Set(k, fmt.Appendf(nil, "val-%d", id), "text/plain", nil)
 			_, _ = cache.Get(k)
 		}(i)
 	}
@@ -211,7 +211,7 @@ func BenchmarkGenerateChatCacheKey(b *testing.B) {
 		{Role: "user", Content: "Write an in-memory response cache in Go."},
 	}
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_ = services.GenerateChatCacheKey("gemini-2.5-flash", messages, 0.7, "system prompt", false, false, false)
 	}
 }

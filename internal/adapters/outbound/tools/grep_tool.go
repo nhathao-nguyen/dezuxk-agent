@@ -250,7 +250,7 @@ func executeGoRegexSearch(searchPath string, args GrepCodeArgs, maxResults int) 
 			}
 			lineNum++
 		}
-		return nil
+		return scanner.Err()
 	})
 
 	if err != nil && err != filepath.SkipAll {

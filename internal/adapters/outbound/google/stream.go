@@ -80,13 +80,17 @@ func FormatProductComparisonTable(text string) string {
 
 		var sb strings.Builder
 		if title != "" {
-			sb.WriteString("### " + title + "\n\n")
+			sb.WriteString("### ")
+			sb.WriteString(title)
+			sb.WriteString("\n\n")
 		}
 
 		// Header
 		sb.WriteString("| Thông số |")
 		for _, pn := range productNames {
-			sb.WriteString(" " + pn + " |")
+			sb.WriteString(" ")
+			sb.WriteString(pn)
+			sb.WriteString(" |")
 		}
 		sb.WriteString("\n| :--- |")
 		for range productNames {
@@ -99,7 +103,9 @@ func FormatProductComparisonTable(text string) string {
 			if attr == "display_name" || attr == "product_id" || attr == "name" || attr == "title" {
 				continue
 			}
-			sb.WriteString("| **" + attr + "** |")
+			sb.WriteString("| **")
+			sb.WriteString(attr)
+			sb.WriteString("** |")
 			for _, p := range products {
 				valStr := ""
 				if val, exists := p[attr]; exists && val != nil {
@@ -107,7 +113,9 @@ func FormatProductComparisonTable(text string) string {
 					valStr = strings.ReplaceAll(valStr, "\n", " ")
 					valStr = strings.ReplaceAll(valStr, "|", "\\|")
 				}
-				sb.WriteString(" " + valStr + " |")
+				sb.WriteString(" ")
+				sb.WriteString(valStr)
+				sb.WriteString(" |")
 			}
 			sb.WriteString("\n")
 		}
