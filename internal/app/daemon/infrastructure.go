@@ -45,6 +45,8 @@ type Infrastructure struct {
 	SqliteDB        *sql.DB
 	SqliteRepo      *session.SqliteSessionRepository
 	AlertDispatcher ports.AlertDispatcher
+	ModelCatalog    ports.ModelCatalogRepository
+	TenantSettings  ports.TenantRuntimeSettingsRepository
 }
 
 // Close giải phóng tài nguyên hạ tầng theo đúng thứ tự an toàn
@@ -171,6 +173,9 @@ func BuildInfrastructure(ctx context.Context, cfg *config.Config, tokenExtractor
 			return nil, fmt.Errorf("khởi tạo PostgresMediaMetadataRepository thất bại: %w", err)
 		}
 
+		infra.ModelCatalog = pgstorage.NewPostgresModelCatalogRepository(pool)
+		infra.TenantSettings = pgstorage.NewPostgresTenantRuntimeSettingsRepository(pool)
+
 		log.Printf("[Persistence] Đã kích hoạt PostgreSQL Adapter thật sự tại %s/%s (MinConns=%d, MaxConns=%d)",
 			cfg.Storage.Postgres.Host, cfg.Storage.Postgres.DBName,
 			cfg.Storage.Postgres.GetMinConns(), cfg.Storage.Postgres.GetMaxConns())
@@ -226,6 +231,13 @@ func BuildInfrastructure(ctx context.Context, cfg *config.Config, tokenExtractor
 			infra.Memory = session.NewMemoryMemoryRepository()
 			infra.Runs = session.NewMemoryAgentRunRepository()
 		}
+	}
+
+	if infra.ModelCatalog == nil {
+		infra.ModelCatalog = session.NewMemoryModelCatalogRepository()
+	}
+	if infra.TenantSettings == nil {
+		infra.TenantSettings = session.NewMemoryTenantRuntimeSettingsRepository()
 	}
 
 	if sa, ok := infra.Sessions.(ports.SessionAlertNotifier); ok && infra.AlertDispatcher != nil {

@@ -20,19 +20,21 @@ import (
 )
 
 type ChatService struct {
-	modelRegistry    *domain.ModelRegistry
-	sessionRepo      ports.SessionRepository
-	upstream         ports.UpstreamGoogleTransport
-	wire             ports.WireCodec
-	metrics          *domain.ContractMetrics
-	storage          ports.MediaRepository
-	visionResolver   *VisionResolver
-	tokenCounter     *TokenCounter
-	failoverConfig   config.FailoverConfig
-	leaseWaitTimeout time.Duration
-	rpcRegistry      *domain.RpcRegistry
-	keyUseCase       ports.KeyUseCase
-	chatDefaults     config.ChatDefaultsConfig
+	modelRegistry        *domain.ModelRegistry
+	sessionRepo          ports.SessionRepository
+	upstream             ports.UpstreamGoogleTransport
+	wire                 ports.WireCodec
+	metrics              *domain.ContractMetrics
+	storage              ports.MediaRepository
+	visionResolver       *VisionResolver
+	tokenCounter         *TokenCounter
+	failoverConfig       config.FailoverConfig
+	leaseWaitTimeout     time.Duration
+	rpcRegistry          *domain.RpcRegistry
+	keyUseCase           ports.KeyUseCase
+	chatDefaults         config.ChatDefaultsConfig
+	tenantSettingsRepo   ports.TenantRuntimeSettingsRepository
+	modelSelectionConfig config.ModelSelectionConfig
 }
 
 func NewChatService(
@@ -92,19 +94,27 @@ func (s *ChatService) SetChatDefaults(cd config.ChatDefaultsConfig) {
 	s.chatDefaults = cd
 }
 
+func (s *ChatService) SetTenantSettingsRepository(repo ports.TenantRuntimeSettingsRepository) {
+	s.tenantSettingsRepo = repo
+}
+
+func (s *ChatService) SetModelSelectionConfig(cfg config.ModelSelectionConfig) {
+	s.modelSelectionConfig = cfg
+}
+
 func (s *ChatService) ExecuteChatStream(
 	ctx context.Context,
 	req *domain.OpenAIChatRequest,
 	streamWriter io.Writer,
 	flusher func(),
 ) error {
-	modelDesc, err := s.prepareModel(req)
+	modelDesc, err := s.prepareModel(ctx, req)
 	if err != nil {
 		return err
 	}
 	var flushedToClient bool
-	return s.runGeminiFailover(ctx, func(account *domain.ManagedAccount) (bool, error) {
-		callErr := s.streamRound(ctx, account, modelDesc, req, streamWriter, flusher, &flushedToClient)
+	return s.runGeminiFailover(ctx, modelDesc, func(account *domain.ManagedAccount, activeModel *domain.ModelDescriptor) (bool, error) {
+		callErr := s.streamRound(ctx, account, activeModel, req, streamWriter, flusher, &flushedToClient)
 		return !flushedToClient, callErr
 	})
 }
@@ -113,14 +123,14 @@ func (s *ChatService) ExecuteChatSync(
 	ctx context.Context,
 	req *domain.OpenAIChatRequest,
 ) (*domain.OpenAIChatResponse, error) {
-	modelDesc, err := s.prepareModel(req)
+	modelDesc, err := s.prepareModel(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	var resp *domain.OpenAIChatResponse
-	err = s.runGeminiFailover(ctx, func(account *domain.ManagedAccount) (bool, error) {
+	err = s.runGeminiFailover(ctx, modelDesc, func(account *domain.ManagedAccount, activeModel *domain.ModelDescriptor) (bool, error) {
 		var callErr error
-		resp, callErr = s.syncRound(ctx, account, modelDesc, req)
+		resp, callErr = s.syncRound(ctx, account, activeModel, req)
 		return true, callErr
 	})
 	if err != nil {
@@ -129,23 +139,52 @@ func (s *ChatService) ExecuteChatSync(
 	return resp, nil
 }
 
-func (s *ChatService) prepareModel(req *domain.OpenAIChatRequest) (*domain.ModelDescriptor, error) {
+func (s *ChatService) prepareModel(ctx context.Context, req *domain.OpenAIChatRequest) (*domain.ModelDescriptor, error) {
 	if req == nil || len(req.Messages) == 0 {
 		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "thiếu hội thoại")
 	}
 
-	desc, ok := s.modelRegistry.ResolveGeminiModel(req.Model)
+	// Phân giải cài đặt riêng của tenant nếu có
+	var tenantSettings *domain.TenantRuntimeSettings
+	if s.tenantSettingsRepo != nil {
+		if id, ok := domain.TenantIdentityFromContext(ctx); ok && strings.TrimSpace(id.TenantID) != "" {
+			if ts, err := s.tenantSettingsRepo.Get(ctx, id.TenantID); err == nil && ts != nil {
+				tenantSettings = ts
+			}
+		}
+	}
+
+	targetModel := strings.TrimSpace(req.Model)
+	if targetModel == "" && tenantSettings != nil && tenantSettings.PreferredModel != "" {
+		targetModel = tenantSettings.PreferredModel
+	}
+
+	pref := domain.PrefBalanced
+	if tenantSettings != nil && tenantSettings.ModelPolicy != "" {
+		pref = domain.ModelPreference(tenantSettings.ModelPolicy)
+	} else if s.modelSelectionConfig.GetDefaultPolicy() != "" {
+		pref = domain.ModelPreference(s.modelSelectionConfig.GetDefaultPolicy())
+	}
+
+	desc, ok := s.modelRegistry.ResolveModel(targetModel, domain.ModelRequirement{
+		Capability: domain.CapChat,
+		Preference: pref,
+	})
 	if !ok {
 		return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "không có mô hình Gemini khả dụng")
+	}
+
+	if s.metrics != nil {
+		s.metrics.IncRuntimeModelSelection(string(pref))
 	}
 
 	req.Model = desc.ID
 	return &desc, nil
 }
 
-type failoverAction func(account *domain.ManagedAccount) (canRetry bool, err error)
+type failoverAction func(account *domain.ManagedAccount, activeModel *domain.ModelDescriptor) (canRetry bool, err error)
 
-func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverAction) error {
+func (s *ChatService) runGeminiFailover(ctx context.Context, initialModel *domain.ModelDescriptor, action failoverAction) error {
 	maxAttempts := s.failoverConfig.GetMaxAttempts()
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -153,13 +192,51 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 
 	triedAccounts := make(map[string]struct{})
 	var lastErr error
+	currentModel := initialModel
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		account, err := s.sessionRepo.GetAvailable(ctx, domain.ServiceGemini, 0)
+		targetModelID := ""
+		if currentModel != nil {
+			targetModelID = currentModel.ID
+		}
+
+		account, err := s.sessionRepo.GetAvailableForModel(ctx, domain.ServiceGemini, targetModelID, 0)
+		if err != nil {
+			// Kiểm tra xem tenant có cấu hình strict_model không
+			var strictModel bool
+			if s.tenantSettingsRepo != nil {
+				if id, ok := domain.TenantIdentityFromContext(ctx); ok && strings.TrimSpace(id.TenantID) != "" {
+					if ts, getErr := s.tenantSettingsRepo.Get(ctx, id.TenantID); getErr == nil && ts != nil {
+						strictModel = ts.StrictModel
+					}
+				}
+			}
+
+			// Nếu cho phép fallback và model ban đầu không có account khả dụng, tự động chọn model thay thế
+			if !strictModel && s.modelSelectionConfig.IsAllowFallback() && targetModelID != "" {
+				for _, cand := range s.modelRegistry.ListActive() {
+					if cand.ID != targetModelID && cand.HasCapability(domain.CapChat) {
+						fbAcc, fbErr := s.sessionRepo.GetAvailableForModel(ctx, domain.ServiceGemini, cand.ID, 0)
+						if fbErr == nil && fbAcc != nil {
+							if s.metrics != nil {
+								s.metrics.IncRuntimeModelFailover(targetModelID, cand.ID)
+							}
+							log.Printf("[MODEL FAILOVER] Mô hình %s không có tài khoản sẵn sàng, tự động chuyển sang mô hình %s", targetModelID, cand.ID)
+							candCopy := cand
+							currentModel = &candCopy
+							account = fbAcc
+							err = nil
+							break
+						}
+					}
+				}
+			}
+		}
+
 		if err != nil {
 			if lastErr != nil {
 				return domain.EnsureGateway(lastErr, domain.OpChatCompletions, domain.ServiceGemini)
@@ -230,7 +307,7 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 		var canRetry bool
 		callErr := session.RetryAfterRefresh(ctx, s.sessionRepo, account, domain.ServiceGemini, func() error {
 			var err error
-			canRetry, err = action(account)
+			canRetry, err = action(account, currentModel)
 			return err
 		})
 

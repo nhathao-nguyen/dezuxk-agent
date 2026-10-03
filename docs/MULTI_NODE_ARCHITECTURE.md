@@ -133,3 +133,16 @@ Các tác vụ nền chỉ được phép chạy duy nhất trên 1 node trong t
 - `cleanup-jobs`: Dọn dẹp tài nguyên hết hạn.
 
 Bộ điều phối `leader.Coordinator` tự động tham gia bầu cử qua Redis Locker. Khi Node Leader gặp sự cố hoặc tắt, các Node còn lại sẽ tự động phát hiện hết hạn TTL và tiếp quản vai trò Leader trong vòng 1-2 giây.
+
+---
+
+## 6. Danh Mục Mô Hình Động & Lan Truyền Cụm (Dynamic Model Discovery & Propagation)
+
+### 6.1. Quy trình Phát hiện và Lưu trữ
+1. **Leader-Only Upstream Discovery**: Leader Node kích hoạt chu kỳ gọi Google discovery RPC (`otAQ7b`) trên các tài khoản Google đã đăng nhập.
+2. **PostgreSQL Authority**: Các Model Descriptor phát hiện được chuẩn hóa (Canonical Gateway ID, Display Name, Tier, Capabilities) và upsert vào bảng `runtime_models` và `account_models`.
+3. **Redis EventBus Fan-Out**: Node phát hiện publish sự kiện vào topic `dezuxk:events:model_catalog_changed`.
+4. **Follower Invalidation**: Các Node Gateway B/C nhận được event sẽ nạp lại danh mục tức thì từ PostgreSQL vào bộ nhớ RAM cục bộ (`ModelRegistry`).
+5. **Periodic Reconciliation & Jitter**: Dự phòng trường hợp Redis rớt gói tin, chu kỳ hòa giải nền (với Jitter ngẫu nhiên) sẽ tự động đồng bộ đối soát trực tiếp từ PostgreSQL.
+6. **Graceful Stale Marking**: Model không còn xuất hiện upstream được đánh dấu `is_available = false` (stale/deprecated) thay vì xóa cứng, bảo toàn khả năng truy vết cho các Agent runs trước đó.
+

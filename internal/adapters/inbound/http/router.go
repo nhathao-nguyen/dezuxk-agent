@@ -68,16 +68,19 @@ type RouterDependencies struct {
 	AlertDispatcher ports.AlertDispatcher
 	ResponseCache   *services.ResponseCache
 
-	AgentRunner        ports.AgentRunner
-	GraphRunner        ports.GraphWorkflowRunner
-	ToolRegistry       ports.ToolRegistry
-	CheckpointRepo     ports.CheckpointRepository
-	MemoryService      ports.MemoryService
-	SubagentSupervisor ports.SubagentSupervisor
-	AgentJobService    ports.AgentJobService
-	AgentRunRepo       ports.AgentRunRepository
-	ReadinessManager   *ReadinessManager
-	ClusterClient      ports.DistributedClusterClient
+	AgentRunner           ports.AgentRunner
+	GraphRunner           ports.GraphWorkflowRunner
+	ToolRegistry          ports.ToolRegistry
+	CheckpointRepo        ports.CheckpointRepository
+	MemoryService         ports.MemoryService
+	SubagentSupervisor    ports.SubagentSupervisor
+	AgentJobService       ports.AgentJobService
+	AgentRunRepo          ports.AgentRunRepository
+	ReadinessManager      *ReadinessManager
+	ClusterClient         ports.DistributedClusterClient
+	ModelDiscoveryService *services.ModelDiscoveryService
+	ModelCatalogRepo      ports.ModelCatalogRepository
+	TenantSettingsRepo    ports.TenantRuntimeSettingsRepository
 }
 
 func randBytes(n int) []byte {
@@ -270,6 +273,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 
 		isTestMode := os.Getenv("DEZUXK_TEST_MODE") == "true" && (deps.Config == nil || !deps.Config.IsProduction())
+		isProd := deps.Config != nil && deps.Config.IsProduction()
 
 		if deps.ModelRegistry == nil || deps.ModelRegistry.Count() == 0 {
 			if isTestMode {
@@ -277,6 +281,20 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			} else {
 				checks["models"] = "no active models registered"
 				isReady = false
+			}
+		} else if isProd {
+			hasChatModel := false
+			for _, m := range deps.ModelRegistry.List() {
+				if m.HasCapability(domain.CapChat) {
+					hasChatModel = true
+					break
+				}
+			}
+			if !hasChatModel {
+				checks["models"] = "no active chat models registered"
+				isReady = false
+			} else {
+				checks["models"] = "ok"
 			}
 		} else {
 			checks["models"] = "ok"
@@ -470,6 +488,20 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 		ov.Get("/", adminHandler.HandleOverview)
 	})
+
+	// Admin Runtime Management APIs (Requirement 29 & 65)
+	runtimeAdminHandler := NewAdminRuntimeHandler(deps.ModelDiscoveryService, deps.ModelCatalogRepo, deps.SessionRepo, deps.ModelRegistry, deps.Metrics)
+	mountRuntimeAdmin := func(rt chi.Router) {
+		if adminCfg != nil && adminCfg.IsEnabled() {
+			rt.Use(AdminAuthMiddleware(*adminCfg))
+		}
+		rt.Post("/models/refresh", runtimeAdminHandler.HandleRefresh)
+		rt.Get("/models", runtimeAdminHandler.HandleListRuntimeModels)
+		rt.Get("/accounts", runtimeAdminHandler.HandleListRuntimeAccounts)
+		rt.Get("/catalog/status", runtimeAdminHandler.HandleCatalogStatus)
+	}
+	r.Route("/admin/runtime", mountRuntimeAdmin)
+	r.Route("/v1/admin/runtime", mountRuntimeAdmin)
 
 	// 5. Mount /v1 Routes - Khóa chặt chỉ phục vụ các endpoint đã hoàn tất hợp đồng Facade
 	r.Route("/v1", func(v1 chi.Router) {

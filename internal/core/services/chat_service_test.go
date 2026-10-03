@@ -21,6 +21,9 @@ type mockSessionRepo struct {
 }
 
 func (m *mockSessionRepo) GetAvailable(ctx context.Context, service domain.ServiceKind, minCredits int) (*domain.ManagedAccount, error) {
+	return m.GetAvailableForModel(ctx, service, "", minCredits)
+}
+func (m *mockSessionRepo) GetAvailableForModel(ctx context.Context, service domain.ServiceKind, modelID string, minCredits int) (*domain.ManagedAccount, error) {
 	return &domain.ManagedAccount{
 		ID:           "test",
 		GeminiSNlM0e: "fake-sn",

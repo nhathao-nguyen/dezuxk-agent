@@ -1,5 +1,10 @@
-# Danh mục mô hình Google Gemini (Động hóa qua YAML)
-# Khởi động sạch: Chỉ khi tài khoản đăng nhập có quyền dịch vụ tương ứng, các mô hình này mới được kích hoạt.
+# =========================================================================
+# DEV / TEST / COMPATIBILITY SEED ONLY
+# NOT PRODUCTION SOURCE OF TRUTH
+# In production, models are discovered dynamically from upstream Google RPCs
+# and persisted to PostgreSQL. This file serves solely as a local development
+# fixture or emergency offline compatibility seed.
+# =========================================================================
 
 gemini_models:
   - id: "gemini-3.5-flash-lite"

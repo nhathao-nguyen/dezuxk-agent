@@ -31,11 +31,15 @@ func newMultiAccountRepo(accounts ...*domain.ManagedAccount) *multiAccountSessio
 }
 
 func (m *multiAccountSessionRepo) GetAvailable(ctx context.Context, service domain.ServiceKind, minCredits int) (*domain.ManagedAccount, error) {
+	return m.GetAvailableForModel(ctx, service, "", minCredits)
+}
+
+func (m *multiAccountSessionRepo) GetAvailableForModel(ctx context.Context, service domain.ServiceKind, modelID string, minCredits int) (*domain.ManagedAccount, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, acc := range m.accounts {
-		if acc.ServiceReady(service) {
+		if acc.ServiceReady(service) && (modelID == "" || acc.SupportsModel(modelID)) {
 			return acc, nil
 		}
 	}

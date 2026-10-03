@@ -91,6 +91,8 @@ func (cj *CookieJar) GetAll() map[string]string {
 // AccountHealthStatus biểu diễn 7 trạng thái chuẩn của tài khoản/session theo production-grade spec
 type AccountHealthStatus string
 
+type HealthStatus = AccountHealthStatus
+
 const (
 	HealthStatusHealthy        AccountHealthStatus = "healthy"
 	HealthStatusDegraded       AccountHealthStatus = "degraded"
@@ -125,6 +127,7 @@ type ManagedAccount struct {
 	LastSuccessAt       time.Time
 	LastFailureAt       time.Time
 	HealthScore         float64 // Điểm số từ 0.0 đến 1.0 (mặc định 1.0)
+	SupportedModels     []string
 
 	mu         sync.RWMutex
 	geminiGate serviceGate
@@ -396,4 +399,67 @@ type SessionAlert struct {
 	StatusCode     int         `json:"status_code,omitempty"`
 	ActionRequired string      `json:"action_required"`
 	CreatedAt      time.Time   `json:"created_at"`
+}
+
+// AccountModelEligibility ghi nhận quyền sử dụng và tính khả dụng của một model đối với tài khoản
+type AccountModelEligibility struct {
+	AccountID   string    `json:"account_id"`
+	ModelID     string    `json:"model_id"`
+	IsAvailable bool      `json:"is_available"`
+	IsEligible  bool      `json:"is_eligible"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
+}
+
+func (a *ManagedAccount) SetSupportedModels(models []string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.SupportedModels = make([]string, len(models))
+	copy(a.SupportedModels, models)
+}
+
+func (a *ManagedAccount) GetSupportedModels() []string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	res := make([]string, len(a.SupportedModels))
+	copy(res, a.SupportedModels)
+	return res
+}
+
+func (a *ManagedAccount) SupportsModel(modelID string) bool {
+	if a == nil {
+		return false
+	}
+	if modelID == "" {
+		return true
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	cleaned := strings.ToLower(strings.TrimSpace(modelID))
+
+	// 1. Nếu có danh sách SupportedModels rõ ràng
+	if len(a.SupportedModels) > 0 {
+		for _, m := range a.SupportedModels {
+			mClean := strings.ToLower(strings.TrimSpace(m))
+			if mClean == cleaned || CanonicalModelID(mClean, ServiceGemini) == cleaned {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 2. Nếu chưa có danh sách cụ thể, dựa trên Tier:
+	// Free (Tier 1): không hỗ trợ các model Pro (có tier >= 2 hoặc backend Pro)
+	if a.Tier <= 1 {
+		if strings.Contains(cleaned, "pro") {
+			return false
+		}
+	}
+	return true
 }

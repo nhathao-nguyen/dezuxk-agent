@@ -334,11 +334,71 @@ func (e *PrometheusMetricsExporter) ServeHTTP(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Dynamic Runtime Model Observability Metrics (Section 45)
+	sb.WriteString("# HELP runtime_model_catalog_size Total number of models registered in dynamic runtime catalog.\n")
+	sb.WriteString("# TYPE runtime_model_catalog_size gauge\n")
+	sb.WriteString(fmt.Sprintf("runtime_model_catalog_size %d\n", snap.RuntimeModelCatalogSize))
+
+	sb.WriteString("# HELP runtime_model_discovery_success_total Total successful model discovery cycles.\n")
+	sb.WriteString("# TYPE runtime_model_discovery_success_total counter\n")
+	sb.WriteString(fmt.Sprintf("runtime_model_discovery_success_total %d\n", snap.RuntimeModelDiscoverySuccess))
+
+	sb.WriteString("# HELP runtime_model_discovery_fail_total Total failed model discovery attempts.\n")
+	sb.WriteString("# TYPE runtime_model_discovery_fail_total counter\n")
+	sb.WriteString(fmt.Sprintf("runtime_model_discovery_fail_total %d\n", snap.RuntimeModelDiscoveryFail))
+
+	sb.WriteString("# HELP runtime_model_catalog_updates_total Total updates committed to dynamic model catalog.\n")
+	sb.WriteString("# TYPE runtime_model_catalog_updates_total counter\n")
+	sb.WriteString(fmt.Sprintf("runtime_model_catalog_updates_total %d\n", snap.RuntimeModelCatalogUpdates))
+
+	sb.WriteString("# HELP runtime_model_stale_total Total models marked stale.\n")
+	sb.WriteString("# TYPE runtime_model_stale_total counter\n")
+	sb.WriteString(fmt.Sprintf("runtime_model_stale_total %d\n", snap.RuntimeModelStale))
+
+	sb.WriteString("# HELP runtime_account_model_eligibility Number of eligible models per account.\n")
+	sb.WriteString("# TYPE runtime_account_model_eligibility gauge\n")
+	if len(snap.RuntimeAccountModelEligibility) == 0 {
+		sb.WriteString("runtime_account_model_eligibility{account_id=\"none\"} 0\n")
+	} else {
+		for _, accID := range sortedIntKeys(snap.RuntimeAccountModelEligibility) {
+			sb.WriteString(fmt.Sprintf("runtime_account_model_eligibility{account_id=%q} %d\n", accID, snap.RuntimeAccountModelEligibility[accID]))
+		}
+	}
+
+	sb.WriteString("# HELP runtime_model_selection_total Total model selections executed by policy.\n")
+	sb.WriteString("# TYPE runtime_model_selection_total counter\n")
+	if len(snap.RuntimeModelSelections) == 0 {
+		sb.WriteString("runtime_model_selection_total{policy=\"default\"} 0\n")
+	} else {
+		for _, p := range sortedKeys(snap.RuntimeModelSelections) {
+			sb.WriteString(fmt.Sprintf("runtime_model_selection_total{policy=%q} %d\n", p, snap.RuntimeModelSelections[p]))
+		}
+	}
+
+	sb.WriteString("# HELP runtime_model_failover_total Total model failovers performed.\n")
+	sb.WriteString("# TYPE runtime_model_failover_total counter\n")
+	if len(snap.RuntimeModelFailovers) == 0 {
+		sb.WriteString("runtime_model_failover_total{failover=\"fallback\"} 0\n")
+	} else {
+		for _, pair := range sortedKeys(snap.RuntimeModelFailovers) {
+			sb.WriteString(fmt.Sprintf("runtime_model_failover_total{failover=%q} %d\n", pair, snap.RuntimeModelFailovers[pair]))
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(sb.String()))
 }
 
 func sortedKeys(m map[string]uint64) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedIntKeys(m map[string]int64) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

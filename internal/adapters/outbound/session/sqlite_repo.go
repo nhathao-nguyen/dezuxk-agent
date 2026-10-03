@@ -422,6 +422,13 @@ func (r *SqliteSessionRepository) usable(acc *domain.ManagedAccount, service dom
 	if acc.Jar == nil || !acc.Jar.HasKey("__Secure-1PSID") {
 		return false
 	}
+	if acc.IsInCooldown() {
+		return false
+	}
+	st := acc.GetHealthStatus()
+	if st == domain.HealthStatusQuotaExhausted || st == domain.HealthStatusAuthExpired || st == domain.HealthStatusUnavailable {
+		return false
+	}
 	limit := r.maxInFlight
 	if limit <= 0 {
 		limit = DefaultMaxInFlightPerAccount
@@ -433,6 +440,10 @@ func (r *SqliteSessionRepository) usable(acc *domain.ManagedAccount, service dom
 }
 
 func (r *SqliteSessionRepository) GetAvailable(ctx context.Context, service domain.ServiceKind, minCredits int) (*domain.ManagedAccount, error) {
+	return r.GetAvailableForModel(ctx, service, "", minCredits)
+}
+
+func (r *SqliteSessionRepository) GetAvailableForModel(ctx context.Context, service domain.ServiceKind, modelID string, minCredits int) (*domain.ManagedAccount, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -447,12 +458,12 @@ func (r *SqliteSessionRepository) GetAvailable(ctx context.Context, service doma
 		var paused domain.ErrorClass
 		n := len(r.order)
 
-		// Thu thập tất cả các tài khoản khả dụng
+		// Thu thập tất cả các tài khoản khả dụng hỗ trợ mô hình yêu cầu
 		var candidates []*domain.ManagedAccount
 		for i := 0; i < n; i++ {
 			idx := (r.cursor + i) % n
 			acc := r.accounts[r.order[idx]]
-			if r.usable(acc, service, minCredits) {
+			if r.usable(acc, service, minCredits) && (modelID == "" || acc.SupportsModel(modelID)) {
 				candidates = append(candidates, acc)
 			}
 			if acc != nil && acc.ServiceState(service) == domain.StateRefreshing {

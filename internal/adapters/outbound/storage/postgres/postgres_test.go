@@ -291,3 +291,133 @@ func TestPostgres_MigrationConcurrency(t *testing.T) {
 		t.Fatalf("schema_migrations có sự trùng lặp hoặc rỗng: total=%d, distinct=%d", totalMigrations, distinctVersions)
 	}
 }
+
+// TestPostgres_ModelCatalogAndTenantSettings kiểm tra ModelCatalogRepository và TenantRuntimeSettingsRepository trên PostgreSQL thực tế
+func TestPostgres_ModelCatalogAndTenantSettings(t *testing.T) {
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("Bỏ qua kiểm thử Postgres catalog vì TEST_POSTGRES_DSN không được thiết lập")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	cfg := config.PostgresConfig{
+		DSN:      dsn,
+		MaxConns: 10,
+	}
+	pool, err := pgstorage.NewPool(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Không thể kết nối PostgreSQL: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pgstorage.RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("Chạy migration thất bại: %v", err)
+	}
+
+	catalogRepo := pgstorage.NewPostgresModelCatalogRepository(pool)
+	tenantRepo := pgstorage.NewPostgresTenantRuntimeSettingsRepository(pool)
+
+	now := time.Now()
+	// 1. Upsert và List models
+	models := []domain.ModelDescriptor{
+		{
+			ID:                "pg-test-model-flash",
+			DisplayName:       "PG Test Flash",
+			TargetService:     domain.ServiceGemini,
+			Capabilities:      []domain.ModelCapability{domain.CapChat},
+			InternalBackendID: "PG Test Flash",
+			ModelTierCode:     1,
+			IsActive:          true,
+			Source:            "upstream_discovery",
+			FirstSeenAt:       now,
+			LastSeenAt:        now,
+			UpdatedAt:         now,
+		},
+		{
+			ID:                "pg-test-model-pro",
+			DisplayName:       "PG Test Pro",
+			TargetService:     domain.ServiceGemini,
+			Capabilities:      []domain.ModelCapability{domain.CapChat, domain.CapThinking},
+			InternalBackendID: "PG Test Pro",
+			ModelTierCode:     3,
+			IsActive:          true,
+			Source:            "upstream_discovery",
+			FirstSeenAt:       now,
+			LastSeenAt:        now,
+			UpdatedAt:         now,
+		},
+	}
+
+	if err := catalogRepo.UpsertModels(ctx, models); err != nil {
+		t.Fatalf("UpsertModels thất bại: %v", err)
+	}
+
+	list, err := catalogRepo.ListModels(ctx, domain.ServiceGemini)
+	if err != nil {
+		t.Fatalf("ListModels thất bại: %v", err)
+	}
+	if len(list) < 2 {
+		t.Fatalf("Kỳ vọng ít nhất 2 models, nhận %d", len(list))
+	}
+
+	// 2. Account-models eligibility
+	accID := "pg-test-account-1"
+	if err := catalogRepo.UpsertAccountModels(ctx, accID, []string{"pg-test-model-flash"}, true); err != nil {
+		t.Fatalf("UpsertAccountModels thất bại: %v", err)
+	}
+
+	eligibleAccs, err := catalogRepo.ListEligibleAccountsForModel(ctx, "pg-test-model-flash")
+	if err != nil {
+		t.Fatalf("ListEligibleAccountsForModel thất bại: %v", err)
+	}
+	found := false
+	for _, a := range eligibleAccs {
+		if a == accID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Không tìm thấy account %s trong danh sách hỗ trợ model flash", accID)
+	}
+
+	// 3. MarkStaleModels
+	staleBefore := now.Add(1 * time.Hour) // Trong tương lai, đánh dấu tất cả models thành stale
+	marked, err := catalogRepo.MarkStaleModels(ctx, staleBefore)
+	if err != nil {
+		t.Fatalf("MarkStaleModels thất bại: %v", err)
+	}
+	if marked == 0 {
+		t.Errorf("Kỳ vọng ít nhất 1 model bị đánh dấu stale")
+	}
+
+	// Khôi phục lại IsActive
+	_ = catalogRepo.MarkAvailability(ctx, "pg-test-model-flash", true)
+	_ = catalogRepo.MarkAvailability(ctx, "pg-test-model-pro", true)
+
+	// 4. Tenant Runtime Settings
+	tenantSettings := &domain.TenantRuntimeSettings{
+		TenantID:            "pg-tenant-1",
+		PreferredModel:      "pg-test-model-pro",
+		ModelPolicy:         "strict",
+		Persona:             "You are a PostgreSQL test persona.",
+		ProjectContext:      "Context PG",
+		AllowedCapabilities: []domain.ModelCapability{domain.CapChat, domain.CapThinking},
+		AllowedTools:        []string{"shell", "grep"},
+		UpdatedAt:           now,
+	}
+
+	if err := tenantRepo.Upsert(ctx, tenantSettings); err != nil {
+		t.Fatalf("Upsert tenant settings thất bại: %v", err)
+	}
+
+	gotSettings, err := tenantRepo.Get(ctx, "pg-tenant-1")
+	if err != nil {
+		t.Fatalf("Get tenant settings thất bại: %v", err)
+	}
+	if gotSettings == nil || gotSettings.Persona != tenantSettings.Persona {
+		t.Fatalf("Tenant settings đọc lại không khớp: %+v", gotSettings)
+	}
+}

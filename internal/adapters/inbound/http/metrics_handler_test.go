@@ -25,6 +25,14 @@ func TestPrometheusMetricsExporter(t *testing.T) {
 	metrics.RecordToolExecutionError("shell", "policy_violation")
 	metrics.RecordAgentRun("completed")
 	metrics.RecordAgentRunFailure("timeout")
+	metrics.SetRuntimeModelCatalogSize(4)
+	metrics.IncRuntimeModelDiscoverySuccess()
+	metrics.IncRuntimeModelDiscoveryFail()
+	metrics.IncRuntimeModelCatalogUpdates()
+	metrics.AddRuntimeModelStale(1)
+	metrics.SetRuntimeAccountModelEligibility("test-acc", 3)
+	metrics.IncRuntimeModelSelection("balanced")
+	metrics.IncRuntimeModelFailover("gemini-pro", "gemini-flash")
 
 	exporter := NewPrometheusMetricsExporter(nil, nil, nil, metrics)
 
@@ -62,6 +70,14 @@ func TestPrometheusMetricsExporter(t *testing.T) {
 		"gateway_tool_execution_errors_total",
 		"gateway_agent_runs_total",
 		"gateway_agent_run_failures_total",
+		"runtime_model_catalog_size",
+		"runtime_model_discovery_success_total",
+		"runtime_model_discovery_fail_total",
+		"runtime_model_catalog_updates_total",
+		"runtime_model_stale_total",
+		"runtime_account_model_eligibility",
+		"runtime_model_selection_total",
+		"runtime_model_failover_total",
 	}
 
 	for _, metric := range requiredMetrics {

@@ -11,6 +11,11 @@
 * **Tương thích chuẩn OpenAI API (`/v1`) & Multi-Platform Client Support**:
   * Hỗ trợ đầy đủ `/v1/chat/completions` (cả chế độ **Sync** và **Real-time SSE Streaming**), `/v1/responses` (OpenAI Codex CLI), và `/v1/models`.
   * Hoạt động ổn định với **OpenAI Python / Node.js SDK**, **Cursor**, **Cline**, **Roo Code**, **Codex CLI**, **Antigravity**, và các Agent Framework bên thứ ba.
+* **Danh Mục Mô Hình & Cấu Hình Động Thời Gian Chạy (Dynamic Runtime Architecture)**:
+  * Tự động phát hiện mô hình mới từ upstream Google RPC (`otAQ7b`), không cần cập nhật mã nguồn hay file YAML khi Google ra mắt mô hình mới.
+  * Lưu trữ bền vững vào **PostgreSQL** và lan truyền tức thì qua **Redis EventBus** giữa các Gateway Node A/B/C.
+  * Bộ chọn mô hình mặc định thông minh (**Dynamic Model Selector**) dựa trên năng lực (`chat`, `thinking`, `code`, `vision`) và ưu tiên (`fast`, `balanced`, `best`).
+  * Quản lý phân quyền và cấu hình động phân lập theo Tenant (**Tenant Runtime Settings**: Persona, Project Context, Preferred Model).
 * **Hệ Thống Tác Vụ Tự Trị Bền Vững (Durable Agent Job System)**:
   * Khởi tạo tác vụ chạy nền bất đồng bộ qua `POST /v1/agent/runs`, tra cứu `GET /v1/agent/runs/{id}`, hủy `POST /v1/agent/runs/{id}/cancel`, resume `POST /v1/agent/runs/{id}/resume`, và stream tiến trình thời gian thực qua SSE `GET /v1/agent/runs/{id}/events`.
   * Hỗ trợ header `Idempotency-Key` ngăn chặn trùng lặp tác vụ khi client thử lại request.

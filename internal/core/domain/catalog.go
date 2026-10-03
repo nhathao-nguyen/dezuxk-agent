@@ -57,7 +57,9 @@ func ResetCatalogsToDefault() {
 	customGeminiCatalog = nil
 }
 
-// GetGeminiCatalog trả về danh mục mô hình Gemini đã nạp từ config (hoặc mặc định nếu chưa cấu hình)
+// GetGeminiCatalog trả về danh mục mô hình Gemini đã nạp từ config YAML hoặc seed mặc định.
+// CHÚ Ý KIẾN TRÚC: Đây CHỈ là seed cho dev/test/emergency fallback, KHÔNG phải production authoritative source of truth.
+// Trong production, danh mục mô hình bắt buộc phải được discover động từ upstream và đồng bộ qua PostgreSQL.
 func GetGeminiCatalog() []ModelDescriptor {
 	catalogMu.RLock()
 	defer catalogMu.RUnlock()
@@ -66,6 +68,11 @@ func GetGeminiCatalog() []ModelDescriptor {
 		copy(result, customGeminiCatalog)
 		return result
 	}
+	return defaultGeminiCatalog()
+}
+
+// DefaultSeedGeminiCatalog trả về danh mục mô hình seed dùng cho kiểm thử và fallback ngoại lệ
+func DefaultSeedGeminiCatalog() []ModelDescriptor {
 	return defaultGeminiCatalog()
 }
 

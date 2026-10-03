@@ -530,6 +530,10 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIJSONError(w, http.StatusInternalServerError, err.Error(), "upstream_error")
 		return
 	}
+	if resp == nil {
+		writeOpenAIJSONError(w, http.StatusInternalServerError, "phản hồi rỗng từ upstream", "upstream_error")
+		return
+	}
 
 	var outputItems []any
 	var replyText string

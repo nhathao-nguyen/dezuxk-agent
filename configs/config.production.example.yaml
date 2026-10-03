@@ -74,3 +74,19 @@ vision:
 
 operations:
   chat_completions: true
+
+runtime_catalog:
+  enabled: true
+  refresh_interval: 15m
+  stale_after: 1h
+  deprecate_after: 24h
+
+model_selection:
+  default_policy: balanced
+  allow_fallback: true
+
+agent:
+  default_model_policy: balanced
+  persona: ""
+  project_context: ""
+

@@ -18,27 +18,105 @@ import (
 // Tuyệt đối không chứa tài khoản, cookie hay mô hình Gemini/Flow.
 // CHÚ Ý BẢO MẬT: Bất kỳ secret nào từng được commit lên Git phải được xoay (rotate) ngay lập tức!
 type Config struct {
-	Environment  string                       `yaml:"environment"` // "development", "staging", "production"
-	TestMode     bool                         `yaml:"test_mode"`   // Chế độ kiểm thử (chỉ dùng cho CI/dev test)
-	Server       ServerConfig                 `yaml:"server"`
-	Operations   Operations                   `yaml:"operations"`
-	Profiles     ProfilesConfig               `yaml:"profiles"`
-	Media        MediaConfig                  `yaml:"media"`
-	Vision       VisionConfig                 `yaml:"vision"`
-	Tokens       TokensConfig                 `yaml:"tokens"`
-	Failover     FailoverConfig               `yaml:"failover"`
-	Storage      StorageConfig                `yaml:"storage"`
-	Distributed  DistributedConfig            `yaml:"distributed"`
-	Cluster      ClusterConfig                `yaml:"cluster"`
-	GoldenJob    GoldenJobConfig              `yaml:"golden_job"`
-	KeepAlive    KeepAliveConfig              `yaml:"keep_alive"`
-	Security     SecurityConfig               `yaml:"security"`
-	Alerts       AlertsConfig                 `yaml:"alerts"`
-	Cache        CacheConfig                  `yaml:"cache"`
-	Admin        AdminConfig                  `yaml:"admin"`
-	ChatDefaults ChatDefaultsConfig           `yaml:"chat_defaults"`
-	MCPServers   map[string]MCPServerConfig   `yaml:"mcp_servers"`
-	Rpcs         map[string]RpcOverrideConfig `yaml:"rpcs"`
+	Environment    string                           `yaml:"environment"` // "development", "staging", "production"
+	TestMode       bool                             `yaml:"test_mode"`   // Chế độ kiểm thử (chỉ dùng cho CI/dev test)
+	Server         ServerConfig                     `yaml:"server"`
+	Operations     Operations                       `yaml:"operations"`
+	Profiles       ProfilesConfig                   `yaml:"profiles"`
+	Media          MediaConfig                      `yaml:"media"`
+	Vision         VisionConfig                     `yaml:"vision"`
+	Tokens         TokensConfig                     `yaml:"tokens"`
+	Failover       FailoverConfig                   `yaml:"failover"`
+	Storage        StorageConfig                    `yaml:"storage"`
+	Distributed    DistributedConfig                `yaml:"distributed"`
+	Cluster        ClusterConfig                    `yaml:"cluster"`
+	GoldenJob      GoldenJobConfig                  `yaml:"golden_job"`
+	KeepAlive      KeepAliveConfig                  `yaml:"keep_alive"`
+	Security       SecurityConfig                   `yaml:"security"`
+	Alerts         AlertsConfig                     `yaml:"alerts"`
+	Cache          CacheConfig                      `yaml:"cache"`
+	Admin          AdminConfig                      `yaml:"admin"`
+	ChatDefaults   ChatDefaultsConfig               `yaml:"chat_defaults"`
+	MCPServers     map[string]MCPServerConfig       `yaml:"mcp_servers"`
+	Rpcs           map[string]RpcOverrideConfig     `yaml:"rpcs"`
+	RuntimeCatalog RuntimeCatalogConfig             `yaml:"runtime_catalog"`
+	ModelSelection ModelSelectionConfig             `yaml:"model_selection"`
+	ModelAliases   map[string]ModelAliasEntryConfig `yaml:"model_aliases"`
+	Agent          AgentConfig                      `yaml:"agent"`
+}
+
+type RuntimeCatalogConfig struct {
+	Enabled         *bool         `yaml:"enabled"`
+	RefreshInterval time.Duration `yaml:"refresh_interval"`
+	StaleAfter      time.Duration `yaml:"stale_after"`
+	DeprecateAfter  time.Duration `yaml:"deprecate_after"`
+}
+
+func (r RuntimeCatalogConfig) IsEnabled() bool {
+	if r.Enabled == nil {
+		return true
+	}
+	return *r.Enabled
+}
+
+func (r RuntimeCatalogConfig) GetRefreshInterval() time.Duration {
+	if r.RefreshInterval > 0 {
+		return r.RefreshInterval
+	}
+	return 15 * time.Minute
+}
+
+func (r RuntimeCatalogConfig) GetStaleAfter() time.Duration {
+	if r.StaleAfter > 0 {
+		return r.StaleAfter
+	}
+	return 1 * time.Hour
+}
+
+func (r RuntimeCatalogConfig) GetDeprecateAfter() time.Duration {
+	if r.DeprecateAfter > 0 {
+		return r.DeprecateAfter
+	}
+	return 24 * time.Hour
+}
+
+type ModelSelectionConfig struct {
+	DefaultPolicy string `yaml:"default_policy"`
+	AllowFallback *bool  `yaml:"allow_fallback"`
+}
+
+func (m ModelSelectionConfig) GetDefaultPolicy() string {
+	if m.DefaultPolicy != "" {
+		return m.DefaultPolicy
+	}
+	return "balanced"
+}
+
+func (m ModelSelectionConfig) IsAllowFallback() bool {
+	if m.AllowFallback == nil {
+		return true
+	}
+	return *m.AllowFallback
+}
+
+type ModelAliasEntryConfig struct {
+	Capability  string `yaml:"capability"`
+	Preference  string `yaml:"preference"`
+	TargetModel string `yaml:"target_model"`
+}
+
+type AgentConfig struct {
+	DefaultModelPolicy string `yaml:"default_model_policy"`
+	DefaultModel       string `yaml:"default_model"`
+	Persona            string `yaml:"persona"`
+	ProjectContext     string `yaml:"project_context"`
+}
+
+func (a AgentConfig) GetDefaultModelPolicy() string {
+	if a.DefaultModelPolicy != "" {
+		return a.DefaultModelPolicy
+	}
+	return "balanced"
 }
 
 type ChatDefaultsConfig struct {
@@ -870,6 +948,20 @@ func applyEnvOverrides(cfg *Config) {
 		if len(proxies) > 0 {
 			cfg.Server.TrustedProxies = proxies
 		}
+	}
+
+	if rc := os.Getenv("DEZUXK_RUNTIME_CATALOG_ENABLED"); rc != "" {
+		enabled := (rc == "true" || rc == "1")
+		cfg.RuntimeCatalog.Enabled = &enabled
+	}
+	if ap := os.Getenv("DEZUXK_AGENT_PERSONA"); ap != "" {
+		cfg.Agent.Persona = ap
+	}
+	if apc := os.Getenv("DEZUXK_AGENT_PROJECT_CONTEXT"); apc != "" {
+		cfg.Agent.ProjectContext = apc
+	}
+	if admp := os.Getenv("DEZUXK_AGENT_DEFAULT_MODEL_POLICY"); admp != "" {
+		cfg.Agent.DefaultModelPolicy = admp
 	}
 }
 

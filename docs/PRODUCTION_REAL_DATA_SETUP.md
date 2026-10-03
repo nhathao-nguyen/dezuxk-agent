@@ -407,3 +407,66 @@ Hiện tại, việc nạp secret qua `.env.production` và `configs/config.prod
 - **HashiCorp Vault**: Inject qua Vault Agent Sidecar
 
 Hệ thống core không bị ràng buộc vào file `.env`, cho phép chuyển đổi phương thức lưu trữ secret bất kỳ lúc nào.
+
+---
+
+## 🔄 10. Kiến Trúc Dữ Liệu Động Thời Gian Chạy (Dynamic Runtime Data Architecture)
+
+Từ phiên bản này, **Dezuxk AI Gateway** đã loại bỏ hoàn toàn sự phụ thuộc vào danh mục mô hình hardcoded (`configs/models.yaml` chỉ còn vai trò seed dev/test/emergency fallback).
+
+### 10.1. Phân định rạch ròi Static vs Dynamic
+
+| Dữ Liệu / Thành Phần | Bản Chất | Nguồn Chân Lý (Source of Truth) |
+| :--- | :--- | :--- |
+| **Google accounts / Sessions** | **Dynamic** | Ingest từ CDP $\rightarrow$ Vault AES-256-GCM $\rightarrow$ PostgreSQL `sessions` |
+| **Model Discovery & Catalog** | **Dynamic** | Upstream Google RPC `otAQ7b` $\rightarrow$ PostgreSQL `runtime_models` |
+| **Account-Model Eligibility** | **Dynamic** | Scan quyền hạn tài khoản $\rightarrow$ PostgreSQL `account_models` |
+| **Quota, Tier & Health State** | **Dynamic** | RPC `o37G0e` & `a8E44e` $\rightarrow$ Dynamic Account Routing |
+| **Tenant Settings (Persona, Context)**| **Dynamic** | PostgreSQL `tenant_runtime_settings` |
+| **Default Model Selection** | **Dynamic** | Dynamic Selector (Capability + Preference, không hardcode) |
+| **Security Invariants & Isolation** | **Static / Code** | Code-enforced (Auth, SSRF NetGuard, Path Sandboxing, Fencing) |
+| **Tool Implementations & Schemas** | **Static / Code** | Code-enforced Go structs (Shell, Filesystem, Browser, Grep) |
+| **Protocol Parsers & Fallback** | **Static / Code** | Code-enforced WireCodec & Fallback RPC contracts |
+
+### 10.2. Vòng đời Model Discovery (Discovery Lifecycle)
+
+```text
+Google Upstream (RPC otAQ7b)
+             │
+             ▼
+Leader Node DiscoverModels(ctx, account)
+             │
+             ▼
+Chuẩn hóa Canonical ID & Capabilities
+             │
+             ▼
+PostgreSQL Authority (runtime_models, account_models)
+             │
+             ├────────────────────────────────────────┐
+             ▼                                        ▼
+Redis EventBus (model_catalog_changed)       Local ModelRegistry (In-memory Cache)
+             │
+             ▼
+Follower Nodes (Gateway B/C) ReloadFromStorage()
+```
+
+1. **Leader Coordinated Discovery**: Trong cụm đa node, chỉ Leader Node (hoặc account owner) mới thực hiện gọi RPC upstream discovery để tránh làm nghẽn máy chủ Google.
+2. **PostgreSQL Authority**: Tất cả models mới phát hiện (kể cả upstream xuất hiện model chưa từng biết trước) đều được lưu trữ bền vững vào PostgreSQL.
+3. **Multi-Node Fan-Out**: Redis EventBus thông báo tức thì cho các node còn lại nạp cache. Nếu mất kết nối Redis, chu kỳ hòa giải định kỳ (Periodic Reconciliation với Jitter 15 phút) sẽ tự động đồng bộ từ PostgreSQL.
+4. **Stale / Deprecation Safe Policy**: Model không còn xuất hiện trong chu kỳ discovery sẽ được chuyển trạng thái `IsActive = false` (stale/unavailable) sau grace period (`stale_after: 1h`), tuyệt đối không xóa cứng (hard-delete) nhằm bảo toàn tính toàn vẹn cho các Agent runs trong lịch sử.
+
+### 10.3. Dynamic Default Model Selector & Routing
+
+- Không sử dụng switch-case hardcoded tên model.
+- Client yêu cầu model theo năng lực (`chat`, `thinking`, `code`, `vision`) và ưu tiên (`fast`, `balanced`, `best`).
+- Router chỉ chọn tài khoản đang thực sự hỗ trợ model đó (`GetAvailableForModel`) và còn quota khả dụng.
+
+### 10.4. Admin Endpoints Quản Trị Runtime
+
+Các endpoint sau chỉ dành riêng cho tài khoản Quản trị viên (`Authorization: Bearer <ADMIN_SESSION_TOKEN>`):
+
+- `POST /admin/runtime/models/refresh`: Kích hoạt quét phát hiện mô hình tức thì trên tất cả tài khoản Google.
+- `GET /admin/runtime/models`: Liệt kê tất cả mô hình trong runtime catalog kèm metadata năng lực.
+- `GET /admin/runtime/accounts`: Xem trạng thái sức khỏe, quota, tier và danh sách model khả dụng của từng tài khoản (tất cả cookies/tokens đều bị xóa sạch trước khi trả về).
+- `GET /admin/runtime/catalog/status`: Báo cáo số lượng mô hình, thời điểm đồng bộ gần nhất và trạng thái leader.
+

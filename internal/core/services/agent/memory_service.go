@@ -28,9 +28,6 @@ func NewMemoryManager(
 	model string,
 	initialCore domain.CoreMemory,
 ) *MemoryManager {
-	if model == "" {
-		model = "gemini-3.8-flash"
-	}
 	if initialCore.UpdatedAt.IsZero() {
 		initialCore.UpdatedAt = time.Now()
 	}

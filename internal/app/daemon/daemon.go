@@ -83,15 +83,28 @@ func Run(configPath string, portOverride int) error {
 		cfg.Server.Port = portOverride
 	}
 
-	// Nạp danh mục mô hình động từ configs/models.yaml
+	// Nạp danh mục mô hình tùy chọn (chỉ đóng vai trò dev/test seed hoặc compatibility fallback)
 	if err := domain.LoadModelsFile("configs/models.yaml"); err != nil {
-		log.Printf("[Config Warning] Không thể đọc configs/models.yaml (%v), dùng danh mục mặc định", err)
+		if !cfg.IsProduction() {
+			log.Printf("[Config Notice] Không đọc configs/models.yaml (%v), sử dụng danh mục dự phòng", err)
+		}
 	} else {
-		log.Println("[Config] Đã nạp danh mục mô hình động từ configs/models.yaml")
+		log.Println("[Config] Đã nạp seed mô hình từ configs/models.yaml (seed/compatibility fallback)")
 	}
 
 	// 2. Khởi tạo Domain Registries
 	modelRegistry := domain.NewModelRegistry(nil)
+	if len(cfg.ModelAliases) > 0 {
+		aliases := make(map[string]domain.ModelAliasRule, len(cfg.ModelAliases))
+		for k, v := range cfg.ModelAliases {
+			aliases[k] = domain.ModelAliasRule{
+				Capability:  domain.ModelCapability(v.Capability),
+				Preference:  domain.ModelPreference(v.Preference),
+				TargetModel: v.TargetModel,
+			}
+		}
+		modelRegistry.SetAliases(aliases)
+	}
 	rpcRegistry := domain.DefaultRpcRegistry()
 	for id, rpcCfg := range cfg.Rpcs {
 		rpcRegistry.Override(id, rpcCfg.PathPattern, rpcCfg.TargetHost, rpcCfg.RequiresAt, rpcCfg.Description)
@@ -110,6 +123,15 @@ func Run(configPath string, portOverride int) error {
 		return fmt.Errorf("không thể khởi tạo hạ tầng Gateway: %w", err)
 	}
 	defer infra.Close()
+
+	// Khôi phục danh mục mô hình bền vững từ PostgreSQL / Storage Repository vào local cache
+	if infra.ModelCatalog != nil {
+		persistedModels, err := infra.ModelCatalog.ListModels(context.Background(), "")
+		if err == nil && len(persistedModels) > 0 {
+			modelRegistry.ReplaceAll(persistedModels)
+			log.Printf("[Model Registry] Đã nạp %d mô hình khả dụng từ cơ sở dữ liệu bền vững", len(persistedModels))
+		}
+	}
 
 	sessionRepo := infra.Sessions
 	keyRepo := infra.Keys
@@ -218,6 +240,19 @@ func Run(configPath string, portOverride int) error {
 	visionResolver := services.NewVisionResolver(cfg.Vision, geminiUploadService)
 	tokenCounter := services.NewTokenCounter(cfg.Tokens)
 
+	discoveryProvider := google.NewGoogleModelDiscoveryProvider(upstreamTransport, rpcRegistry)
+	discoverySvc := services.NewModelDiscoveryService(
+		discoveryProvider,
+		infra.ModelCatalog,
+		sessionRepo,
+		modelRegistry,
+		infra.EventBus,
+		metrics,
+		infra.NodeID,
+	)
+	discoverySvc.SetRefreshInterval(cfg.RuntimeCatalog.GetRefreshInterval())
+	discoverySvc.SetStaleThreshold(cfg.RuntimeCatalog.GetStaleAfter())
+
 	chatService := services.NewChatService(modelRegistry, sessionRepo, upstreamTransport, wire, metrics)
 	chatService.SetRpcRegistry(rpcRegistry)
 	if mediaStorage != nil {
@@ -230,6 +265,10 @@ func Run(configPath string, portOverride int) error {
 		chatService.SetKeyUseCase(keyService)
 	}
 	chatService.SetChatDefaults(cfg.ChatDefaults)
+	chatService.SetModelSelectionConfig(cfg.ModelSelection)
+	if infra.TenantSettings != nil {
+		chatService.SetTenantSettingsRepository(infra.TenantSettings)
+	}
 
 	if sr, ok := sessionRepo.(interface{ SetCoolingDuration(time.Duration) }); ok {
 		sr.SetCoolingDuration(cfg.Failover.GetCoolingDuration())
@@ -278,6 +317,13 @@ func Run(configPath string, portOverride int) error {
 	agentRunner.SetPolicyEngine(policyEngine)
 	agentRunner.SetKeyUseCase(keyService)
 	agentRunner.SetCheckpointRepository(checkpointRepo)
+	agentRunner.SetDefaultModel(cfg.Agent.DefaultModel)
+	agentRunner.SetDefaultModelPolicy(cfg.Agent.GetDefaultModelPolicy())
+	agentRunner.SetPersona(cfg.Agent.Persona, cfg.Agent.ProjectContext)
+	agentRunner.SetModelRegistry(modelRegistry)
+	if infra.TenantSettings != nil {
+		agentRunner.SetTenantSettingsRepository(infra.TenantSettings)
+	}
 	if ledger, ok := agentRunRepo.(ports.ToolExecutionLedger); ok {
 		agentRunner.SetToolExecutionLedger(ledger)
 	}
@@ -300,11 +346,19 @@ func Run(configPath string, portOverride int) error {
 	readinessManager.SetReady(false)
 
 	// Khởi tạo 3-Tier Memory Manager (Working, Recall, Archival)
-	initialCore := domain.CoreMemory{
-		Persona:        "Dezuxk Autonomous Engineering Agent (Tự trị • Kiểm chứng • Chuẩn chỉ)",
-		ProjectContext: "Hexagonal Clean Architecture, Zero Hardcoding, SQLite WAL persistence, Extended Thinking",
+	persona := cfg.Agent.Persona
+	if persona == "" {
+		persona = "Dezuxk Autonomous Engineering Agent (Tự trị • Kiểm chứng • Chuẩn chỉ)"
 	}
-	memoryService := agent.NewMemoryManager(memoryRepo, chatService, "gemini-3.8-flash", initialCore)
+	projCtx := cfg.Agent.ProjectContext
+	if projCtx == "" {
+		projCtx = "Hexagonal Clean Architecture, Zero Hardcoding, Distributed Catalog, Extended Thinking"
+	}
+	initialCore := domain.CoreMemory{
+		Persona:        persona,
+		ProjectContext: projCtx,
+	}
+	memoryService := agent.NewMemoryManager(memoryRepo, chatService, cfg.Agent.DefaultModel, initialCore)
 	agentRunner.SetMemoryService(memoryService)
 	tools.RegisterMemoryTools(toolRegistry, memoryService)
 
@@ -313,6 +367,7 @@ func Run(configPath string, portOverride int) error {
 
 	// Khởi tạo Isolated Sub-agents Supervisor & đăng ký invoke_subagent tool
 	subagentSupervisor := agent.NewSubagentSupervisor(chatService, toolRegistry, nil, memoryService)
+	subagentSupervisor.SetDefaultModel(cfg.Agent.DefaultModel)
 	tools.RegisterSubagentTool(toolRegistry, subagentSupervisor)
 
 	// Tự động kết nối và nạp các công cụ từ danh mục MCP Servers (Model Context Protocol)
@@ -369,6 +424,9 @@ func Run(configPath string, portOverride int) error {
 		AgentRunRepo:          agentRunRepo,
 		ReadinessManager:      readinessManager,
 		ClusterClient:         infra.ClusterClient,
+		ModelDiscoveryService: discoverySvc,
+		ModelCatalogRepo:      infra.ModelCatalog,
+		TenantSettingsRepo:    infra.TenantSettings,
 	})
 
 	// 8. Khởi động GeminiChatGoldenJob và Proactive Session Keep-Alive Worker
@@ -381,10 +439,35 @@ func Run(configPath string, portOverride int) error {
 		infra.LeaderCoord.RegisterJob("gemini-keepalive", func(leaderCtx context.Context) {
 			startProactiveKeepAliveRunner(leaderCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
 		})
+		if cfg.RuntimeCatalog.IsEnabled() {
+			discoverySvc.SetIsLeader(false)
+			_ = discoverySvc.Start(goldenCtx)
+			infra.LeaderCoord.RegisterJob("model-discovery", func(leaderCtx context.Context) {
+				discoverySvc.SetIsLeader(true)
+				defer discoverySvc.SetIsLeader(false)
+				<-leaderCtx.Done()
+			})
+		}
 		infra.LeaderCoord.Start(goldenCtx)
 	} else {
 		startGeminiChatGoldenRunner(goldenCtx, wire, upstreamTransport, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
 		startProactiveKeepAliveRunner(goldenCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
+		if cfg.RuntimeCatalog.IsEnabled() {
+			discoverySvc.SetIsLeader(true)
+			_ = discoverySvc.Start(goldenCtx)
+		}
+	}
+
+	if cfg.RuntimeCatalog.IsEnabled() {
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			if discRes, dErr := discoverySvc.DiscoverAndSync(goldenCtx); dErr != nil {
+				log.Printf("[Model Discovery] Startup discovery warning: %v", dErr)
+			} else {
+				log.Printf("[Model Discovery] Startup discovery completed: %d accounts scanned, %d models seen, %d added, %d updated",
+					discRes.AccountsScanned, discRes.ModelsSeen, discRes.ModelsAdded, discRes.ModelsUpdated)
+			}
+		}()
 	}
 	startStartupTierDiscovery(goldenCtx, sessionRepo, geminiQuotaService)
 

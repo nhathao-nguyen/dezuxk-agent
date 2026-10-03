@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"time"
 
 	"dezuxk-gateway/internal/core/domain"
 )
@@ -26,6 +27,7 @@ type UpstreamGoogleTransport interface {
 // SessionRepository quản lý lưu trữ và phân phối tài khoản
 type SessionRepository interface {
 	GetAvailable(ctx context.Context, service domain.ServiceKind, minCredits int) (*domain.ManagedAccount, error)
+	GetAvailableForModel(ctx context.Context, service domain.ServiceKind, modelID string, minCredits int) (*domain.ManagedAccount, error)
 	Release(account *domain.ManagedAccount, err error)
 	ListAll(ctx context.Context) []*domain.ManagedAccount
 	Save(ctx context.Context, account *domain.ManagedAccount) error
@@ -107,4 +109,27 @@ type WireCodec interface {
 	MaterializeChat(account *domain.ManagedAccount, payload domain.GeminiPayloadBuilder) (domain.OutboundAttempt, error)
 	DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error)
 	DematerializeChatStream(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onContent func(delta, convID string) error, onReasoning func(delta, convID string) error) (domain.GeminiReply, error)
+}
+
+// ModelDiscoveryProvider giao diện thu thập và khám phá mô hình từ Google upstream RPC thực tế
+type ModelDiscoveryProvider interface {
+	DiscoverModels(ctx context.Context, account *domain.ManagedAccount) ([]domain.ModelDescriptor, error)
+}
+
+// ModelCatalogRepository quản lý lưu trữ bền vững danh mục mô hình và ma trận quyền hạn tài khoản trên PostgreSQL
+type ModelCatalogRepository interface {
+	UpsertModels(ctx context.Context, models []domain.ModelDescriptor) error
+	ListModels(ctx context.Context, service domain.ServiceKind) ([]domain.ModelDescriptor, error)
+	MarkAvailability(ctx context.Context, modelID string, isAvailable bool) error
+	UpsertAccountModels(ctx context.Context, accountID string, modelIDs []string, isEligible bool) error
+	ListAccountModels(ctx context.Context, accountID string) ([]domain.AccountModelEligibility, error)
+	ListEligibleAccountsForModel(ctx context.Context, modelID string) ([]string, error)
+	MarkStaleModels(ctx context.Context, staleBefore time.Time) (int64, error)
+}
+
+// TenantRuntimeSettingsRepository quản lý lưu trữ cấu hình động phân lập theo từng Tenant trên PostgreSQL
+type TenantRuntimeSettingsRepository interface {
+	Get(ctx context.Context, tenantID string) (*domain.TenantRuntimeSettings, error)
+	Upsert(ctx context.Context, settings *domain.TenantRuntimeSettings) error
+	ListAll(ctx context.Context) ([]*domain.TenantRuntimeSettings, error)
 }

@@ -29,15 +29,21 @@ func generateTaskID() string {
 
 // Runner triển khai ports.AgentRunner
 type Runner struct {
-	chatUseCase    ports.ChatUseCase
-	keyUseCase     ports.KeyUseCase
-	tools          ports.ToolRegistry
-	approval       ports.ApprovalProvider
-	policyEngine   ports.ToolExecutionService
-	memorySvc      ports.MemoryService
-	checkpointRepo ports.CheckpointRepository
-	toolLedger     ports.ToolExecutionLedger
-	runRepo        ports.AgentRunRepository
+	chatUseCase        ports.ChatUseCase
+	keyUseCase         ports.KeyUseCase
+	tools              ports.ToolRegistry
+	approval           ports.ApprovalProvider
+	policyEngine       ports.ToolExecutionService
+	memorySvc          ports.MemoryService
+	checkpointRepo     ports.CheckpointRepository
+	toolLedger         ports.ToolExecutionLedger
+	runRepo            ports.AgentRunRepository
+	defaultModel       string
+	defaultModelPolicy string
+	persona            string
+	projectContext     string
+	modelRegistry      *domain.ModelRegistry
+	tenantSettingsRepo ports.TenantRuntimeSettingsRepository
 }
 
 // NewRunner khởi tạo một Agent Runner
@@ -86,17 +92,107 @@ func (r *Runner) SetMemoryService(m ports.MemoryService) {
 	r.memorySvc = m
 }
 
+func (r *Runner) SetDefaultModel(model string) {
+	r.defaultModel = model
+}
+
+func (r *Runner) SetDefaultModelPolicy(policy string) {
+	r.defaultModelPolicy = policy
+}
+
+func (r *Runner) SetPersona(persona string, projectContext string) {
+	r.persona = persona
+	r.projectContext = projectContext
+}
+
+func (r *Runner) SetModelRegistry(mr *domain.ModelRegistry) {
+	r.modelRegistry = mr
+}
+
+func (r *Runner) SetTenantSettingsRepository(repo ports.TenantRuntimeSettingsRepository) {
+	r.tenantSettingsRepo = repo
+}
+
 var _ ports.AgentRunner = (*Runner)(nil)
 
-func (r *Runner) buildSystemPrompt(workspace string, customPrompt string) string {
+func (r *Runner) resolveDefaultModel(ctx context.Context) string {
+	// 1. Ưu tiên cấu hình từ Tenant Runtime Settings
+	var tenantModel string
+	pref := domain.PrefBalanced
+	if r.tenantSettingsRepo != nil {
+		if id, ok := domain.TenantIdentityFromContext(ctx); ok && strings.TrimSpace(id.TenantID) != "" {
+			if ts, err := r.tenantSettingsRepo.Get(ctx, id.TenantID); err == nil && ts != nil {
+				if ts.PreferredModel != "" {
+					tenantModel = ts.PreferredModel
+				}
+				if ts.ModelPolicy != "" {
+					pref = domain.ModelPreference(ts.ModelPolicy)
+				}
+			}
+		}
+	}
+
+	if tenantModel != "" {
+		return tenantModel
+	}
+
+	if r.defaultModel != "" {
+		return r.defaultModel
+	}
+
+	if r.defaultModelPolicy != "" {
+		pref = domain.ModelPreference(r.defaultModelPolicy)
+	}
+
+	// 2. Tra cứu động từ ModelRegistry dựa trên Capability Chat và Preference
+	if r.modelRegistry != nil {
+		if desc, ok := r.modelRegistry.ResolveModel("", domain.ModelRequirement{
+			Capability: domain.CapChat,
+			Preference: pref,
+		}); ok && desc.ID != "" {
+			return desc.ID
+		}
+	}
+
+	return ""
+}
+
+func (r *Runner) buildSystemPrompt(ctx context.Context, workspace string, customPrompt string) string {
 	absWorkspace, _ := filepath.Abs(workspace)
 	nowStr := time.Now().Format("2006-01-02 15:04:05 MST")
 
 	var prompt string
+	var projectContext string
+
+	// 1. Kiểm tra override từ tenant runtime settings
+	if r.tenantSettingsRepo != nil {
+		if id, ok := domain.TenantIdentityFromContext(ctx); ok && strings.TrimSpace(id.TenantID) != "" {
+			if ts, err := r.tenantSettingsRepo.Get(ctx, id.TenantID); err == nil && ts != nil {
+				if ts.Persona != "" {
+					prompt = ts.Persona
+				}
+				if ts.ProjectContext != "" {
+					projectContext = ts.ProjectContext
+				}
+			}
+		}
+	}
+
+	// 2. Dùng persona và project context cấp hệ thống nếu tenant chưa cấu hình
+	if prompt == "" && r.persona != "" {
+		prompt = r.persona
+	}
+	if projectContext == "" && r.projectContext != "" {
+		projectContext = r.projectContext
+	}
+
+	// 3. Nếu request chỉ định customPrompt trực tiếp thì ưu tiên
 	if strings.TrimSpace(customPrompt) != "" {
-		prompt = fmt.Sprintf("%s\n\nOperating System: %s\nCurrent Time: %s\nWorking Directory: %s",
-			strings.TrimSpace(customPrompt), runtime.GOOS, nowStr, absWorkspace)
-	} else {
+		prompt = strings.TrimSpace(customPrompt)
+	}
+
+	// 4. Nếu vẫn trống, dùng generic persona chuẩn tối thiểu
+	if prompt == "" {
 		prompt = fmt.Sprintf(`You are Dezuxk Autonomous Agent, an expert AI software engineering agent.
 Operating System: %s
 Current Time: %s
@@ -109,6 +205,13 @@ Working Directory: %s
 4. Verify Everything: After making changes or when solving bugs, run tests or verification commands via run_command to prove that the solution works. Never claim completion without verification evidence.
 5. Autonomous Completion: When you have successfully verified the solution and achieved the goal, provide your final response directly in text to conclude the task. Do NOT call tools after concluding.`,
 			runtime.GOOS, nowStr, absWorkspace)
+	} else {
+		prompt = fmt.Sprintf("%s\n\nOperating System: %s\nCurrent Time: %s\nWorking Directory: %s",
+			prompt, runtime.GOOS, nowStr, absWorkspace)
+	}
+
+	if projectContext != "" {
+		prompt = prompt + "\n\n## Project Context\n" + projectContext
 	}
 
 	if r.memorySvc != nil {
@@ -167,7 +270,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	defer cancelExec()
 
 	if opts.Model == "" {
-		opts.Model = "gemini-3.8-flash"
+		opts.Model = r.resolveDefaultModel(execCtx)
 	}
 	if opts.Workspace == "" {
 		opts.Workspace = "."
@@ -189,7 +292,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		if opts.TaskID != "" && state.TaskID == "" {
 			state.TaskID = opts.TaskID
 		}
-		if state.Model != "" && opts.Model == "gemini-3.8-flash" {
+		if state.Model != "" {
 			opts.Model = state.Model
 		}
 		if state.Workspace != "" && (opts.Workspace == "." || opts.Workspace == "") {
@@ -214,7 +317,7 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			IsCompleted: false,
 		}
 		// Khởi tạo ngữ cảnh hội thoại
-		sysPrompt := r.buildSystemPrompt(opts.Workspace, opts.CustomPrompt)
+		sysPrompt := r.buildSystemPrompt(execCtx, opts.Workspace, opts.CustomPrompt)
 		state.Messages = []domain.OpenAIMessage{
 			{Role: "system", Content: sysPrompt},
 			{Role: "user", Content: goal},
@@ -371,6 +474,9 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		}
 
 		resp, err := r.chatUseCase.ExecuteChatSync(execCtx, chatReq)
+		if err == nil && chatReq.Model != "" {
+			state.Model = chatReq.Model
+		}
 		if err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "circuit breaker") || strings.Contains(strings.ToLower(err.Error()), "unavailable") {
 				state.StopReason = domain.StopReasonUpstreamUnavailable

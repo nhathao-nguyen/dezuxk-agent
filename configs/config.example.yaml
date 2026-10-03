@@ -131,3 +131,22 @@ admin:
   password: "" # Thiết lập mật khẩu mạnh qua biến môi trường DEZUXK_ADMIN_PASSWORD hoặc file bí mật
   session_token: "" # Thiết lập token ngẫu nhiên qua DEZUXK_ADMIN_SESSION_TOKEN
 
+# Danh mục mô hình động (Dynamic Runtime Catalog)
+runtime_catalog:
+  enabled: true
+  refresh_interval: 15m
+  stale_after: 1h
+  deprecate_after: 24h
+
+# Chính sách chọn mô hình mặc định (Dynamic Model Selection)
+model_selection:
+  default_policy: balanced
+  allow_fallback: true
+
+# Cấu hình Agent động (Dynamic Agent Persona & Model Policy)
+agent:
+  default_model_policy: balanced
+  persona: ""
+  project_context: ""
+
+

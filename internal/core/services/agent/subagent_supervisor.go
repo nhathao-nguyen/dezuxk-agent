@@ -18,8 +18,15 @@ type SubagentSupervisor struct {
 	approval    ports.ApprovalProvider
 	memorySvc   ports.MemoryService
 
-	mu          sync.RWMutex
-	descriptors map[domain.SubagentRole]domain.SubagentDescriptor
+	mu           sync.RWMutex
+	descriptors  map[domain.SubagentRole]domain.SubagentDescriptor
+	defaultModel string
+}
+
+func (s *SubagentSupervisor) SetDefaultModel(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.defaultModel = model
 }
 
 var _ ports.SubagentSupervisor = (*SubagentSupervisor)(nil)
@@ -179,9 +186,13 @@ func (s *SubagentSupervisor) InvokeSubagent(ctx context.Context, task domain.Sub
 		maxSteps = desc.MaxSteps
 	}
 
-	model := "gemini-3.8-flash"
-	if task.Model != "" {
-		model = task.Model
+	s.mu.RLock()
+	defModel := s.defaultModel
+	s.mu.RUnlock()
+
+	model := task.Model
+	if model == "" {
+		model = defModel
 	}
 
 	runOpts := domain.AgentRunOptions{
