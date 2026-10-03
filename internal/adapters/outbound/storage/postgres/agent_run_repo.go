@@ -657,10 +657,10 @@ func (r *PostgresAgentRunRepository) RecordPlannedOrRunningOwned(ctx context.Con
 		tenant_id, run_id, tool_call_id, tool_name, args_hash, status, result_json, error,
 		worker_id, claim_generation, started_at, finished_at
 	)
-	SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+	SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text, $8::text, $9::text, $10::bigint, $11::timestamptz, $12::timestamptz
 	WHERE EXISTS (
 		SELECT 1 FROM agent_runs
-		WHERE id = $2 AND worker_id = $9 AND claim_generation = $10
+		WHERE id = $2::text AND worker_id = $9::text AND claim_generation = $10::bigint
 		  AND status IN ('running', 'recovering', 'waiting_for_tool')
 		  AND (lease_until IS NULL OR lease_until > NOW())
 	)
@@ -718,13 +718,13 @@ func (r *PostgresAgentRunRepository) RecordFinishedOwned(ctx context.Context, te
 
 	query := `
 	UPDATE agent_tool_executions SET
-		status = $1, result_json = $2, error = $3, finished_at = NOW()
-	WHERE tenant_id = $4 AND run_id = $5 AND tool_call_id = $6
-	  AND (worker_id = $7 OR worker_id = '')
-	  AND (claim_generation = $8 OR claim_generation = 0)
+		status = $1::text, result_json = $2::text, error = $3::text, finished_at = NOW()
+	WHERE tenant_id = $4::text AND run_id = $5::text AND tool_call_id = $6::text
+	  AND (worker_id = $7::text OR worker_id = '')
+	  AND (claim_generation = $8::bigint OR claim_generation = 0)
 	  AND EXISTS (
 		SELECT 1 FROM agent_runs
-		WHERE id = $5 AND worker_id = $7 AND claim_generation = $8
+		WHERE id = $5::text AND worker_id = $7::text AND claim_generation = $8::bigint
 		  AND status != 'cancelled'
 	  );
 	`
