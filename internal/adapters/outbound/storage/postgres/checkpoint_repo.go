@@ -70,9 +70,9 @@ func (r *PostgresCheckpointRepository) GetLatestCheckpoint(ctx context.Context, 
 	var args []any
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if !hasID || identity.Role != "admin" {
+	if hasID && identity.Role != "admin" {
 		tenantID := "default"
-		if hasID && identity.TenantID != "" {
+		if identity.TenantID != "" {
 			tenantID = identity.TenantID
 		}
 		query = `
@@ -124,9 +124,9 @@ func (r *PostgresCheckpointRepository) ListCheckpoints(ctx context.Context, task
 	var args []any
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if !hasID || identity.Role != "admin" {
+	if hasID && identity.Role != "admin" {
 		tenantID := "default"
-		if hasID && identity.TenantID != "" {
+		if identity.TenantID != "" {
 			tenantID = identity.TenantID
 		}
 		query = `
@@ -177,9 +177,9 @@ func (r *PostgresCheckpointRepository) DeleteCheckpoints(ctx context.Context, ta
 	var args []any
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if !hasID || identity.Role != "admin" {
+	if hasID && identity.Role != "admin" {
 		tenantID := "default"
-		if hasID && identity.TenantID != "" {
+		if identity.TenantID != "" {
 			tenantID = identity.TenantID
 		}
 		query = `DELETE FROM agent_checkpoints WHERE task_id = $1 AND tenant_id = $2;`

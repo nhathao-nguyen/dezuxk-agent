@@ -225,10 +225,13 @@ func TestMultiNode_04_NodeCrashRecovery(t *testing.T) {
 	runID := fmt.Sprintf("run-crash-%d", time.Now().UnixNano())
 	now := time.Now()
 
+	tenantID := "tenant-recovery"
+	ctxWithTenant := domain.ContextWithTenantIdentity(ctx, domain.TenantIdentity{TenantID: tenantID})
+
 	// 1. Node A đang chạy run và đã lưu checkpoint tại step 5
 	initialRun := &domain.AgentRun{
 		ID:              runID,
-		TenantID:        "tenant-recovery",
+		TenantID:        tenantID,
 		Goal:            "Crash recovery test",
 		Status:          domain.RunStatusRunning,
 		WorkerID:        "worker-node-a",
@@ -237,11 +240,11 @@ func TestMultiNode_04_NodeCrashRecovery(t *testing.T) {
 		MaxSteps:        10,
 		CreatedAt:       now,
 	}
-	_ = cluster.RunsRepo.Create(ctx, initialRun)
+	_ = cluster.RunsRepo.Create(ctxWithTenant, initialRun)
 
 	checkpoint := &domain.AgentCheckpoint{
 		TaskID:    runID,
-		TenantID:  "tenant-recovery",
+		TenantID:  tenantID,
 		StepIndex: 5,
 		StateSnapshot: domain.AgentState{
 			CurrentStep: 5,
@@ -249,15 +252,15 @@ func TestMultiNode_04_NodeCrashRecovery(t *testing.T) {
 		},
 		CreatedAt: now,
 	}
-	_ = cluster.Checkpoints.SaveCheckpoint(ctx, checkpoint)
+	_ = cluster.Checkpoints.SaveCheckpoint(ctxWithTenant, checkpoint)
 
 	// 2. Node A crash -> hết hạn lease (đặt lease về quá khứ)
 	expired := now.Add(-30 * time.Second)
 	initialRun.LeaseUntil = &expired
-	_ = cluster.RunsRepo.Update(ctx, initialRun)
+	_ = cluster.RunsRepo.Update(ctxWithTenant, initialRun)
 
 	// 3. Node B kiểm tra pending runs cần recovery
-	pending, err := cluster.RunsRepo.ListPendingRuns(ctx)
+	pending, err := cluster.RunsRepo.ListPendingRuns(ctxWithTenant)
 	if err != nil {
 		t.Fatalf("Lỗi ListPendingRuns: %v", err)
 	}
@@ -273,13 +276,13 @@ func TestMultiNode_04_NodeCrashRecovery(t *testing.T) {
 	}
 
 	// 4. Node B claim quyền sở hữu run
-	claimed, err := cluster.RunsRepo.ClaimRun(ctx, runID, "worker-node-b", 60*time.Second)
+	claimed, err := cluster.RunsRepo.ClaimRun(ctxWithTenant, runID, "worker-node-b", 60*time.Second)
 	if err != nil || !claimed {
 		t.Fatalf("Node B claim thất bại: %v", err)
 	}
 
 	// 5. Node B nạp checkpoint của Node A để tiếp tục
-	latestCp, err := cluster.Checkpoints.GetLatestCheckpoint(ctx, runID)
+	latestCp, err := cluster.Checkpoints.GetLatestCheckpoint(ctxWithTenant, runID)
 	if err != nil || latestCp == nil {
 		t.Fatalf("Không thể nạp checkpoint: %v", err)
 	}

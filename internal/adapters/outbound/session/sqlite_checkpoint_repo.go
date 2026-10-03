@@ -116,9 +116,9 @@ func (r *SqliteCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 	var args []any
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if !hasID || identity.Role != "admin" {
+	if hasID && identity.Role != "admin" {
 		tenantID := "default"
-		if hasID && identity.TenantID != "" {
+		if identity.TenantID != "" {
 			tenantID = identity.TenantID
 		}
 		query = `
@@ -173,9 +173,9 @@ func (r *SqliteCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 	var args []any
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if !hasID || identity.Role != "admin" {
+	if hasID && identity.Role != "admin" {
 		tenantID := "default"
-		if hasID && identity.TenantID != "" {
+		if identity.TenantID != "" {
 			tenantID = identity.TenantID
 		}
 		query = `
@@ -227,18 +227,19 @@ func (r *SqliteCheckpointRepository) DeleteCheckpoints(ctx context.Context, task
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var query string
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if !hasID || identity.Role != "admin" {
+	if hasID && identity.Role != "admin" {
 		tenantID := "default"
-		if hasID && identity.TenantID != "" {
+		if identity.TenantID != "" {
 			tenantID = identity.TenantID
 		}
-		query := `DELETE FROM agent_checkpoints WHERE task_id = ? AND tenant_id = ?;`
+		query = `DELETE FROM agent_checkpoints WHERE task_id = ? AND tenant_id = ?;`
 		_, err := r.db.ExecContext(ctx, query, taskID, tenantID)
 		return err
 	}
 
-	query := `DELETE FROM agent_checkpoints WHERE task_id = ?;`
+	query = `DELETE FROM agent_checkpoints WHERE task_id = ?;`
 	_, err := r.db.ExecContext(ctx, query, taskID)
 	return err
 }

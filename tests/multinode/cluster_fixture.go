@@ -242,6 +242,10 @@ func SetupTestCluster(t *testing.T) *TestCluster {
 		IsRealS3:       isRealS3,
 	}
 
+	if os.Getenv("TEST_POSTGRES_DSN") != "" {
+		RequireRealPostgres(t, cluster)
+	}
+
 	t.Cleanup(func() {
 		cluster.Close()
 	})

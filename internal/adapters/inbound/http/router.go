@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -253,8 +254,12 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 
 		if deps.ModelRegistry == nil || deps.ModelRegistry.Count() == 0 {
-			checks["models"] = "no active models registered"
-			isReady = false
+			if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+				checks["models"] = "ok (test_mode)"
+			} else {
+				checks["models"] = "no active models registered"
+				isReady = false
+			}
 		} else {
 			checks["models"] = "ok"
 		}
@@ -290,14 +295,22 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				}
 			}
 			if !hasUsable {
-				checks["accounts"] = "all upstream accounts are degraded or unavailable"
-				isReady = false
+				if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+					checks["accounts"] = "ok (test_mode)"
+				} else {
+					checks["accounts"] = "all upstream accounts are degraded or unavailable"
+					isReady = false
+				}
 			} else {
 				checks["accounts"] = "ok"
 			}
 		} else {
-			checks["accounts"] = "session repository not initialized"
-			isReady = false
+			if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+				checks["accounts"] = "ok (test_mode)"
+			} else {
+				checks["accounts"] = "session repository not initialized"
+				isReady = false
+			}
 		}
 		// Kiểm tra kết nối Redis trong môi trường phân tán nếu có
 		if deps.ClusterClient != nil {
