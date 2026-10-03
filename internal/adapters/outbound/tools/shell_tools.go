@@ -99,6 +99,29 @@ func (t *RunCommandTool) Execute(ctx context.Context, argsJSON string) (string, 
 	}
 	cmd.Dir = workDir
 
+	// Làm sạch biến môi trường, tuyệt đối không truyền bí mật server vào tiến trình con
+	var cleanEnv []string
+	sensitiveKeys := []string{
+		"DEZUXK_MASTER_KEY",
+		"DEZUXK_API_KEY",
+		"DEZUXK_ADMIN_PASSWORD",
+		"DEZUXK_ADMIN_SESSION_TOKEN",
+	}
+	for _, env := range os.Environ() {
+		isSensitive := false
+		upperEnv := strings.ToUpper(env)
+		for _, sk := range sensitiveKeys {
+			if strings.HasPrefix(upperEnv, sk+"=") {
+				isSensitive = true
+				break
+			}
+		}
+		if !isSensitive {
+			cleanEnv = append(cleanEnv, env)
+		}
+	}
+	cmd.Env = cleanEnv
+
 	// Khởi tạo Process Group / Windows Job Object để quản lý toàn bộ cây tiến trình
 	jobGroup, _ := setupProcessGroup(cmd)
 

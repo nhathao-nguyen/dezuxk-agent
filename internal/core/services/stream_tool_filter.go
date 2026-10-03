@@ -25,6 +25,8 @@ type StreamToolFilter struct {
 	buffer           strings.Builder
 	emittedToolCalls []domain.OpenAIToolCall
 	hasEmittedRole   bool
+	allowedTools     []domain.OpenAITool
+	toolChoice       any
 }
 
 func NewStreamToolFilter(hasTools bool, w io.Writer, flusher func(), flushed *bool, created int64, model, cID string) *StreamToolFilter {
@@ -36,6 +38,14 @@ func NewStreamToolFilter(hasTools bool, w io.Writer, flusher func(), flushed *bo
 		createdTime:     created,
 		model:           model,
 		conversationID:  cID,
+	}
+}
+
+func (f *StreamToolFilter) SetToolsConfig(tools []domain.OpenAITool, choice any) {
+	f.allowedTools = tools
+	f.toolChoice = choice
+	if len(tools) > 0 {
+		f.hasTools = true
 	}
 }
 
@@ -183,9 +193,20 @@ func (f *StreamToolFilter) OnDelta(delta, cID string) error {
 
 		_, calls := ExtractToolCalls(toolCallBlock)
 		if len(calls) > 0 {
-			f.emittedToolCalls = append(f.emittedToolCalls, calls...)
-			if err := f.emitToolCalls(calls); err != nil {
-				return err
+			var validCalls []domain.OpenAIToolCall
+			if len(f.allowedTools) > 0 || f.toolChoice != nil {
+				if norm, err := ValidateAndNormalizeToolCalls(calls, f.allowedTools, f.toolChoice); err == nil {
+					validCalls = norm
+				}
+			} else {
+				validCalls = calls
+			}
+
+			if len(validCalls) > 0 {
+				f.emittedToolCalls = append(f.emittedToolCalls, validCalls...)
+				if err := f.emitToolCalls(validCalls); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -211,13 +232,24 @@ func (f *StreamToolFilter) FlushRemaining() error {
 	// Thử extract tool calls từ phần còn lại (phòng trường hợp Gemini không đóng thẻ XML hoặc dùng markdown)
 	clean, calls := ExtractToolCalls(remaining)
 	if len(calls) > 0 {
-		f.emittedToolCalls = append(f.emittedToolCalls, calls...)
-		if clean != "" {
-			if err := f.emitContent(clean); err != nil {
-				return err
+		var validCalls []domain.OpenAIToolCall
+		if len(f.allowedTools) > 0 || f.toolChoice != nil {
+			if norm, err := ValidateAndNormalizeToolCalls(calls, f.allowedTools, f.toolChoice); err == nil {
+				validCalls = norm
 			}
+		} else {
+			validCalls = calls
 		}
-		return f.emitToolCalls(calls)
+
+		if len(validCalls) > 0 {
+			f.emittedToolCalls = append(f.emittedToolCalls, validCalls...)
+			if clean != "" {
+				if err := f.emitContent(clean); err != nil {
+					return err
+				}
+			}
+			return f.emitToolCalls(validCalls)
+		}
 	}
 
 	return f.emitContent(remaining)

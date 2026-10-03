@@ -37,6 +37,14 @@ func (r *SqliteSessionRepository) DB() *sql.DB {
 	return r.db
 }
 
+// Ping kiểm tra tình trạng kết nối cơ sở dữ liệu SQLite
+func (r *SqliteSessionRepository) Ping(ctx context.Context) error {
+	if r.db == nil {
+		return fmt.Errorf("cơ sở dữ liệu SQLite chưa được khởi tạo")
+	}
+	return r.db.PingContext(ctx)
+}
+
 func (r *SqliteSessionRepository) SetAlertDispatcher(d ports.AlertDispatcher) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -315,6 +315,7 @@ func (s *ChatService) streamRound(
 	createdTime := time.Now().Unix()
 	var conversationID string
 	filter := NewStreamToolFilter(len(req.Tools) > 0, streamWriter, flusher, flushedToClient, createdTime, req.Model, conversationID)
+	filter.SetToolsConfig(req.Tools, req.ToolChoice)
 
 	var streamedReasoning bool
 
@@ -434,29 +435,31 @@ func (s *ChatService) streamRound(
 	}
 
 	toolCalls := filter.GetEmittedToolCalls()
-	if len(toolCalls) == 0 {
+	if len(toolCalls) == 0 && (len(req.Tools) > 0 || req.ToolChoice != nil) {
 		_, fallbackCalls := ExtractToolCalls(reply.Text)
 		if len(fallbackCalls) > 0 {
-			toolCalls = fallbackCalls
-			// Phát chunk tool_calls bổ sung nếu chưa được phát qua stream
-			toolChunk := domain.OpenAIChatResponse{
-				ID:             "chatcmpl-" + conversationID,
-				Object:         "chat.completion.chunk",
-				Created:        createdTime,
-				Model:          req.Model,
-				ConversationID: conversationID,
-				Choices: []domain.OpenAIChoice{{
-					Index: 0,
-					Delta: domain.OpenAIDelta{
-						Role:      "assistant",
-						ToolCalls: toolCalls,
-					},
-				}},
-			}
-			if b, err := json.Marshal(toolChunk); err == nil {
-				_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
-				if flusher != nil {
-					flusher()
+			if validCalls, err := ValidateAndNormalizeToolCalls(fallbackCalls, req.Tools, req.ToolChoice); err == nil && len(validCalls) > 0 {
+				toolCalls = validCalls
+				// Phát chunk tool_calls bổ sung nếu chưa được phát qua stream
+				toolChunk := domain.OpenAIChatResponse{
+					ID:             "chatcmpl-" + conversationID,
+					Object:         "chat.completion.chunk",
+					Created:        createdTime,
+					Model:          req.Model,
+					ConversationID: conversationID,
+					Choices: []domain.OpenAIChoice{{
+						Index: 0,
+						Delta: domain.OpenAIDelta{
+							Role:      "assistant",
+							ToolCalls: toolCalls,
+						},
+					}},
+				}
+				if b, err := json.Marshal(toolChunk); err == nil {
+					_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+					if flusher != nil {
+						flusher()
+					}
 				}
 			}
 		}
@@ -608,7 +611,18 @@ func (s *ChatService) syncRound(
 		}
 	}
 
-	cleanText, toolCalls := ExtractToolCalls(reply.Text)
+	cleanText, rawCalls := ExtractToolCalls(reply.Text)
+	var toolCalls []domain.OpenAIToolCall
+	if len(req.Tools) > 0 || req.ToolChoice != nil {
+		if len(rawCalls) > 0 || req.ToolChoice != nil {
+			normCalls, err := ValidateAndNormalizeToolCalls(rawCalls, req.Tools, req.ToolChoice)
+			if err != nil {
+				return nil, err
+			}
+			toolCalls = normCalls
+		}
+	}
+
 	var reasoningText string
 	if len(reply.ThinkingBlocks) > 0 {
 		var rParts []string
@@ -641,7 +655,19 @@ func (s *ChatService) syncRound(
 		for i := 1; i < len(reply.Drafts); i++ {
 			draftContent := reply.Drafts[i]
 			if strings.TrimSpace(draftContent) != "" && draftContent != reply.Text {
-				dClean, dCalls := ExtractToolCalls(draftContent)
+				dClean, dRawCalls := ExtractToolCalls(draftContent)
+				var dCalls []domain.OpenAIToolCall
+				if len(req.Tools) > 0 || req.ToolChoice != nil {
+					if len(dRawCalls) > 0 || req.ToolChoice != nil {
+						if norm, err := ValidateAndNormalizeToolCalls(dRawCalls, req.Tools, req.ToolChoice); err == nil {
+							dCalls = norm
+						}
+					}
+				}
+				dStopReason := "stop"
+				if len(dCalls) > 0 {
+					dStopReason = "tool_calls"
+				}
 				choices = append(choices, domain.OpenAIChoice{
 					Index: len(choices),
 					Message: domain.OpenAIMessage{
@@ -649,7 +675,7 @@ func (s *ChatService) syncRound(
 						Content:   dClean,
 						ToolCalls: dCalls,
 					},
-					FinishReason: &stopReason,
+					FinishReason: &dStopReason,
 				})
 			}
 		}

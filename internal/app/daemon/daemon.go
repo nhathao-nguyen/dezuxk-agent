@@ -24,6 +24,7 @@ import (
 	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/core/services"
 	"dezuxk-gateway/internal/core/services/agent"
+	"dezuxk-gateway/internal/core/services/policy"
 )
 
 // Run khởi động toàn bộ hạ tầng Dezuxk AI Gateway ở chế độ Headless Daemon
@@ -206,7 +207,9 @@ func Run(configPath string, portOverride int) error {
 	// Khởi tạo Autonomous Agent Tool Registry, Checkpoint Repo & Runners
 	toolRegistry := tools.NewToolRegistry()
 	tools.RegisterDefaultTools(toolRegistry, ".")
+	policyEngine := policy.NewPolicyEngine(toolRegistry, nil)
 	agentRunner := agent.NewRunner(chatService, toolRegistry, nil)
+	agentRunner.SetPolicyEngine(policyEngine)
 
 	var checkpointRepo ports.CheckpointRepository
 	var memoryRepo ports.MemoryRepository
@@ -268,6 +271,7 @@ func Run(configPath string, portOverride int) error {
 	}
 
 	graphRunner := agent.NewGraphEngine(chatService, toolRegistry, checkpointRepo, nil, 3)
+	graphRunner.SetPolicyEngine(policyEngine)
 
 	httpRouter := adaptersHTTP.BuildRouter(adaptersHTTP.RouterDependencies{
 		Config:                cfg,
@@ -303,11 +307,13 @@ func Run(configPath string, portOverride int) error {
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpServer := &http.Server{
-		Addr:           serverAddr,
-		Handler:        httpRouter,
-		ReadTimeout:    cfg.Server.ReadTimeout,
-		WriteTimeout:   cfg.Server.WriteTimeout,
-		MaxHeaderBytes: cfg.Server.MaxHeaderBytes,
+		Addr:              serverAddr,
+		Handler:           httpRouter,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 	}
 
 	// 9. Chạy Server trong Goroutine

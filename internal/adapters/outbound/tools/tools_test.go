@@ -121,7 +121,13 @@ type mockMemoryService struct {
 func (m *mockMemoryService) GetCoreMemory() *domain.CoreMemory {
 	return &m.core
 }
+func (m *mockMemoryService) GetCoreMemoryForContext(ctx context.Context) *domain.CoreMemory {
+	return &m.core
+}
 func (m *mockMemoryService) UpdateCoreMemory(update func(core *domain.CoreMemory)) {
+	update(&m.core)
+}
+func (m *mockMemoryService) UpdateCoreMemoryForContext(ctx context.Context, update func(core *domain.CoreMemory)) {
 	update(&m.core)
 }
 func (m *mockMemoryService) StoreArchival(ctx context.Context, key, content string, tags []string) error {
@@ -235,14 +241,19 @@ func TestBrowserToolsRegistration(t *testing.T) {
 	reg := NewToolRegistry()
 	RegisterBrowserTools(reg, 9222, tempDir)
 
-	toolsToCheck := []string{"browser_navigate", "browser_evaluate", "browser_screenshot"}
-	for _, name := range toolsToCheck {
+	expectedPermissions := map[string]domain.PermissionLevel{
+		"browser_navigate":   domain.PermissionSafe,
+		"browser_evaluate":   domain.PermissionRequiresApproval,
+		"browser_screenshot": domain.PermissionSafe,
+	}
+
+	for name, expectedPerm := range expectedPermissions {
 		tool, ok := reg.GetTool(name)
 		if !ok {
 			t.Errorf("Thiếu công cụ duyệt web: %s", name)
 		}
-		if tool.Permission() != domain.PermissionSafe {
-			t.Errorf("PermissionLevel của %s phải là safe", name)
+		if tool.Permission() != expectedPerm {
+			t.Errorf("PermissionLevel của %s phải là %s, nhận được: %s", name, expectedPerm, tool.Permission())
 		}
 	}
 }

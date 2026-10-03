@@ -14,6 +14,7 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/core/services/linter"
+	"dezuxk-gateway/internal/core/services/policy"
 )
 
 func generateTaskID() string {
@@ -26,10 +27,11 @@ func generateTaskID() string {
 
 // Runner triển khai ports.AgentRunner
 type Runner struct {
-	chatUseCase ports.ChatUseCase
-	tools       ports.ToolRegistry
-	approval    ports.ApprovalProvider
-	memorySvc   ports.MemoryService
+	chatUseCase  ports.ChatUseCase
+	tools        ports.ToolRegistry
+	approval     ports.ApprovalProvider
+	policyEngine ports.ToolExecutionService
+	memorySvc    ports.MemoryService
 }
 
 // NewRunner khởi tạo một Agent Runner
@@ -39,6 +41,18 @@ func NewRunner(chatUseCase ports.ChatUseCase, tools ports.ToolRegistry, approval
 		tools:       tools,
 		approval:    approval,
 	}
+}
+
+// SetPolicyEngine thiết lập engine chính sách điều phối kiểm soát tool
+func (r *Runner) SetPolicyEngine(p ports.ToolExecutionService) {
+	r.policyEngine = p
+}
+
+func (r *Runner) getPolicyEngine() ports.ToolExecutionService {
+	if r.policyEngine != nil {
+		return r.policyEngine
+	}
+	return policy.NewPolicyEngine(r.tools, r.approval)
 }
 
 // SetMemoryService liên kết hệ thống bộ nhớ 3 tầng vào Runner
@@ -86,11 +100,29 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		return nil, fmt.Errorf("mục tiêu nhiệm vụ (goal) không được để trống")
 	}
 
+	// Đảm bảo chính sách phân quyền Tenant được áp dụng và client không thể bypass
+	identity, hasIdentity := domain.TenantIdentityFromContext(ctx)
+	if !hasIdentity {
+		identity = domain.DefaultInternalIdentity()
+		if opts.Supervised {
+			identity.RequireApproval = true
+		}
+		ctx = domain.ContextWithTenantIdentity(ctx, identity)
+	}
+
+	opts.MaxSteps = identity.EffectiveMaxSteps(opts.MaxSteps)
+	if identity.EnforceSandbox {
+		opts.UseSandbox = true
+	}
+	if !identity.AutoMergeAllowed {
+		opts.AutoMerge = false
+	}
+	if identity.RequireApproval {
+		opts.Supervised = true
+	}
+
 	if opts.Model == "" {
 		opts.Model = "gemini-3.8-flash"
-	}
-	if opts.MaxSteps <= 0 {
-		opts.MaxSteps = 25
 	}
 	if opts.Workspace == "" {
 		opts.Workspace = "."
@@ -277,43 +309,17 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 				opts.OnProgress(step, "tool_start", fmt.Sprintf("Thực thi công cụ: %s (%s)", toolName, toolArgs))
 			}
 
-			targetTool, exists := r.tools.GetTool(toolName)
-			var toolOutput string
-			var execErr error
-
-			if !exists {
-				toolOutput = fmt.Sprintf("LỖI: Công cụ %q không tồn tại trong danh mục khả dụng.", toolName)
-			} else {
-				// Kiểm tra Guardrail & Phê duyệt Human-in-the-Loop
-				if targetTool.Permission() == domain.PermissionDestructive && opts.Supervised && r.approval != nil {
-					approvalReq := domain.ApprovalRequest{
-						ToolName:    toolName,
-						Arguments:   toolArgs,
-						Description: targetTool.Description(),
-						Permission:  targetTool.Permission(),
-						RequestedAt: time.Now(),
-					}
-
-					if opts.OnProgress != nil {
-						opts.OnProgress(step, "approval_wait", fmt.Sprintf("Chờ bạn xác nhận thực thi lệnh nhạy cảm: %s", toolName))
-					}
-
-					approved, appErr := r.approval.RequestApproval(ctx, approvalReq)
-					if appErr != nil || !approved {
-						toolOutput = fmt.Sprintf("[XÁC NHẬN BỊ TỪ CHỐI]: Người dùng đã từ chối cấp quyền thực thi công cụ %q với tham số: %s. Hãy đề xuất phương án an toàn khác hoặc hỏi lại.", toolName, toolArgs)
-						stepRecord.ToolResults = append(stepRecord.ToolResults, toolOutput)
-						state.Messages = append(state.Messages, domain.OpenAIMessage{
-							Role:       "tool",
-							ToolCallID: tc.ID,
-							Content:    toolOutput,
-						})
-						continue
-					}
+			if opts.OnProgress != nil {
+				targetTool, exists := r.tools.GetTool(toolName)
+				if exists && targetTool.Permission() == domain.PermissionDestructive && opts.Supervised {
+					opts.OnProgress(step, "approval_wait", fmt.Sprintf("Chờ xác thực phê duyệt lệnh nhạy cảm: %s", toolName))
 				}
+			}
 
-				// Thực thi công cụ
-				toolOutput, execErr = targetTool.Execute(ctx, toolArgs)
-				if execErr != nil {
+			// Thực thi công cụ tuyệt đối thông qua Policy Engine
+			toolOutput, execErr := r.getPolicyEngine().ExecuteTool(ctx, toolName, toolArgs)
+			if execErr != nil {
+				if toolOutput == "" {
 					toolOutput = fmt.Sprintf("LỖI THỰC THI [%s]: %v", toolName, execErr)
 				}
 			}

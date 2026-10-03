@@ -109,6 +109,6 @@ cache:
 admin:
   enabled: true
   username: "admin"
-  password: "dezuxk_admin_secret_pass"
-  session_token: "dezuxk_secure_admin_session_token_2026"
+  password: "" # Thiết lập mật khẩu mạnh qua biến môi trường DEZUXK_ADMIN_PASSWORD hoặc file bí mật
+  session_token: "" # Thiết lập token ngẫu nhiên qua DEZUXK_ADMIN_SESSION_TOKEN
 

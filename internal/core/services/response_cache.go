@@ -3,6 +3,7 @@ package services
 import (
 	"container/list"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -225,27 +226,45 @@ func (c *ResponseCache) Stats() CacheStats {
 	}
 }
 
-// GenerateChatCacheKey tính toán khóa băm SHA-256 từ các tham số hội thoại
-// Thuật toán: model + messages + temperature + system_prompt + thinking + grounding + code_interpreter
-func GenerateChatCacheKey(
-	model string,
-	messages []domain.OpenAIMessage,
-	temperature float64,
-	systemPrompt string,
-	thinking bool,
-	grounding bool,
-	codeInterpreter bool,
-) string {
-	var b strings.Builder
-	b.WriteString(strings.TrimSpace(model))
-	b.WriteString("|")
-	b.WriteString(strings.TrimSpace(systemPrompt))
-	b.WriteString("|")
-	b.WriteString(fmt.Sprintf("%.4f", temperature))
-	b.WriteString("|")
-	b.WriteString(fmt.Sprintf("th:%v|gr:%v|ci:%v|", thinking, grounding, codeInterpreter))
+// IsolatedChatCacheKeyParams chứa các thuộc tính định danh ngữ cảnh ảnh hưởng đến kết quả mô hình
+type IsolatedChatCacheKeyParams struct {
+	TenantID        string
+	KeyID           string
+	Model           string
+	Messages        []domain.OpenAIMessage
+	Temperature     float64
+	SystemPrompt    string
+	Thinking        bool
+	Grounding       bool
+	CodeInterpreter bool
+	ResponseFormat  any
+}
 
-	for _, m := range messages {
+// GenerateIsolatedChatCacheKey tính toán khóa băm SHA-256 biệt lập theo từng Tenant và các tham số chi tiết
+func GenerateIsolatedChatCacheKey(p IsolatedChatCacheKeyParams) string {
+	var b strings.Builder
+	tid := strings.TrimSpace(p.TenantID)
+	if tid == "" {
+		tid = "default"
+	}
+	kid := strings.TrimSpace(p.KeyID)
+	if kid == "" {
+		kid = "default"
+	}
+	b.WriteString("tid:" + tid + "|kid:" + kid + "|")
+	b.WriteString(strings.TrimSpace(p.Model))
+	b.WriteString("|")
+	b.WriteString(strings.TrimSpace(p.SystemPrompt))
+	b.WriteString("|")
+	b.WriteString(fmt.Sprintf("%.4f", p.Temperature))
+	b.WriteString("|")
+	b.WriteString(fmt.Sprintf("th:%v|gr:%v|ci:%v|", p.Thinking, p.Grounding, p.CodeInterpreter))
+	if p.ResponseFormat != nil {
+		rfJSON, _ := json.Marshal(p.ResponseFormat)
+		b.WriteString("rf:" + string(rfJSON) + "|")
+	}
+
+	for _, m := range p.Messages {
 		b.WriteString(strings.TrimSpace(m.Role))
 		b.WriteString(":")
 		b.WriteString(strings.TrimSpace(m.Content))
@@ -264,4 +283,27 @@ func GenerateChatCacheKey(
 
 	hash := sha256.Sum256([]byte(b.String()))
 	return fmt.Sprintf("chat:%x", hash)
+}
+
+// GenerateChatCacheKey tính toán khóa băm SHA-256 từ các tham số hội thoại cơ bản (tương thích ngược)
+func GenerateChatCacheKey(
+	model string,
+	messages []domain.OpenAIMessage,
+	temperature float64,
+	systemPrompt string,
+	thinking bool,
+	grounding bool,
+	codeInterpreter bool,
+) string {
+	return GenerateIsolatedChatCacheKey(IsolatedChatCacheKeyParams{
+		TenantID:        "default",
+		KeyID:           "default",
+		Model:           model,
+		Messages:        messages,
+		Temperature:     temperature,
+		SystemPrompt:    systemPrompt,
+		Thinking:        thinking,
+		Grounding:       grounding,
+		CodeInterpreter: codeInterpreter,
+	})
 }

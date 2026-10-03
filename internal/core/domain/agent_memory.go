@@ -12,6 +12,9 @@ import (
 
 // CoreMemory lưu trữ các khối thông tin nền tảng cốt lõi của Agent (Letta-style)
 type CoreMemory struct {
+	TenantID       string    `json:"tenant_id,omitempty"`
+	ProjectID      string    `json:"project_id,omitempty"`
+	AgentID        string    `json:"agent_id,omitempty"`
 	Persona        string    `json:"persona"`         // Định danh, phong cách và vai trò của Agent
 	HumanProfile   string    `json:"human_profile"`   // Sở thích, quy ước coding của người dùng
 	ProjectContext string    `json:"project_context"` // Quy tắc kiến trúc, quy ước của dự án
@@ -57,6 +60,9 @@ type RecallMemorySummary struct {
 // ArchivalMemoryItem một bản ghi kiến thức/kinh nghiệm bền vững trong cơ sở dữ liệu
 type ArchivalMemoryItem struct {
 	ID        int64     `json:"id"`
+	TenantID  string    `json:"tenant_id,omitempty"`
+	ProjectID string    `json:"project_id,omitempty"`
+	AgentID   string    `json:"agent_id,omitempty"`
 	Key       string    `json:"key"`     // Khóa định danh hoặc chủ đề (ví dụ: "hexagonal_rules", "bug_fix_429")
 	Content   string    `json:"content"` // Nội dung kiến thức chi tiết
 	Tags      []string  `json:"tags"`    // Nhãn phân loại (ví dụ: ["architecture", "go", "security"])

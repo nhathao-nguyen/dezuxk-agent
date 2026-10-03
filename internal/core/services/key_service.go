@@ -159,21 +159,87 @@ func (s *KeyService) CreateKey(ctx context.Context, req domain.CreateKeyRequest)
 	keyPrefix := domain.MaskKey(rawKey)
 	now := time.Now().UTC()
 
+	tenantID := strings.TrimSpace(req.TenantID)
+	if tenantID == "" {
+		tenantID = "tenant_" + keyID
+	}
+
+	scopes := req.Scopes
+	if len(scopes) == 0 {
+		if role == "admin" {
+			scopes = []string{domain.ScopeChat, domain.ScopeResponses, domain.ScopeAgent, domain.ScopeMemory, domain.ScopeBrowser, domain.ScopeShell, domain.ScopeAdmin}
+		} else {
+			scopes = []string{domain.ScopeChat, domain.ScopeResponses, domain.ScopeAgent, domain.ScopeMemory}
+		}
+	}
+
+	maxSteps := req.MaxAgentSteps
+	if maxSteps <= 0 {
+		maxSteps = 25
+	}
+	maxConcurrent := req.MaxConcurrentRuns
+	if maxConcurrent <= 0 {
+		maxConcurrent = 3
+	}
+	runtimeSec := req.MaxToolRuntimeSeconds
+	if runtimeSec <= 0 {
+		runtimeSec = 60
+	}
+
+	requireApproval := true
+	if req.RequireApproval != nil {
+		requireApproval = *req.RequireApproval
+	} else if role == "admin" {
+		requireApproval = false
+	}
+
+	allowShell := false
+	if req.AllowShell != nil {
+		allowShell = *req.AllowShell
+	} else if role == "admin" {
+		allowShell = true
+	}
+
+	enforceSandbox := true
+	if req.EnforceSandbox != nil {
+		enforceSandbox = *req.EnforceSandbox
+	} else if role == "admin" {
+		enforceSandbox = false
+	}
+
+	autoMerge := false
+	if req.AutoMergeAllowed != nil {
+		autoMerge = *req.AutoMergeAllowed
+	} else if role == "admin" {
+		autoMerge = true
+	}
+
 	vKey := &domain.VirtualKey{
-		ID:                 keyID,
-		KeyHash:            keyHash,
-		KeyPrefix:          keyPrefix,
-		Name:               name,
-		Role:               role,
-		RateLimitRPM:       rpm,
-		DailyQuotaRequests: dailyQuota,
-		MaxTokenQuota:      req.MaxTokenQuota,
-		UsedToday:          0,
-		LastUsedDate:       now.Format("2006-01-02"),
-		AllowedModels:      allowedModels,
-		IsActive:           true,
-		ExpiresAt:          req.ExpiresAt,
-		CreatedAt:          now,
+		ID:                    keyID,
+		TenantID:              tenantID,
+		KeyHash:               keyHash,
+		KeyPrefix:             keyPrefix,
+		Name:                  name,
+		Role:                  role,
+		RateLimitRPM:          rpm,
+		DailyQuotaRequests:    dailyQuota,
+		MaxTokenQuota:         req.MaxTokenQuota,
+		UsedToday:             0,
+		LastUsedDate:          now.Format("2006-01-02"),
+		AllowedModels:         allowedModels,
+		Scopes:                scopes,
+		AllowedTools:          req.AllowedTools,
+		AllowedWorkspaceRoots: req.AllowedWorkspaceRoots,
+		MaxAgentSteps:         maxSteps,
+		MaxConcurrentRuns:     maxConcurrent,
+		MaxToolRuntimeSeconds: runtimeSec,
+		RequireApproval:       requireApproval,
+		AllowShell:            allowShell,
+		EnforceSandbox:        enforceSandbox,
+		AutoMergeAllowed:      autoMerge,
+		IsActive:              true,
+		ExpiresAt:             req.ExpiresAt,
+		CreatedAt:             now,
 	}
 
 	if err := s.repo.Save(ctx, vKey); err != nil {
@@ -216,12 +282,18 @@ func (s *KeyService) ValidateKey(ctx context.Context, rawKey string, targetModel
 	if s.isMasterAdminKey(rawKey) {
 		return &domain.VirtualKey{
 			ID:                 "master",
+			TenantID:           "admin_system",
 			KeyPrefix:          domain.MaskKey(rawKey),
 			Name:               "Master Super Admin",
 			Role:               "admin",
 			RateLimitRPM:       -1,
 			DailyQuotaRequests: -1,
 			AllowedModels:      []string{"*"},
+			Scopes:             []string{domain.ScopeChat, domain.ScopeResponses, domain.ScopeAgent, domain.ScopeMemory, domain.ScopeBrowser, domain.ScopeShell, domain.ScopeAdmin},
+			AllowShell:         true,
+			RequireApproval:    false,
+			EnforceSandbox:     false,
+			AutoMergeAllowed:   true,
 			IsActive:           true,
 			CreatedAt:          time.Now().UTC(),
 		}, nil

@@ -14,10 +14,11 @@ import (
 // MemoryManager quản lý toàn diện 3 tầng bộ nhớ của Agent (Working, Recall, Archival)
 type MemoryManager struct {
 	mu          sync.RWMutex
-	coreMemory  domain.CoreMemory
+	tenantCores map[string]*domain.CoreMemory
 	archival    ports.MemoryRepository
 	chatUseCase ports.ChatUseCase
 	model       string
+	initialCore domain.CoreMemory
 }
 
 // NewMemoryManager khởi tạo MemoryManager
@@ -34,28 +35,66 @@ func NewMemoryManager(
 		initialCore.UpdatedAt = time.Now()
 	}
 
+	cores := make(map[string]*domain.CoreMemory)
+	defaultCopy := initialCore
+	cores["default/default/default"] = &defaultCopy
+
 	return &MemoryManager{
-		coreMemory:  initialCore,
+		tenantCores: cores,
 		archival:    archival,
 		chatUseCase: chatUseCase,
 		model:       model,
+		initialCore: initialCore,
 	}
 }
 
 var _ ports.MemoryService = (*MemoryManager)(nil)
 
 func (m *MemoryManager) GetCoreMemory() *domain.CoreMemory {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	copy := m.coreMemory
+	return m.GetCoreMemoryForContext(context.Background())
+}
+
+func (m *MemoryManager) GetCoreMemoryForContext(ctx context.Context) *domain.CoreMemory {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	ns := domain.MemoryNamespaceFromContext(ctx)
+	key := ns.Key()
+	core, exists := m.tenantCores[key]
+	if !exists {
+		fresh := m.initialCore
+		fresh.TenantID = ns.TenantID
+		fresh.ProjectID = ns.ProjectID
+		fresh.AgentID = ns.AgentID
+		fresh.UpdatedAt = time.Now()
+		m.tenantCores[key] = &fresh
+		core = &fresh
+	}
+	copy := *core
 	return &copy
 }
 
 func (m *MemoryManager) UpdateCoreMemory(update func(core *domain.CoreMemory)) {
+	m.UpdateCoreMemoryForContext(context.Background(), update)
+}
+
+func (m *MemoryManager) UpdateCoreMemoryForContext(ctx context.Context, update func(core *domain.CoreMemory)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	update(&m.coreMemory)
-	m.coreMemory.UpdatedAt = time.Now()
+
+	ns := domain.MemoryNamespaceFromContext(ctx)
+	key := ns.Key()
+	core, exists := m.tenantCores[key]
+	if !exists {
+		fresh := m.initialCore
+		fresh.TenantID = ns.TenantID
+		fresh.ProjectID = ns.ProjectID
+		fresh.AgentID = ns.AgentID
+		core = &fresh
+		m.tenantCores[key] = core
+	}
+	update(core)
+	core.UpdatedAt = time.Now()
 }
 
 func (m *MemoryManager) StoreArchival(ctx context.Context, key, content string, tags []string) error {
@@ -63,10 +102,14 @@ func (m *MemoryManager) StoreArchival(ctx context.Context, key, content string, 
 		return fmt.Errorf("kho lưu trữ Archival Memory chưa được kích hoạt")
 	}
 
+	ns := domain.MemoryNamespaceFromContext(ctx)
 	item := &domain.ArchivalMemoryItem{
-		Key:     key,
-		Content: content,
-		Tags:    tags,
+		TenantID:  ns.TenantID,
+		ProjectID: ns.ProjectID,
+		AgentID:   ns.AgentID,
+		Key:       key,
+		Content:   content,
+		Tags:      tags,
 	}
 	return m.archival.Store(ctx, item)
 }

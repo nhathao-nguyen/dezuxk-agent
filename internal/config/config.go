@@ -13,8 +13,10 @@ import (
 
 // Config chỉ chứa các tham số hạ tầng máy chủ Gateway.
 // Tuyệt đối không chứa tài khoản, cookie hay mô hình Gemini/Flow.
+// CHÚ Ý BẢO MẬT: Bất kỳ secret nào từng được commit lên Git phải được xoay (rotate) ngay lập tức!
 type Config struct {
-	Server     ServerConfig                 `yaml:"server"`
+	Environment string                       `yaml:"environment"` // "development", "staging", "production"
+	Server      ServerConfig                 `yaml:"server"`
 	Operations Operations                   `yaml:"operations"`
 	Profiles   ProfilesConfig               `yaml:"profiles"`
 	Media      MediaConfig                  `yaml:"media"`
@@ -361,6 +363,17 @@ func (c CacheConfig) SupportsMethod(method string) bool {
 	return false
 }
 
+func (c *Config) IsProduction() bool {
+	if strings.EqualFold(strings.TrimSpace(c.Environment), "production") {
+		return true
+	}
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("DEZUXK_ENV")))
+	if env == "" {
+		env = strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
+	}
+	return env == "production"
+}
+
 type AdminConfig struct {
 	Enabled      *bool  `yaml:"enabled"`
 	Username     string `yaml:"username"`
@@ -383,17 +396,11 @@ func (a AdminConfig) GetUsername() string {
 }
 
 func (a AdminConfig) GetPassword() string {
-	if a.Password != "" {
-		return a.Password
-	}
-	return "dezuxk_admin_secret_pass"
+	return a.Password
 }
 
 func (a AdminConfig) GetSessionToken() string {
-	if a.SessionToken != "" {
-		return a.SessionToken
-	}
-	return "dezuxk_admin_token"
+	return a.SessionToken
 }
 
 type RpcOverrideConfig struct {
@@ -429,6 +436,12 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 func applyEnvOverrides(cfg *Config) {
+	if env := os.Getenv("DEZUXK_ENV"); env != "" {
+		cfg.Environment = env
+	} else if env := os.Getenv("ENV"); env != "" {
+		cfg.Environment = env
+	}
+
 	if h := os.Getenv("DEZUXK_HOST"); h != "" {
 		cfg.Server.Host = h
 	} else if h := os.Getenv("HOST"); h != "" {
@@ -466,6 +479,9 @@ func applyEnvOverrides(cfg *Config) {
 	if pw := os.Getenv("DEZUXK_ADMIN_PASSWORD"); pw != "" {
 		cfg.Admin.Password = pw
 	}
+	if st := os.Getenv("DEZUXK_ADMIN_SESSION_TOKEN"); st != "" {
+		cfg.Admin.SessionToken = st
+	}
 }
 
 // Validate kiểm tra tính hợp lệ của hạ tầng máy chủ
@@ -478,6 +494,20 @@ func (c *Config) Validate() error {
 	}
 	if c.Profiles.BaseDir == "" {
 		return errors.New("profiles.base_dir là bắt buộc (thư mục lưu profile Chrome từng tài khoản)")
+	}
+
+	if c.IsProduction() {
+		if strings.TrimSpace(c.Security.MasterKey) == "" {
+			return errors.New("security.master_key bắt buộc phải được cấu hình trong môi trường production")
+		}
+		if c.Admin.IsEnabled() {
+			if strings.TrimSpace(c.Admin.Password) == "" || c.Admin.Password == "dezuxk_admin_secret_pass" {
+				return errors.New("admin.password không được để trống hoặc dùng mật khẩu mặc định trong môi trường production")
+			}
+			if strings.TrimSpace(c.Admin.SessionToken) == "" || c.Admin.SessionToken == "dezuxk_admin_token" || c.Admin.SessionToken == "dezuxk_secure_admin_session_token_2026" {
+				return errors.New("admin.session_token không được để trống hoặc dùng token mặc định trong môi trường production")
+			}
+		}
 	}
 
 	return nil

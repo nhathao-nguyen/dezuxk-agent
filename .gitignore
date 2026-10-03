@@ -25,3 +25,12 @@ server.log
 # Temporary test project
 test_project/
 
+# Local Secrets & Configurations
+configs/config.yaml
+.env
+*.env
+.env.*
+secrets/
+*.pem
+*.key
+

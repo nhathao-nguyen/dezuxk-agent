@@ -16,6 +16,7 @@ import (
 	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/core/services"
 	"dezuxk-gateway/internal/core/services/linter"
+	"dezuxk-gateway/internal/core/services/policy"
 )
 
 var reJSONBlock = regexp.MustCompile(`(?s)` + "```" + `(?:json)?\s*([\{\[].*?[\}\]])\s*` + "```")
@@ -26,6 +27,7 @@ type GraphEngine struct {
 	tools          ports.ToolRegistry
 	checkpointRepo ports.CheckpointRepository
 	approval       ports.ApprovalProvider
+	policyEngine   ports.ToolExecutionService
 	runner         *Runner
 	maxFixRetries  int
 }
@@ -52,9 +54,45 @@ func NewGraphEngine(
 	}
 }
 
+// SetPolicyEngine thiết lập engine chính sách kiểm soát toàn diện lời gọi công cụ
+func (g *GraphEngine) SetPolicyEngine(p ports.ToolExecutionService) {
+	g.policyEngine = p
+	if g.runner != nil {
+		g.runner.SetPolicyEngine(p)
+	}
+}
+
+func (g *GraphEngine) getPolicyEngine() ports.ToolExecutionService {
+	if g.policyEngine != nil {
+		return g.policyEngine
+	}
+	return policy.NewPolicyEngine(g.tools, g.approval)
+}
+
 var _ ports.GraphWorkflowRunner = (*GraphEngine)(nil)
 
 func (g *GraphEngine) RunGraph(ctx context.Context, goal string, opts domain.AgentRunOptions) (*domain.AgentGraphState, error) {
+	// Đảm bảo áp dụng chính sách bảo mật Tenant, client không thể can thiệp
+	identity, hasIdentity := domain.TenantIdentityFromContext(ctx)
+	if !hasIdentity {
+		identity = domain.DefaultInternalIdentity()
+		if opts.Supervised {
+			identity.RequireApproval = true
+		}
+		ctx = domain.ContextWithTenantIdentity(ctx, identity)
+	}
+
+	opts.MaxSteps = identity.EffectiveMaxSteps(opts.MaxSteps)
+	if identity.EnforceSandbox {
+		opts.UseSandbox = true
+	}
+	if !identity.AutoMergeAllowed {
+		opts.AutoMerge = false
+	}
+	if identity.RequireApproval {
+		opts.Supervised = true
+	}
+
 	taskID := generateTaskID()
 	state := &domain.AgentGraphState{
 		TaskID:      taskID,
@@ -435,13 +473,18 @@ func (g *GraphEngine) nodeVerify(ctx context.Context, state *domain.AgentGraphSt
 		opts.OnProgress(step.ID, "verify_exec", fmt.Sprintf("  Chạy lệnh xác minh: %s", cleanCmd))
 	}
 
-	cmdTool, exists := g.tools.GetTool("run_command")
-	if !exists {
-		return false, fmt.Errorf("không tìm thấy công cụ run_command để xác minh")
+	// 1. Kiểm tra an ninh lệnh xác minh qua Policy Engine
+	if err := policy.ValidateVerificationCommand(cleanCmd); err != nil {
+		step.ErrorOutput = fmt.Sprintf("Lệnh kiểm thử bị chặn bởi Policy Engine: %v", err)
+		if opts.OnProgress != nil {
+			opts.OnProgress(step.ID, "verify_fail", fmt.Sprintf("  ✗ Lệnh xác minh bị chặn bởi Policy Engine: %v", err))
+		}
+		return false, nil
 	}
 
+	// 2. Thực thi qua Policy Engine tập trung thay vì gọi trực tiếp run_command
 	argsJSON := fmt.Sprintf(`{"command": %q, "cwd": %q, "timeout_seconds": 90}`, cleanCmd, opts.Workspace)
-	output, err := cmdTool.Execute(ctx, argsJSON)
+	output, err := g.getPolicyEngine().ExecuteTool(ctx, "run_command", argsJSON)
 	if err != nil {
 		step.ErrorOutput = fmt.Sprintf("Lỗi thực thi kiểm thử: %v\nOutput: %s", err, output)
 		return false, nil

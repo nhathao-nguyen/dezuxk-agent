@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"dezuxk-gateway/internal/config"
@@ -194,14 +195,14 @@ func (h *AdminHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expectedUser := h.adminCfg.GetUsername()
-	expectedPass := h.adminCfg.GetPassword()
-	expectedToken := h.adminCfg.GetSessionToken()
+	expectedUser := strings.TrimSpace(h.adminCfg.GetUsername())
+	expectedPass := strings.TrimSpace(h.adminCfg.GetPassword())
+	expectedToken := strings.TrimSpace(h.adminCfg.GetSessionToken())
 
 	authorized := false
-	if req.Token != "" && req.Token == expectedToken {
+	if expectedToken != "" && req.Token != "" && req.Token == expectedToken {
 		authorized = true
-	} else if req.Username == expectedUser && req.Password == expectedPass {
+	} else if expectedPass != "" && expectedUser != "" && req.Username != "" && req.Username == expectedUser && req.Password == expectedPass {
 		authorized = true
 	}
 

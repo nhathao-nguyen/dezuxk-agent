@@ -112,18 +112,25 @@ func (r *SqliteMemoryRepository) migrate() error {
 	baseSchema := `
 	CREATE TABLE IF NOT EXISTS agent_archival_memories (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		key TEXT UNIQUE NOT NULL,
+		tenant_id TEXT NOT NULL DEFAULT 'default',
+		project_id TEXT NOT NULL DEFAULT 'default',
+		agent_id TEXT NOT NULL DEFAULT 'default',
+		key TEXT NOT NULL,
 		content TEXT NOT NULL,
 		tags_json TEXT NOT NULL DEFAULT '[]',
 		embedding_json TEXT DEFAULT '[]',
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_agent_memories_key ON agent_archival_memories(key);
+	CREATE INDEX IF NOT EXISTS idx_agent_memories_tenant_key ON agent_archival_memories(tenant_id, project_id, agent_id, key);
 	`
 	if _, err := r.db.Exec(baseSchema); err != nil {
 		return err
 	}
+	_, _ = r.db.Exec("ALTER TABLE agent_archival_memories ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
+	_, _ = r.db.Exec("ALTER TABLE agent_archival_memories ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';")
+	_, _ = r.db.Exec("ALTER TABLE agent_archival_memories ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'default';")
+	_, _ = r.db.Exec("CREATE INDEX IF NOT EXISTS idx_agent_memories_tenant_key ON agent_archival_memories(tenant_id, project_id, agent_id, key);")
 
 	ftsSchema := `
 	CREATE VIRTUAL TABLE IF NOT EXISTS agent_archival_fts USING fts5(
@@ -164,6 +171,17 @@ func (r *SqliteMemoryRepository) Store(ctx context.Context, item *domain.Archiva
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	ns := domain.MemoryNamespaceFromContext(ctx)
+	if item.TenantID == "" {
+		item.TenantID = ns.TenantID
+	}
+	if item.ProjectID == "" {
+		item.ProjectID = ns.ProjectID
+	}
+	if item.AgentID == "" {
+		item.AgentID = ns.AgentID
+	}
+
 	now := time.Now()
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = now
@@ -179,17 +197,16 @@ func (r *SqliteMemoryRepository) Store(ctx context.Context, item *domain.Archiva
 	tagsJSON, _ := json.Marshal(item.Tags)
 	embedJSON, _ := json.Marshal(item.Embedding)
 
+	// Xóa bản ghi cũ cùng namespace nếu có để đảm bảo tính duy nhất
+	delQuery := `DELETE FROM agent_archival_memories WHERE key = ? AND tenant_id = ? AND project_id = ? AND agent_id = ?;`
+	_, _ = r.db.ExecContext(ctx, delQuery, item.Key, item.TenantID, item.ProjectID, item.AgentID)
+
 	query := `
-	INSERT INTO agent_archival_memories (key, content, tags_json, embedding_json, created_at, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?)
-	ON CONFLICT(key) DO UPDATE SET
-		content = excluded.content,
-		tags_json = excluded.tags_json,
-		embedding_json = excluded.embedding_json,
-		updated_at = excluded.updated_at;
+	INSERT INTO agent_archival_memories (tenant_id, project_id, agent_id, key, content, tags_json, embedding_json, created_at, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 
-	res, err := r.db.ExecContext(ctx, query, item.Key, item.Content, string(tagsJSON), string(embedJSON), item.CreatedAt, item.UpdatedAt)
+	res, err := r.db.ExecContext(ctx, query, item.TenantID, item.ProjectID, item.AgentID, item.Key, item.Content, string(tagsJSON), string(embedJSON), item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("lỗi khi lưu archival memory: %w", err)
 	}
@@ -202,21 +219,55 @@ func (r *SqliteMemoryRepository) Store(ctx context.Context, item *domain.Archiva
 	return nil
 }
 
+func resolveTenant(ctx context.Context) (tenantID string, isAdmin bool) {
+	if identity, ok := domain.TenantIdentityFromContext(ctx); ok {
+		if identity.Role == "admin" && identity.TenantID == "internal-local" {
+			return "", true
+		}
+		if identity.TenantID != "" {
+			return identity.TenantID, false
+		}
+	}
+	ns := domain.MemoryNamespaceFromContext(ctx)
+	if ns.TenantID != "" {
+		return ns.TenantID, false
+	}
+	return "default", false
+}
+
 func (r *SqliteMemoryRepository) Get(ctx context.Context, key string) (*domain.ArchivalMemoryItem, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `
-	SELECT id, key, content, tags_json, embedding_json, created_at, updated_at
-	FROM agent_archival_memories
-	WHERE key = ?;
-	`
+	tenantID, isAdmin := resolveTenant(ctx)
+
+	var query string
+	var args []any
+	if !isAdmin {
+		query = `
+		SELECT id, tenant_id, project_id, agent_id, key, content, tags_json, embedding_json, created_at, updated_at
+		FROM agent_archival_memories
+		WHERE key = ? AND tenant_id = ?
+		ORDER BY id DESC
+		LIMIT 1;
+		`
+		args = []any{key, tenantID}
+	} else {
+		query = `
+		SELECT id, tenant_id, project_id, agent_id, key, content, tags_json, embedding_json, created_at, updated_at
+		FROM agent_archival_memories
+		WHERE key = ?
+		ORDER BY id DESC
+		LIMIT 1;
+		`
+		args = []any{key}
+	}
 
 	var item domain.ArchivalMemoryItem
 	var tagsJSON, embedJSON string
 
-	row := r.db.QueryRowContext(ctx, query, key)
-	if err := row.Scan(&item.ID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, query, args...)
+	if err := row.Scan(&item.ID, &item.TenantID, &item.ProjectID, &item.AgentID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("không tìm thấy memory key %q", key)
 		}
@@ -233,13 +284,27 @@ func (r *SqliteMemoryRepository) ListAll(ctx context.Context) ([]domain.Archival
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `
-	SELECT id, key, content, tags_json, embedding_json, created_at, updated_at
-	FROM agent_archival_memories
-	ORDER BY updated_at DESC;
-	`
+	tenantID, isAdmin := resolveTenant(ctx)
+	var query string
+	var args []any
 
-	rows, err := r.db.QueryContext(ctx, query)
+	if !isAdmin {
+		query = `
+		SELECT id, tenant_id, project_id, agent_id, key, content, tags_json, embedding_json, created_at, updated_at
+		FROM agent_archival_memories
+		WHERE tenant_id = ?
+		ORDER BY updated_at DESC;
+		`
+		args = []any{tenantID}
+	} else {
+		query = `
+		SELECT id, tenant_id, project_id, agent_id, key, content, tags_json, embedding_json, created_at, updated_at
+		FROM agent_archival_memories
+		ORDER BY updated_at DESC;
+		`
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +314,7 @@ func (r *SqliteMemoryRepository) ListAll(ctx context.Context) ([]domain.Archival
 	for rows.Next() {
 		var item domain.ArchivalMemoryItem
 		var tagsJSON, embedJSON string
-		if err := rows.Scan(&item.ID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.ProjectID, &item.AgentID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(tagsJSON), &item.Tags)
@@ -264,9 +329,29 @@ func (r *SqliteMemoryRepository) Delete(ctx context.Context, key string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `DELETE FROM agent_archival_memories WHERE key = ?;`
-	_, err := r.db.ExecContext(ctx, query, key)
-	return err
+	tenantID, isAdmin := resolveTenant(ctx)
+	var query string
+	var args []any
+	if !isAdmin {
+		query = `DELETE FROM agent_archival_memories WHERE key = ? AND tenant_id = ?;`
+		args = []any{key, tenantID}
+	} else {
+		query = `DELETE FROM agent_archival_memories WHERE key = ?;`
+		args = []any{key}
+	}
+
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("không tìm thấy bản ghi memory hoặc không có quyền xóa")
+	}
+	return nil
 }
 
 func (r *SqliteMemoryRepository) SearchFTS(ctx context.Context, query string, topK int) ([]domain.MemorySearchResult, error) {
@@ -287,16 +372,32 @@ func (r *SqliteMemoryRepository) SearchFTS(ctx context.Context, query string, to
 		return []domain.MemorySearchResult{}, nil
 	}
 
-	sqlQuery := `
-	SELECT m.id, m.key, m.content, m.tags_json, m.embedding_json, m.created_at, m.updated_at, rank
-	FROM agent_archival_fts f
-	JOIN agent_archival_memories m ON f.rowid = m.id
-	WHERE agent_archival_fts MATCH ?
-	ORDER BY rank
-	LIMIT ?;
-	`
+	tenantID, isAdmin := resolveTenant(ctx)
+	var sqlQuery string
+	var args []any
+	if !isAdmin {
+		sqlQuery = `
+		SELECT m.id, m.tenant_id, m.project_id, m.agent_id, m.key, m.content, m.tags_json, m.embedding_json, m.created_at, m.updated_at, rank
+		FROM agent_archival_fts f
+		JOIN agent_archival_memories m ON f.rowid = m.id
+		WHERE agent_archival_fts MATCH ? AND m.tenant_id = ?
+		ORDER BY rank
+		LIMIT ?;
+		`
+		args = []any{ftsQuery, tenantID, topK}
+	} else {
+		sqlQuery = `
+		SELECT m.id, m.tenant_id, m.project_id, m.agent_id, m.key, m.content, m.tags_json, m.embedding_json, m.created_at, m.updated_at, rank
+		FROM agent_archival_fts f
+		JOIN agent_archival_memories m ON f.rowid = m.id
+		WHERE agent_archival_fts MATCH ?
+		ORDER BY rank
+		LIMIT ?;
+		`
+		args = []any{ftsQuery, topK}
+	}
 
-	rows, err := r.db.QueryContext(ctx, sqlQuery, ftsQuery, topK)
+	rows, err := r.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("lỗi truy vấn FTS5: %w", err)
 	}
@@ -308,7 +409,7 @@ func (r *SqliteMemoryRepository) SearchFTS(ctx context.Context, query string, to
 		var tagsJSON, embedJSON string
 		var rank float64
 
-		if err := rows.Scan(&item.ID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt, &rank); err != nil {
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.ProjectID, &item.AgentID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt, &rank); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(tagsJSON), &item.Tags)
@@ -330,15 +431,30 @@ func (r *SqliteMemoryRepository) searchKeywordFallback(ctx context.Context, quer
 		return []domain.MemorySearchResult{}, nil
 	}
 
+	tenantID, isAdmin := resolveTenant(ctx)
 	likePattern := "%" + terms[0] + "%"
-	sqlQuery := `
-	SELECT id, key, content, tags_json, embedding_json, created_at, updated_at
-	FROM agent_archival_memories
-	WHERE lower(key) LIKE ? OR lower(content) LIKE ? OR lower(tags_json) LIKE ?
-	LIMIT ?;
-	`
 
-	rows, err := r.db.QueryContext(ctx, sqlQuery, likePattern, likePattern, likePattern, topK)
+	var sqlQuery string
+	var args []any
+	if !isAdmin {
+		sqlQuery = `
+		SELECT id, tenant_id, project_id, agent_id, key, content, tags_json, embedding_json, created_at, updated_at
+		FROM agent_archival_memories
+		WHERE (lower(key) LIKE ? OR lower(content) LIKE ? OR lower(tags_json) LIKE ?) AND tenant_id = ?
+		LIMIT ?;
+		`
+		args = []any{likePattern, likePattern, likePattern, tenantID, topK}
+	} else {
+		sqlQuery = `
+		SELECT id, tenant_id, project_id, agent_id, key, content, tags_json, embedding_json, created_at, updated_at
+		FROM agent_archival_memories
+		WHERE lower(key) LIKE ? OR lower(content) LIKE ? OR lower(tags_json) LIKE ?
+		LIMIT ?;
+		`
+		args = []any{likePattern, likePattern, likePattern, topK}
+	}
+
+	rows, err := r.db.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
 		return nil, fmt.Errorf("lỗi truy vấn fallback: %w", err)
 	}
@@ -349,7 +465,7 @@ func (r *SqliteMemoryRepository) searchKeywordFallback(ctx context.Context, quer
 		var item domain.ArchivalMemoryItem
 		var tagsJSON, embedJSON string
 
-		if err := rows.Scan(&item.ID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.TenantID, &item.ProjectID, &item.AgentID, &item.Key, &item.Content, &tagsJSON, &embedJSON, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(tagsJSON), &item.Tags)
@@ -478,6 +594,17 @@ func (m *MemoryMemoryRepository) Store(ctx context.Context, item *domain.Archiva
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	ns := domain.MemoryNamespaceFromContext(ctx)
+	if item.TenantID == "" {
+		item.TenantID = ns.TenantID
+	}
+	if item.ProjectID == "" {
+		item.ProjectID = ns.ProjectID
+	}
+	if item.AgentID == "" {
+		item.AgentID = ns.AgentID
+	}
+
 	m.idSeq++
 	item.ID = m.idSeq
 	now := time.Now()
@@ -491,7 +618,8 @@ func (m *MemoryMemoryRepository) Store(ctx context.Context, item *domain.Archiva
 		item.Embedding = ComputeSemanticVector(embedText)
 	}
 
-	m.items[item.Key] = *item
+	storeKey := item.TenantID + "/" + item.Key
+	m.items[storeKey] = *item
 	return nil
 }
 
@@ -499,20 +627,33 @@ func (m *MemoryMemoryRepository) Get(ctx context.Context, key string) (*domain.A
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	item, exists := m.items[key]
-	if !exists {
+	tenantID, isAdmin := resolveTenant(ctx)
+	if !isAdmin {
+		if item, exists := m.items[tenantID+"/"+key]; exists {
+			return &item, nil
+		}
 		return nil, fmt.Errorf("không tìm thấy key %s", key)
 	}
-	return &item, nil
+
+	for _, item := range m.items {
+		if item.Key == key {
+			return &item, nil
+		}
+	}
+
+	return nil, fmt.Errorf("không tìm thấy key %s", key)
 }
 
 func (m *MemoryMemoryRepository) ListAll(ctx context.Context) ([]domain.ArchivalMemoryItem, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	tenantID, isAdmin := resolveTenant(ctx)
 	var list []domain.ArchivalMemoryItem
 	for _, item := range m.items {
-		list = append(list, item)
+		if isAdmin || item.TenantID == tenantID {
+			list = append(list, item)
+		}
 	}
 	return list, nil
 }
@@ -521,7 +662,27 @@ func (m *MemoryMemoryRepository) Delete(ctx context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	delete(m.items, key)
+	tenantID, isAdmin := resolveTenant(ctx)
+	if !isAdmin {
+		storeKey := tenantID + "/" + key
+		if _, exists := m.items[storeKey]; !exists {
+			return fmt.Errorf("không tìm thấy bản ghi memory hoặc không có quyền xóa")
+		}
+		delete(m.items, storeKey)
+		return nil
+	}
+
+	found := false
+	for k, item := range m.items {
+		if item.Key == key {
+			delete(m.items, k)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("không tìm thấy bản ghi memory hoặc không có quyền xóa")
+	}
 	return nil
 }
 
@@ -533,16 +694,19 @@ func (m *MemoryMemoryRepository) SearchHybrid(ctx context.Context, query string,
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	tenantID, isAdmin := resolveTenant(ctx)
 	queryVec := ComputeSemanticVector(query)
 	var list []domain.MemorySearchResult
 
 	for _, item := range m.items {
-		sim := CosineSimilarity(queryVec, item.Embedding)
-		list = append(list, domain.MemorySearchResult{
-			Item:      item,
-			Score:     sim,
-			MatchType: "vector",
-		})
+		if isAdmin || item.TenantID == tenantID {
+			sim := CosineSimilarity(queryVec, item.Embedding)
+			list = append(list, domain.MemorySearchResult{
+				Item:      item,
+				Score:     sim,
+				MatchType: "vector",
+			})
+		}
 	}
 
 	sort.Slice(list, func(i, j int) bool {

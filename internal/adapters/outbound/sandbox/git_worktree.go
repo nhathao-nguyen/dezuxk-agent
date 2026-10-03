@@ -10,18 +10,21 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"dezuxk-gateway/internal/core/domain"
 )
 
 // Sandbox đại diện cho một môi trường cô lập git worktree cho một tác vụ Agent
 type Sandbox struct {
-	TaskID            string `json:"task_id"`
-	BranchName        string `json:"branch_name"`        // Ví dụ: agent/<task_id>
-	WorktreePath      string `json:"worktree_path"`      // Thư mục gốc của worktree (.dezuxk/worktrees/<task_id>)
-	WorktreeWorkspace string `json:"worktree_workspace"` // Thư mục làm việc tương ứng bên trong worktree
-	RepoRoot          string `json:"repo_root"`          // Thư mục gốc của git repo chính
-	OriginalWorkspace string `json:"original_workspace"` // Thư mục làm việc ban đầu
-	IsGit             bool   `json:"is_git"`
-	IsActive          bool   `json:"is_active"`
+	TenantID          string    `json:"tenant_id,omitempty"`
+	TaskID            string    `json:"task_id"`
+	BranchName        string    `json:"branch_name"`        // Ví dụ: agent/<task_id>
+	WorktreePath      string    `json:"worktree_path"`      // Thư mục gốc của worktree (.dezuxk/worktrees/<task_id>)
+	WorktreeWorkspace string    `json:"worktree_workspace"` // Thư mục làm việc tương ứng bên trong worktree
+	RepoRoot          string    `json:"repo_root"`          // Thư mục gốc của git repo chính
+	OriginalWorkspace string    `json:"original_workspace"` // Thư mục làm việc ban đầu
+	IsGit             bool      `json:"is_git"`
+	IsActive          bool      `json:"is_active"`
 	CreatedAt         time.Time `json:"created_at"`
 }
 
@@ -61,7 +64,13 @@ func (m *WorktreeManager) CreateSandbox(ctx context.Context, taskID, workspace s
 		absWS = workspace
 	}
 
+	tenantID := "default"
+	if id, ok := domain.TenantIdentityFromContext(ctx); ok && id.TenantID != "" {
+		tenantID = id.TenantID
+	}
+
 	sb := &Sandbox{
+		TenantID:          tenantID,
 		TaskID:            taskID,
 		BranchName:        "agent/" + taskID,
 		OriginalWorkspace: absWS,
@@ -228,6 +237,24 @@ func (m *WorktreeManager) GetSandbox(taskID string) *Sandbox {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.sandboxes[taskID]
+}
+
+// GetSandboxForTenant tìm sandbox theo taskID và kiểm tra quyền sở hữu của Tenant
+func (m *WorktreeManager) GetSandboxForTenant(ctx context.Context, taskID string) (*Sandbox, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	sb, exists := m.sandboxes[taskID]
+	if !exists {
+		return nil, fmt.Errorf("không tìm thấy sandbox cho task %s", taskID)
+	}
+
+	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	if hasID && identity.Role != "admin" && sb.TenantID != identity.TenantID && sb.TenantID != "default" && sb.TenantID != "" {
+		return nil, fmt.Errorf("truy cập bị chặn: sandbox %s không thuộc quyền sở hữu của tenant %s", taskID, identity.TenantID)
+	}
+
+	return sb, nil
 }
 
 func findGitRoot(ctx context.Context, dir string) (string, bool) {

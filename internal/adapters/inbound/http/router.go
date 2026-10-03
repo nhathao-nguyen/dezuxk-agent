@@ -1,7 +1,9 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -137,7 +139,40 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 
 	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"ready":true}`))
+		checks := make(map[string]string)
+		isReady := true
+
+		if deps.ModelRegistry == nil || deps.ModelRegistry.Count() == 0 {
+			checks["models"] = "no active models registered"
+			isReady = false
+		} else {
+			checks["models"] = "ok"
+		}
+
+		if deps.SessionRepo == nil {
+			checks["sessions"] = "session repository not initialized"
+			isReady = false
+		} else if pinger, ok := deps.SessionRepo.(interface{ Ping(context.Context) error }); ok {
+			if err := pinger.Ping(r.Context()); err != nil {
+				checks["sessions"] = fmt.Sprintf("database ping error: %v", err)
+				isReady = false
+			} else {
+				checks["sessions"] = "ok"
+			}
+		} else {
+			checks["sessions"] = "ok"
+		}
+
+		status := http.StatusOK
+		if !isReady {
+			status = http.StatusServiceUnavailable
+		}
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ready":     isReady,
+			"checks":    checks,
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
 	})
 
 	// Phục vụ tệp Media cục bộ với Byte-Range streaming (hỗ trợ tua video)
@@ -213,7 +248,18 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 						http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 						return
 					}
-					next.ServeHTTP(w, r)
+					identity := domain.DefaultAdminIdentity()
+					ctx := domain.ContextWithTenantIdentity(r.Context(), identity)
+					next.ServeHTTP(w, r.WithContext(ctx))
+				})
+			})
+		} else {
+			// Môi trường dev/test không cấu hình khóa xác thực: gán DefaultInternalIdentity
+			v1.Use(func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					identity := domain.DefaultInternalIdentity()
+					ctx := domain.ContextWithTenantIdentity(r.Context(), identity)
+					next.ServeHTTP(w, r.WithContext(ctx))
 				})
 			})
 		}
@@ -236,8 +282,8 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			v1.Get("/models", modelHandler.HandleListModels)
 		}
 		if chatHandler != nil {
-			v1.Post("/chat/completions", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleChatCompletions))
-			v1.Post("/responses", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleResponses))
+			v1.With(RequireScope(domain.ScopeChat)).Post("/chat/completions", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleChatCompletions))
+			v1.With(RequireScope(domain.ScopeResponses)).Post("/responses", gateOperation(deps, domain.OpChatCompletions, domain.ServiceGemini, true, chatHandler.HandleResponses))
 		}
 
 		// Profile Management (Quản lý Profile cục bộ - Yêu cầu quyền Quản trị viên)
@@ -294,6 +340,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				agentHandler.SetSubagentSupervisor(deps.SubagentSupervisor)
 			}
 			v1.Route("/agent", func(ag chi.Router) {
+				ag.Use(RequireScope(domain.ScopeAgent))
 				ag.Post("/run", agentHandler.HandleRun)
 				ag.Post("/run/stream", agentHandler.HandleRunStream)
 				ag.Get("/tools", agentHandler.HandleListTools)
@@ -306,6 +353,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 					sb.Post("/rollback", agentHandler.HandleSandboxRollback)
 				})
 				ag.Route("/memory", func(mem chi.Router) {
+					mem.Use(RequireScope(domain.ScopeMemory))
 					mem.Get("/core", agentHandler.HandleGetCoreMemory)
 					mem.Post("/core", agentHandler.HandleUpdateCoreMemory)
 					mem.Get("/search", agentHandler.HandleSearchArchival)

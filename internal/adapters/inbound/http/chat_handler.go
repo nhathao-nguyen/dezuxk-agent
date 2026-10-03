@@ -67,8 +67,32 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 	req.Model = desc.ID
 
+	// Kiểm tra xem yêu cầu có thể cache an toàn không (Rule 4.3: Không cache tools, stateful, multimodal)
+	isCacheable := !req.Stream && h.cache != nil && h.cache.SupportsMethod("chat")
+	if isCacheable {
+		if len(req.Tools) > 0 || req.ToolChoice != nil {
+			isCacheable = false
+		} else {
+			for _, m := range req.Messages {
+				if len(m.ToolCalls) > 0 || strings.EqualFold(m.Role, "tool") {
+					isCacheable = false
+					break
+				}
+				for _, p := range m.ContentParts {
+					if p.Type == "image_url" || p.ImageURL != nil || p.Type == "input_audio" {
+						isCacheable = false
+						break
+					}
+				}
+				if !isCacheable {
+					break
+				}
+			}
+		}
+	}
+
 	var cacheKey string
-	if !req.Stream && h.cache != nil && h.cache.SupportsMethod("chat") {
+	if isCacheable {
 		var sysPrompt string
 		for _, m := range req.Messages {
 			if strings.EqualFold(m.Role, "system") {
@@ -91,7 +115,25 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 			isCodeInterpreter = *req.CodeInterpreter
 		}
 
-		cacheKey = services.GenerateChatCacheKey(req.Model, req.Messages, req.Temperature, sysPrompt, isThinking, isGrounding, isCodeInterpreter)
+		tenantID := "default"
+		keyID := "default"
+		if id, ok := domain.TenantIdentityFromContext(r.Context()); ok {
+			tenantID = id.TenantID
+			keyID = id.KeyID
+		}
+
+		cacheKey = services.GenerateIsolatedChatCacheKey(services.IsolatedChatCacheKeyParams{
+			TenantID:        tenantID,
+			KeyID:           keyID,
+			Model:           req.Model,
+			Messages:        req.Messages,
+			Temperature:     req.Temperature,
+			SystemPrompt:    sysPrompt,
+			Thinking:        isThinking,
+			Grounding:       isGrounding,
+			CodeInterpreter: isCodeInterpreter,
+			ResponseFormat:  req.ResponseFormat,
+		})
 		if entry, hit := h.cache.Get(cacheKey); hit {
 			w.Header().Set("Content-Type", entry.ContentType)
 			w.Header().Set("X-Cache", "HIT")
@@ -148,7 +190,16 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	if resp != nil && resp.ConversationID != "" {
 		w.Header().Set("X-Conversation-Id", resp.ConversationID)
 	}
-	if cacheKey != "" && h.cache != nil && h.cache.SupportsMethod("chat") {
+	hasToolCallsInResp := false
+	if resp != nil {
+		for _, choice := range resp.Choices {
+			if len(choice.Message.ToolCalls) > 0 {
+				hasToolCallsInResp = true
+				break
+			}
+		}
+	}
+	if cacheKey != "" && !hasToolCallsInResp && h.cache != nil && h.cache.SupportsMethod("chat") {
 		h.cache.Set(cacheKey, payload, "application/json", nil)
 		w.Header().Set("X-Cache", "MISS")
 	}
@@ -335,13 +386,14 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		chatReq.Temperature = *raw.Temperature
 	}
 
-	log.Printf("[HandleResponses] Accept: %s, Body: %s", r.Header.Get("Accept"), string(bodyBytes))
+	log.Printf("[HandleResponses] Model: %s, Stream: %v", targetModel, raw.Stream)
 
 	nowNano := time.Now().UnixNano()
 	respID := fmt.Sprintf("resp_%x", nowNano)
 	itemID := fmt.Sprintf("item_%x", nowNano)
 
-	isStream := raw.Stream || strings.Contains(r.Header.Get("Accept"), "text/event-stream") || strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "codex") || r.Header.Get("Accept") == ""
+	// Compatibility fallback: OpenAI Codex CLI / SDK streams responses when Accept is text/event-stream or User-Agent is codex
+	isStream := raw.Stream || strings.Contains(r.Header.Get("Accept"), "text/event-stream") || strings.Contains(strings.ToLower(r.Header.Get("User-Agent")), "codex")
 
 	if isStream {
 		chatReq.Stream = true

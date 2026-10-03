@@ -1,9 +1,11 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"dezuxk-gateway/internal/adapters/outbound/sandbox"
@@ -53,6 +55,51 @@ type AgentRunRequest struct {
 	AutoMerge    bool   `json:"auto_merge,omitempty"`
 }
 
+func (h *AgentHandler) resolveEffectiveOptions(ctx context.Context, req AgentRunRequest) (domain.AgentRunOptions, error) {
+	identity, ok := domain.TenantIdentityFromContext(ctx)
+	if !ok {
+		identity = domain.DefaultRestrictedIdentity()
+	}
+
+	if !identity.HasScope(domain.ScopeAgent) {
+		return domain.AgentRunOptions{}, fmt.Errorf("khóa API không có quyền truy cập phạm vi (scope): %s", domain.ScopeAgent)
+	}
+
+	ws := strings.TrimSpace(req.Workspace)
+	if ws == "" {
+		ws = "."
+	}
+	if !identity.IsWorkspaceAllowed(ws) {
+		return domain.AgentRunOptions{}, fmt.Errorf("truy cập bị chặn: workspace %q không được phép cho tenant %q", ws, identity.TenantID)
+	}
+
+	supervised := req.Supervised
+	if identity.RequireApproval {
+		supervised = true
+	}
+
+	useSandbox := req.UseSandbox
+	if identity.EnforceSandbox {
+		useSandbox = true
+	}
+
+	autoMerge := req.AutoMerge
+	if !identity.AutoMergeAllowed {
+		autoMerge = false
+	}
+
+	maxSteps := identity.EffectiveMaxSteps(req.MaxSteps)
+
+	return domain.AgentRunOptions{
+		Model:      req.Model,
+		Workspace:  ws,
+		Supervised: supervised,
+		MaxSteps:   maxSteps,
+		UseSandbox: useSandbox,
+		AutoMerge:  autoMerge,
+	}, nil
+}
+
 // HandleRun xử lý POST /v1/agent/run
 func (h *AgentHandler) HandleRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -74,13 +121,13 @@ func (h *AgentHandler) HandleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := domain.AgentRunOptions{
-		Model:      req.Model,
-		Workspace:  req.Workspace,
-		Supervised: req.Supervised,
-		MaxSteps:   req.MaxSteps,
-		UseSandbox: req.UseSandbox,
-		AutoMerge:  req.AutoMerge,
+	opts, err := h.resolveEffectiveOptions(r.Context(), req)
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
 	}
 
 	startTime := time.Now()
@@ -201,14 +248,13 @@ func (h *AgentHandler) HandleRunStream(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 
-	opts := domain.AgentRunOptions{
-		Model:      req.Model,
-		Workspace:  req.Workspace,
-		Supervised: req.Supervised,
-		MaxSteps:   req.MaxSteps,
-		UseSandbox: req.UseSandbox,
-		AutoMerge:  req.AutoMerge,
-		OnProgress: func(step int, kind string, message string) {
+	opts, err := h.resolveEffectiveOptions(r.Context(), req)
+	if err != nil {
+		sendSSE("error", map[string]string{"error": err.Error()})
+		return
+	}
+
+	opts.OnProgress = func(step int, kind string, message string) {
 			sseEvent := "progress"
 			switch kind {
 			case "node_change", "node_plan", "node_execute", "node_verify", "node_fix", "node_complete":
@@ -247,8 +293,7 @@ func (h *AgentHandler) HandleRunStream(w http.ResponseWriter, r *http.Request) {
 				"message":   message,
 				"timestamp": time.Now().Format(time.RFC3339),
 			})
-		},
-	}
+		}
 
 	sendSSE("run_start", map[string]any{
 		"workflow":  req.Workflow,
@@ -377,7 +422,7 @@ func (h *AgentHandler) HandleGetCoreMemory(w http.ResponseWriter, r *http.Reques
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "MemoryService chưa được kích hoạt"})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(h.memorySvc.GetCoreMemory())
+	_ = json.NewEncoder(w).Encode(h.memorySvc.GetCoreMemoryForContext(r.Context()))
 }
 
 // HandleUpdateCoreMemory xử lý POST /v1/agent/memory/core
@@ -399,7 +444,7 @@ func (h *AgentHandler) HandleUpdateCoreMemory(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	h.memorySvc.UpdateCoreMemory(func(core *domain.CoreMemory) {
+	h.memorySvc.UpdateCoreMemoryForContext(r.Context(), func(core *domain.CoreMemory) {
 		switch payload.Target {
 		case "scratchpad":
 			core.Scratchpad = payload.Content
@@ -414,7 +459,7 @@ func (h *AgentHandler) HandleUpdateCoreMemory(w http.ResponseWriter, r *http.Req
 
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
-		"core":    h.memorySvc.GetCoreMemory(),
+		"core":    h.memorySvc.GetCoreMemoryForContext(r.Context()),
 	})
 }
 
@@ -565,10 +610,14 @@ func (h *AgentHandler) HandleSandboxDiff(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	taskID := chi.URLParam(r, "taskId")
 	mgr := sandbox.GetDefaultManager()
-	sb := mgr.GetSandbox(taskID)
-	if sb == nil {
+	sb, err := mgr.GetSandboxForTenant(r.Context(), taskID)
+	if err != nil || sb == nil {
 		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Không tìm thấy sandbox cho task " + taskID})
+		msg := fmt.Sprintf("Không tìm thấy sandbox cho task %s", taskID)
+		if err != nil {
+			msg = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 		return
 	}
 	diff, err := mgr.GetDiff(r.Context(), sb)
@@ -598,10 +647,14 @@ func (h *AgentHandler) HandleSandboxMerge(w http.ResponseWriter, r *http.Request
 		return
 	}
 	mgr := sandbox.GetDefaultManager()
-	sb := mgr.GetSandbox(req.TaskID)
-	if sb == nil {
+	sb, err := mgr.GetSandboxForTenant(r.Context(), req.TaskID)
+	if err != nil || sb == nil {
 		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Không tìm thấy sandbox cho task " + req.TaskID})
+		msg := fmt.Sprintf("Không tìm thấy sandbox cho task %s", req.TaskID)
+		if err != nil {
+			msg = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 		return
 	}
 	if err := mgr.ApplyMerge(r.Context(), sb); err != nil {
@@ -628,10 +681,14 @@ func (h *AgentHandler) HandleSandboxRollback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	mgr := sandbox.GetDefaultManager()
-	sb := mgr.GetSandbox(req.TaskID)
-	if sb == nil {
+	sb, err := mgr.GetSandboxForTenant(r.Context(), req.TaskID)
+	if err != nil || sb == nil {
 		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Không tìm thấy sandbox cho task " + req.TaskID})
+		msg := fmt.Sprintf("Không tìm thấy sandbox cho task %s", req.TaskID)
+		if err != nil {
+			msg = err.Error()
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 		return
 	}
 	if err := mgr.Rollback(r.Context(), sb); err != nil {

@@ -39,6 +39,7 @@ func (r *SqliteCheckpointRepository) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS agent_checkpoints (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		tenant_id TEXT NOT NULL DEFAULT 'default',
 		task_id TEXT NOT NULL,
 		node_kind TEXT NOT NULL,
 		step_index INTEGER NOT NULL,
@@ -46,15 +47,26 @@ func (r *SqliteCheckpointRepository) migrate() error {
 		plan_snapshot TEXT NOT NULL,
 		created_at DATETIME NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_agent_checkpoints_task ON agent_checkpoints(task_id, id DESC);
+	CREATE INDEX IF NOT EXISTS idx_agent_checkpoints_task ON agent_checkpoints(tenant_id, task_id, id DESC);
 	`
-	_, err := r.db.Exec(schema)
-	return err
+	if _, err := r.db.Exec(schema); err != nil {
+		return err
+	}
+	_, _ = r.db.Exec("ALTER TABLE agent_checkpoints ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
+	return nil
 }
 
 func (r *SqliteCheckpointRepository) SaveCheckpoint(ctx context.Context, cp *domain.AgentCheckpoint) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if cp.TenantID == "" {
+		if id, ok := domain.TenantIdentityFromContext(ctx); ok && id.TenantID != "" {
+			cp.TenantID = id.TenantID
+		} else {
+			cp.TenantID = "default"
+		}
+	}
 
 	stateJSON, err := json.Marshal(cp.StateSnapshot)
 	if err != nil {
@@ -71,11 +83,11 @@ func (r *SqliteCheckpointRepository) SaveCheckpoint(ctx context.Context, cp *dom
 	}
 
 	query := `
-	INSERT INTO agent_checkpoints (task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at)
-	VALUES (?, ?, ?, ?, ?, ?);
+	INSERT INTO agent_checkpoints (tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?);
 	`
 
-	res, err := r.db.ExecContext(ctx, query, cp.TaskID, string(cp.NodeKind), cp.StepIndex, string(stateJSON), string(planJSON), cp.CreatedAt)
+	res, err := r.db.ExecContext(ctx, query, cp.TenantID, cp.TaskID, string(cp.NodeKind), cp.StepIndex, string(stateJSON), string(planJSON), cp.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("lỗi khi lưu checkpoint vào SQLite: %w", err)
 	}
@@ -92,21 +104,37 @@ func (r *SqliteCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `
-	SELECT id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
-	FROM agent_checkpoints
-	WHERE task_id = ?
-	ORDER BY id DESC
-	LIMIT 1;
-	`
+	var query string
+	var args []any
 
-	row := r.db.QueryRowContext(ctx, query, taskID)
+	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	if hasID && identity.Role != "admin" && identity.TenantID != "" {
+		query = `
+		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
+		FROM agent_checkpoints
+		WHERE task_id = ? AND (tenant_id = ? OR tenant_id = 'default')
+		ORDER BY id DESC
+		LIMIT 1;
+		`
+		args = []any{taskID, identity.TenantID}
+	} else {
+		query = `
+		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
+		FROM agent_checkpoints
+		WHERE task_id = ?
+		ORDER BY id DESC
+		LIMIT 1;
+		`
+		args = []any{taskID}
+	}
+
+	row := r.db.QueryRowContext(ctx, query, args...)
 
 	var cp domain.AgentCheckpoint
 	var nodeKindStr string
 	var stateJSON, planJSON string
 
-	err := row.Scan(&cp.ID, &cp.TaskID, &nodeKindStr, &cp.StepIndex, &stateJSON, &planJSON, &cp.CreatedAt)
+	err := row.Scan(&cp.ID, &cp.TenantID, &cp.TaskID, &nodeKindStr, &cp.StepIndex, &stateJSON, &planJSON, &cp.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("không tìm thấy checkpoint nào cho task %s", taskID)
@@ -129,14 +157,29 @@ func (r *SqliteCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `
-	SELECT id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
-	FROM agent_checkpoints
-	WHERE task_id = ?
-	ORDER BY id ASC;
-	`
+	var query string
+	var args []any
 
-	rows, err := r.db.QueryContext(ctx, query, taskID)
+	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	if hasID && identity.Role != "admin" && identity.TenantID != "" {
+		query = `
+		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
+		FROM agent_checkpoints
+		WHERE task_id = ? AND (tenant_id = ? OR tenant_id = 'default')
+		ORDER BY id ASC;
+		`
+		args = []any{taskID, identity.TenantID}
+	} else {
+		query = `
+		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
+		FROM agent_checkpoints
+		WHERE task_id = ?
+		ORDER BY id ASC;
+		`
+		args = []any{taskID}
+	}
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("lỗi truy vấn danh sách checkpoints: %w", err)
 	}
@@ -148,7 +191,7 @@ func (r *SqliteCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 		var nodeKindStr string
 		var stateJSON, planJSON string
 
-		if err := rows.Scan(&cp.ID, &cp.TaskID, &nodeKindStr, &cp.StepIndex, &stateJSON, &planJSON, &cp.CreatedAt); err != nil {
+		if err := rows.Scan(&cp.ID, &cp.TenantID, &cp.TaskID, &nodeKindStr, &cp.StepIndex, &stateJSON, &planJSON, &cp.CreatedAt); err != nil {
 			return nil, err
 		}
 
@@ -164,6 +207,13 @@ func (r *SqliteCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 func (r *SqliteCheckpointRepository) DeleteCheckpoints(ctx context.Context, taskID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	if hasID && identity.Role != "admin" && identity.TenantID != "" {
+		query := `DELETE FROM agent_checkpoints WHERE task_id = ? AND (tenant_id = ? OR tenant_id = 'default');`
+		_, err := r.db.ExecContext(ctx, query, taskID, identity.TenantID)
+		return err
+	}
 
 	query := `DELETE FROM agent_checkpoints WHERE task_id = ?;`
 	_, err := r.db.ExecContext(ctx, query, taskID)
@@ -189,6 +239,14 @@ func (m *MemoryCheckpointRepository) SaveCheckpoint(ctx context.Context, cp *dom
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if cp.TenantID == "" {
+		if id, ok := domain.TenantIdentityFromContext(ctx); ok && id.TenantID != "" {
+			cp.TenantID = id.TenantID
+		} else {
+			cp.TenantID = "default"
+		}
+	}
+
 	m.idSeq++
 	cp.ID = m.idSeq
 	if cp.CreatedAt.IsZero() {
@@ -203,24 +261,52 @@ func (m *MemoryCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	identity, hasID := domain.TenantIdentityFromContext(ctx)
+
 	list := m.checkpoints[taskID]
-	if len(list) == 0 {
-		return nil, fmt.Errorf("không tìm thấy checkpoint cho task %s", taskID)
+	for i := len(list) - 1; i >= 0; i-- {
+		cp := list[i]
+		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID || cp.TenantID == "default" || cp.TenantID == "" {
+			return cp, nil
+		}
 	}
-	return list[len(list)-1], nil
+	return nil, fmt.Errorf("không tìm thấy checkpoint cho task %s", taskID)
 }
 
 func (m *MemoryCheckpointRepository) ListCheckpoints(ctx context.Context, taskID string) ([]*domain.AgentCheckpoint, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	return m.checkpoints[taskID], nil
+	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	var res []*domain.AgentCheckpoint
+	for _, cp := range m.checkpoints[taskID] {
+		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID || cp.TenantID == "default" || cp.TenantID == "" {
+			res = append(res, cp)
+		}
+	}
+	return res, nil
 }
 
 func (m *MemoryCheckpointRepository) DeleteCheckpoints(ctx context.Context, taskID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	delete(m.checkpoints, taskID)
+	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	if !hasID || identity.Role == "admin" {
+		delete(m.checkpoints, taskID)
+		return nil
+	}
+
+	var remaining []*domain.AgentCheckpoint
+	for _, cp := range m.checkpoints[taskID] {
+		if cp.TenantID != identity.TenantID && cp.TenantID != "default" && cp.TenantID != "" {
+			remaining = append(remaining, cp)
+		}
+	}
+	if len(remaining) == 0 {
+		delete(m.checkpoints, taskID)
+	} else {
+		m.checkpoints[taskID] = remaining
+	}
 	return nil
 }

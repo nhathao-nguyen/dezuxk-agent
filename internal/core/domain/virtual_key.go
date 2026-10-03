@@ -35,24 +35,105 @@ type KeyTokenUsage struct {
 
 // VirtualKey đại diện cho một khóa API ảo phân quyền trong hệ thống Dezuxk Gateway
 type VirtualKey struct {
-	ID                    string     `json:"id"`
-	KeyHash               string     `json:"-"`
-	KeyPrefix             string     `json:"key_prefix"`
-	Name                  string     `json:"name"`
-	Role                  string     `json:"role"` // "admin" hoặc "user"
-	RateLimitRPM          int        `json:"rate_limit_rpm"`
-	DailyQuotaRequests    int        `json:"daily_quota_requests"`
-	UsedToday             int        `json:"used_today"`
-	LastUsedDate          string     `json:"last_used_date"`
-	PromptTokensTotal     int64      `json:"prompt_tokens_total"`
-	CompletionTokensTotal int64      `json:"completion_tokens_total"`
-	TotalTokens           int64      `json:"total_tokens"`
-	MaxTokenQuota         int64      `json:"max_token_quota"` // 0 = Không giới hạn
-	AllowedModels         []string   `json:"allowed_models"`
-	AllowedModelsJSON     string     `json:"-"`
-	IsActive              bool       `json:"is_active"`
-	ExpiresAt             *time.Time `json:"expires_at,omitempty"`
-	CreatedAt             time.Time  `json:"created_at"`
+	ID                         string     `json:"id"`
+	TenantID                   string     `json:"tenant_id"`
+	KeyHash                    string     `json:"-"`
+	KeyPrefix                  string     `json:"key_prefix"`
+	Name                       string     `json:"name"`
+	Role                       string     `json:"role"` // "admin" hoặc "user"
+	RateLimitRPM               int        `json:"rate_limit_rpm"`
+	DailyQuotaRequests         int        `json:"daily_quota_requests"`
+	UsedToday                  int        `json:"used_today"`
+	LastUsedDate               string     `json:"last_used_date"`
+	PromptTokensTotal          int64      `json:"prompt_tokens_total"`
+	CompletionTokensTotal      int64      `json:"completion_tokens_total"`
+	TotalTokens                int64      `json:"total_tokens"`
+	MaxTokenQuota              int64      `json:"max_token_quota"` // 0 = Không giới hạn
+	AllowedModels              []string   `json:"allowed_models"`
+	AllowedModelsJSON          string     `json:"-"`
+	Scopes                     []string   `json:"scopes"`
+	ScopesJSON                 string     `json:"-"`
+	AllowedTools               []string   `json:"allowed_tools"`
+	AllowedToolsJSON           string     `json:"-"`
+	AllowedWorkspaceRoots      []string   `json:"allowed_workspace_roots"`
+	AllowedWorkspaceRootsJSON  string     `json:"-"`
+	MaxAgentSteps              int        `json:"max_agent_steps"`
+	MaxConcurrentRuns          int        `json:"max_concurrent_runs"`
+	MaxToolRuntimeSeconds      int        `json:"max_tool_runtime_seconds"`
+	RequireApproval            bool       `json:"require_approval"`
+	AllowShell                 bool       `json:"allow_shell"`
+	EnforceSandbox             bool       `json:"enforce_sandbox"`
+	AutoMergeAllowed           bool       `json:"auto_merge_allowed"`
+	IsActive                   bool       `json:"is_active"`
+	ExpiresAt                  *time.Time `json:"expires_at,omitempty"`
+	CreatedAt                  time.Time  `json:"created_at"`
+}
+
+// ToIdentity chuyển đổi VirtualKey thành đối tượng định danh bảo mật TenantIdentity
+func (k *VirtualKey) ToIdentity() TenantIdentity {
+	if k == nil {
+		return DefaultRestrictedIdentity()
+	}
+
+	tenantID := strings.TrimSpace(k.TenantID)
+	if tenantID == "" {
+		tenantID = "tenant_" + k.ID
+	}
+
+	scopes := k.Scopes
+	if len(scopes) == 0 {
+		if k.Role == "admin" {
+			scopes = []string{ScopeChat, ScopeResponses, ScopeAgent, ScopeMemory, ScopeBrowser, ScopeShell, ScopeAdmin}
+		} else {
+			scopes = []string{ScopeChat, ScopeResponses, ScopeAgent, ScopeMemory}
+		}
+	}
+
+	maxSteps := k.MaxAgentSteps
+	if maxSteps <= 0 {
+		if k.Role == "admin" {
+			maxSteps = 50
+		} else {
+			maxSteps = 25
+		}
+	}
+
+	runtimeSec := k.MaxToolRuntimeSeconds
+	if runtimeSec <= 0 {
+		runtimeSec = 60
+	}
+
+	allowShell := k.AllowShell
+	if k.Role == "admin" {
+		allowShell = true
+	}
+
+	requireApproval := k.RequireApproval
+	if k.Role != "admin" && !k.RequireApproval {
+		requireApproval = true
+	}
+
+	enforceSandbox := k.EnforceSandbox
+	if k.Role != "admin" {
+		enforceSandbox = true
+	}
+
+	return TenantIdentity{
+		TenantID:              tenantID,
+		KeyID:                 k.ID,
+		Role:                  k.Role,
+		Scopes:                scopes,
+		AllowedModels:         k.AllowedModels,
+		AllowedTools:          k.AllowedTools,
+		AllowedWorkspaceRoots: k.AllowedWorkspaceRoots,
+		MaxAgentSteps:         maxSteps,
+		MaxConcurrentRuns:     k.MaxConcurrentRuns,
+		MaxToolRuntime:        time.Duration(runtimeSec) * time.Second,
+		RequireApproval:       requireApproval,
+		AllowShell:            allowShell,
+		EnforceSandbox:        enforceSandbox,
+		AutoMergeAllowed:      k.AutoMergeAllowed,
+	}
 }
 
 // IsModelAllowed kiểm tra xem mô hình có nằm trong danh sách được phép hay không
@@ -101,13 +182,24 @@ func (k *VirtualKey) RemainingQuota() int {
 }
 
 type CreateKeyRequest struct {
-	Name               string     `json:"name"`
-	Role               string     `json:"role"`
-	RateLimitRPM       int        `json:"rate_limit_rpm"`
-	DailyQuotaRequests int        `json:"daily_quota_requests"`
-	MaxTokenQuota      int64      `json:"max_token_quota"`
-	AllowedModels      []string   `json:"allowed_models"`
-	ExpiresAt          *time.Time `json:"expires_at"`
+	TenantID              string     `json:"tenant_id"`
+	Name                  string     `json:"name"`
+	Role                  string     `json:"role"`
+	RateLimitRPM          int        `json:"rate_limit_rpm"`
+	DailyQuotaRequests    int        `json:"daily_quota_requests"`
+	MaxTokenQuota         int64      `json:"max_token_quota"`
+	AllowedModels         []string   `json:"allowed_models"`
+	Scopes                []string   `json:"scopes"`
+	AllowedTools          []string   `json:"allowed_tools"`
+	AllowedWorkspaceRoots []string   `json:"allowed_workspace_roots"`
+	MaxAgentSteps         int        `json:"max_agent_steps"`
+	MaxConcurrentRuns     int        `json:"max_concurrent_runs"`
+	MaxToolRuntimeSeconds int        `json:"max_tool_runtime_seconds"`
+	RequireApproval       *bool      `json:"require_approval"`
+	AllowShell            *bool      `json:"allow_shell"`
+	EnforceSandbox        *bool      `json:"enforce_sandbox"`
+	AutoMergeAllowed      *bool      `json:"auto_merge_allowed"`
+	ExpiresAt             *time.Time `json:"expires_at"`
 }
 
 type VirtualKeyCreated struct {

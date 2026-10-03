@@ -27,25 +27,28 @@ func resolvePath(ctx context.Context, defaultWS, userPath string) (string, error
 	}
 	absWS = filepath.Clean(absWS)
 
+	// Đánh giá canonical symlinks của workspace nếu thư mục đã tồn tại
+	canonicalWS := absWS
+	if evalWS, err := filepath.EvalSymlinks(absWS); err == nil {
+		canonicalWS = evalWS
+	}
+
 	trimmedUser := strings.TrimSpace(userPath)
 	if trimmedUser == "" || trimmedUser == "." {
 		return absWS, nil
+	}
+
+	// Chặn mọi nỗ lực traversal chứa chuỗi '..'
+	cleanUser := filepath.Clean(trimmedUser)
+	if strings.HasPrefix(cleanUser, "..") || strings.Contains(cleanUser, "/../") || strings.Contains(cleanUser, "\\..\\") {
+		return "", fmt.Errorf("truy cập bị chặn bởi Path Sandboxing: phát hiện nỗ lực path traversal '..' trong đường dẫn %q", userPath)
 	}
 
 	var target string
 	if filepath.IsAbs(trimmedUser) {
 		target = filepath.Clean(trimmedUser)
 	} else {
-		cleanWS := filepath.Clean(ws)
-		cleanUser := filepath.Clean(trimmedUser)
-
-		// Nếu cleanUser đã bắt đầu bằng cleanWS (hoặc nằm trong cleanWS)
-		relToWS, err := filepath.Rel(cleanWS, cleanUser)
-		if err == nil && !strings.HasPrefix(relToWS, "..") && !filepath.IsAbs(relToWS) {
-			target, _ = filepath.Abs(cleanUser)
-		} else {
-			target = filepath.Join(absWS, cleanUser)
-		}
+		target = filepath.Join(absWS, cleanUser)
 		target = filepath.Clean(target)
 	}
 
@@ -58,13 +61,57 @@ func resolvePath(ctx context.Context, defaultWS, userPath string) (string, error
 		}
 	}
 
-	// Kiểm tra Path Sandboxing
+	// Kiểm tra Path Sandboxing cơ bản
 	rel, err := filepath.Rel(absWS, target)
 	if err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("truy cập bị chặn bởi Path Sandboxing: đường dẫn %q nằm ngoài phạm vi workspace an toàn %q", userPath, ws)
 	}
 
+	// Kiểm tra Symlink Escape: Tìm nút cha đã tồn tại và đối soát canonical path
+	evalTarget, err := evalExistingPathPrefix(target)
+	if err == nil {
+		relCanonical, err := filepath.Rel(canonicalWS, evalTarget)
+		if err != nil || strings.HasPrefix(relCanonical, "..") || filepath.IsAbs(relCanonical) {
+			return "", fmt.Errorf("truy cập bị chặn bởi Symlink Sandboxing: symlink %q trỏ tới mục tiêu ngoài workspace (%q)", userPath, evalTarget)
+		}
+	}
+
+	// Đối soát với chính sách phân quyền Tenant nếu có
+	if identity, ok := domain.TenantIdentityFromContext(ctx); ok {
+		if !identity.IsWorkspaceAllowed(target) {
+			return "", fmt.Errorf("truy cập bị chặn bởi chính sách Tenant: workspace %q không được cấp phép cho tenant %q", target, identity.TenantID)
+		}
+	}
+
 	return target, nil
+}
+
+// evalExistingPathPrefix giải mã canonical symlinks cho phần đường dẫn đã tồn tại trên đĩa
+func evalExistingPathPrefix(path string) (string, error) {
+	curr := filepath.Clean(path)
+	var suffixParts []string
+
+	for {
+		if _, err := os.Lstat(curr); err == nil {
+			eval, err := filepath.EvalSymlinks(curr)
+			if err != nil {
+				return "", err
+			}
+			for i := len(suffixParts) - 1; i >= 0; i-- {
+				eval = filepath.Join(eval, suffixParts[i])
+			}
+			return eval, nil
+		}
+
+		parent := filepath.Dir(curr)
+		if parent == curr || parent == "." || parent == "/" || parent == "" {
+			break
+		}
+		suffixParts = append(suffixParts, filepath.Base(curr))
+		curr = parent
+	}
+
+	return path, nil
 }
 
 // -------------------------------------------------------------

@@ -73,6 +73,7 @@ func (p *TaskPlan) GetCurrentStep() *PlanStep {
 // AgentCheckpoint snapshot trạng thái lưu bền vững vào SQLite để phục vụ Resume / Time-Travel
 type AgentCheckpoint struct {
 	ID            int64         `json:"id"`
+	TenantID      string        `json:"tenant_id,omitempty"`
 	TaskID        string        `json:"task_id"`
 	NodeKind      GraphNodeKind `json:"node_kind"`
 	StepIndex     int           `json:"step_index"`

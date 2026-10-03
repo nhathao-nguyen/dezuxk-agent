@@ -81,6 +81,17 @@ func (r *SqliteKeyRepository) migrate() error {
 	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN completion_tokens_total INTEGER DEFAULT 0")
 	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN total_tokens INTEGER DEFAULT 0")
 	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN max_token_quota INTEGER DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN tenant_id TEXT DEFAULT 'default_tenant'")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN scopes_json TEXT DEFAULT '[]'")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN allowed_tools_json TEXT DEFAULT '[]'")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN allowed_workspace_roots_json TEXT DEFAULT '[]'")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN max_agent_steps INTEGER DEFAULT 25")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN max_concurrent_runs INTEGER DEFAULT 3")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN max_tool_runtime_seconds INTEGER DEFAULT 60")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN require_approval INTEGER DEFAULT 1")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN allow_shell INTEGER DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN enforce_sandbox INTEGER DEFAULT 1")
+	_, _ = r.db.Exec("ALTER TABLE virtual_keys ADD COLUMN auto_merge_allowed INTEGER DEFAULT 0")
 
 	return nil
 }
@@ -99,12 +110,52 @@ func (r *SqliteKeyRepository) Save(ctx context.Context, key *domain.VirtualKey) 
 		allowedModelsJSON = []byte(`["*"]`)
 	}
 
+	scopesJSON, _ := json.Marshal(key.Scopes)
+	allowedToolsJSON, _ := json.Marshal(key.AllowedTools)
+	allowedRootsJSON, _ := json.Marshal(key.AllowedWorkspaceRoots)
+
+	tenantID := key.TenantID
+	if tenantID == "" {
+		tenantID = "default_tenant"
+	}
+	maxSteps := key.MaxAgentSteps
+	if maxSteps <= 0 {
+		maxSteps = 25
+	}
+	maxConcurrent := key.MaxConcurrentRuns
+	if maxConcurrent <= 0 {
+		maxConcurrent = 3
+	}
+	runtimeSec := key.MaxToolRuntimeSeconds
+	if runtimeSec <= 0 {
+		runtimeSec = 60
+	}
+	reqApprovalInt := 0
+	if key.RequireApproval {
+		reqApprovalInt = 1
+	}
+	allowShellInt := 0
+	if key.AllowShell {
+		allowShellInt = 1
+	}
+	enforceSandboxInt := 0
+	if key.EnforceSandbox {
+		enforceSandboxInt = 1
+	}
+	autoMergeInt := 0
+	if key.AutoMergeAllowed {
+		autoMergeInt = 1
+	}
+
 	query := `
 	INSERT INTO virtual_keys (
 		id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
 		used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
-		prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota,
+		tenant_id, scopes_json, allowed_tools_json, allowed_workspace_roots_json,
+		max_agent_steps, max_concurrent_runs, max_tool_runtime_seconds,
+		require_approval, allow_shell, enforce_sandbox, auto_merge_allowed
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	isActiveInt := 0
 	if key.IsActive {
@@ -134,23 +185,38 @@ func (r *SqliteKeyRepository) Save(ctx context.Context, key *domain.VirtualKey) 
 		key.CompletionTokensTotal,
 		key.TotalTokens,
 		key.MaxTokenQuota,
+		tenantID,
+		string(scopesJSON),
+		string(allowedToolsJSON),
+		string(allowedRootsJSON),
+		maxSteps,
+		maxConcurrent,
+		runtimeSec,
+		reqApprovalInt,
+		allowShellInt,
+		enforceSandboxInt,
+		autoMergeInt,
 	)
 	return err
 }
+
+const selectVirtualKeyCols = `
+	id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
+	used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
+	prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota,
+	COALESCE(tenant_id, 'default_tenant'), COALESCE(scopes_json, '[]'),
+	COALESCE(allowed_tools_json, '[]'), COALESCE(allowed_workspace_roots_json, '[]'),
+	COALESCE(max_agent_steps, 25), COALESCE(max_concurrent_runs, 3),
+	COALESCE(max_tool_runtime_seconds, 60), COALESCE(require_approval, 1),
+	COALESCE(allow_shell, 0), COALESCE(enforce_sandbox, 1), COALESCE(auto_merge_allowed, 0)
+`
 
 // FindByKeyHash tìm Virtual API Key theo mã băm SHA-256
 func (r *SqliteKeyRepository) FindByKeyHash(ctx context.Context, keyHash string) (*domain.VirtualKey, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `
-	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
-	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
-	       prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
-	FROM virtual_keys
-	WHERE key_hash = ?
-	LIMIT 1
-	`
+	query := `SELECT ` + selectVirtualKeyCols + ` FROM virtual_keys WHERE key_hash = ? LIMIT 1`
 	row := r.db.QueryRowContext(ctx, query, keyHash)
 	return r.scanKey(row)
 }
@@ -160,14 +226,7 @@ func (r *SqliteKeyRepository) FindByID(ctx context.Context, id string) (*domain.
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `
-	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
-	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
-	       prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
-	FROM virtual_keys
-	WHERE id = ?
-	LIMIT 1
-	`
+	query := `SELECT ` + selectVirtualKeyCols + ` FROM virtual_keys WHERE id = ? LIMIT 1`
 	row := r.db.QueryRowContext(ctx, query, id)
 	return r.scanKey(row)
 }
@@ -177,14 +236,7 @@ func (r *SqliteKeyRepository) ListActive(ctx context.Context) ([]*domain.Virtual
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	query := `
-	SELECT id, key_hash, key_prefix, name, role, rate_limit_rpm, daily_quota_requests,
-	       used_today, last_used_date, allowed_models_json, is_active, expires_at, created_at,
-	       prompt_tokens_total, completion_tokens_total, total_tokens, max_token_quota
-	FROM virtual_keys
-	WHERE is_active = 1
-	ORDER BY created_at DESC
-	`
+	query := `SELECT ` + selectVirtualKeyCols + ` FROM virtual_keys WHERE is_active = 1 ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -284,11 +336,19 @@ type rowScanner interface {
 
 func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error) {
 	var (
-		k           domain.VirtualKey
-		allowedJSON sql.NullString
-		lastUsed    sql.NullString
-		isActiveInt int
-		expiresAt   sql.NullTime
+		k                 domain.VirtualKey
+		allowedJSON       sql.NullString
+		lastUsed          sql.NullString
+		isActiveInt       int
+		expiresAt         sql.NullTime
+		tenantID          sql.NullString
+		scopesJSON        sql.NullString
+		allowedToolsJSON  sql.NullString
+		allowedRootsJSON  sql.NullString
+		reqApprovalInt    int
+		allowShellInt     int
+		enforceSandboxInt int
+		autoMergeInt      int
 	)
 
 	err := row.Scan(
@@ -309,6 +369,17 @@ func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error
 		&k.CompletionTokensTotal,
 		&k.TotalTokens,
 		&k.MaxTokenQuota,
+		&tenantID,
+		&scopesJSON,
+		&allowedToolsJSON,
+		&allowedRootsJSON,
+		&k.MaxAgentSteps,
+		&k.MaxConcurrentRuns,
+		&k.MaxToolRuntimeSeconds,
+		&reqApprovalInt,
+		&allowShellInt,
+		&enforceSandboxInt,
+		&autoMergeInt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -324,12 +395,36 @@ func (r *SqliteKeyRepository) scanKey(row rowScanner) (*domain.VirtualKey, error
 		k.ExpiresAt = &t
 	}
 
+	k.TenantID = tenantID.String
+	if k.TenantID == "" {
+		k.TenantID = "default_tenant"
+	}
+	k.RequireApproval = (reqApprovalInt == 1)
+	k.AllowShell = (allowShellInt == 1)
+	k.EnforceSandbox = (enforceSandboxInt == 1)
+	k.AutoMergeAllowed = (autoMergeInt == 1)
+
 	k.AllowedModelsJSON = allowedJSON.String
 	if allowedJSON.Valid && allowedJSON.String != "" {
 		_ = json.Unmarshal([]byte(allowedJSON.String), &k.AllowedModels)
 	}
 	if len(k.AllowedModels) == 0 {
 		k.AllowedModels = []string{"*"}
+	}
+
+	k.ScopesJSON = scopesJSON.String
+	if scopesJSON.Valid && scopesJSON.String != "" {
+		_ = json.Unmarshal([]byte(scopesJSON.String), &k.Scopes)
+	}
+
+	k.AllowedToolsJSON = allowedToolsJSON.String
+	if allowedToolsJSON.Valid && allowedToolsJSON.String != "" {
+		_ = json.Unmarshal([]byte(allowedToolsJSON.String), &k.AllowedTools)
+	}
+
+	k.AllowedWorkspaceRootsJSON = allowedRootsJSON.String
+	if allowedRootsJSON.Valid && allowedRootsJSON.String != "" {
+		_ = json.Unmarshal([]byte(allowedRootsJSON.String), &k.AllowedWorkspaceRoots)
 	}
 
 	return &k, nil

@@ -206,12 +206,19 @@ type OpenAIChatRequest struct {
 	ThinkingBudget   *int               `json:"thinking_budget,omitempty"`  // Token budget (ví dụ: 0, 1024, 8192)
 	BudgetTokens     *int               `json:"budget_tokens,omitempty"`    // Alias cho thinking_budget (chuẩn Anthropic / OpenAI o-series)
 	SearchGrounding  *bool              `json:"grounding,omitempty"`
-	CodeInterpreter  *bool              `json:"code_interpreter,omitempty"`
-	Attachments      []GeminiAttachment `json:"attachments,omitempty"`
-	ParentResponseID string             `json:"parent_response_id,omitempty"`
-	ParentChoiceID   string             `json:"parent_choice_id,omitempty"`
-	Tools            []OpenAITool       `json:"tools,omitempty"`
-	ToolChoice       any                `json:"tool_choice,omitempty"`
+	CodeInterpreter     *bool              `json:"code_interpreter,omitempty"`
+	Attachments         []GeminiAttachment `json:"attachments,omitempty"`
+	ParentResponseID    string             `json:"parent_response_id,omitempty"`
+	ParentChoiceID      string             `json:"parent_choice_id,omitempty"`
+	Tools               []OpenAITool       `json:"tools,omitempty"`
+	ToolChoice          any                `json:"tool_choice,omitempty"`
+	ResponseFormat      any                `json:"response_format,omitempty"`
+	MaxTokens           *int               `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int               `json:"max_completion_tokens,omitempty"`
+	TopP                *float64           `json:"top_p,omitempty"`
+	N                   *int               `json:"n,omitempty"`
+	User                string             `json:"user,omitempty"`
+	Seed                *int               `json:"seed,omitempty"`
 }
 
 func (r *OpenAIChatRequest) UnmarshalJSON(data []byte) error {

@@ -11,10 +11,26 @@ type PermissionLevel string
 
 const (
 	// PermissionSafe: Đọc file, tra cứu, liệt kê thư mục -> Tự động thực thi không cần hỏi
-	PermissionSafe PermissionLevel = "safe"
+	PermissionSafe            PermissionLevel = "safe"
+	PermissionRead            PermissionLevel = "read"
+	PermissionWrite           PermissionLevel = "write"
+	PermissionExecute         PermissionLevel = "execute"
+	PermissionNetwork         PermissionLevel = "network"
+	PermissionExternalSideEff PermissionLevel = "external_side_effect"
 	// PermissionDestructive: Ghi file, xóa file, chạy shell command -> Yêu cầu người dùng phê duyệt trong chế độ Supervised
-	PermissionDestructive PermissionLevel = "destructive"
+	PermissionDestructive      PermissionLevel = "destructive"
+	PermissionRequiresApproval PermissionLevel = "requires_approval"
 )
+
+// IsDestructiveOrRequiresApproval kiểm tra mức độ phân quyền có đòi hỏi xác nhận từ con người không
+func (p PermissionLevel) IsDestructiveOrRequiresApproval() bool {
+	switch p {
+	case PermissionDestructive, PermissionRequiresApproval, PermissionWrite, PermissionExecute:
+		return true
+	default:
+		return false
+	}
+}
 
 // AgentTool định nghĩa một công cụ có thể thực thi bởi Agent
 type AgentTool interface {

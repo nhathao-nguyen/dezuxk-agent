@@ -28,12 +28,20 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
+# Tạo non-root user và group bảo mật
+RUN addgroup -S -g 10001 dezuxk && \
+    adduser -S -u 10001 -G dezuxk -h /app -s /sbin/nologin dezuxk
+
 # Sao chép binary từ builder stage
 COPY --from=builder /app/dezuxk /app/dezuxk
 COPY configs/ /app/configs/
 
-# Tạo các thư mục lưu trữ bền vững
-RUN mkdir -p /app/storage /app/profiles
+# Tạo các thư mục lưu trữ bền vững và phân quyền cho user non-root
+RUN mkdir -p /app/storage /app/profiles /app/workspaces && \
+    chown -R dezuxk:dezuxk /app
+
+# Chuyển sang user non-root
+USER dezuxk:dezuxk
 
 # Cấu hình biến môi trường mặc định
 ENV DEZUXK_HOST=0.0.0.0 \
@@ -45,7 +53,7 @@ ENV DEZUXK_HOST=0.0.0.0 \
 EXPOSE 8080
 
 # Khai báo volume mount cho dữ liệu cấu hình, database và profile
-VOLUME ["/app/configs", "/app/storage", "/app/profiles"]
+VOLUME ["/app/configs", "/app/storage", "/app/profiles", "/app/workspaces"]
 
 # Chạy Dezuxk Gateway
 ENTRYPOINT ["/app/dezuxk"]

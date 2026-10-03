@@ -73,9 +73,36 @@ func VirtualKeyAuthMiddleware(keyUseCase ports.KeyUseCase) func(http.Handler) ht
 				}
 			}
 
-			// 5. Đưa thông tin VirtualKey vào Request Context để các tầng sau sử dụng
+			// 5. Đưa thông tin VirtualKey và TenantIdentity vào Request Context để các tầng sau sử dụng
+			identity := vKey.ToIdentity()
 			ctx := domain.ContextWithVirtualKey(r.Context(), vKey)
+			ctx = domain.ContextWithTenantIdentity(ctx, identity)
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// RequireScope kiểm tra xem khóa API hiện tại có scope chỉ định hay không
+func RequireScope(scope string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id, ok := domain.TenantIdentityFromContext(r.Context())
+			if !ok {
+				vKey := domain.VirtualKeyFromContext(r.Context())
+				if vKey != nil {
+					id = vKey.ToIdentity()
+				} else {
+					writeAuthError(w, http.StatusUnauthorized, "unauthorized", "Yêu cầu xác thực khóa API.")
+					return
+				}
+			}
+
+			if !id.HasScope(scope) {
+				writeAuthError(w, http.StatusForbidden, "scope_not_allowed", "Khóa API không có quyền truy cập phạm vi (scope): "+scope)
+				return
+			}
+
+			next.ServeHTTP(w, r)
 		})
 	}
 }
@@ -83,6 +110,16 @@ func VirtualKeyAuthMiddleware(keyUseCase ports.KeyUseCase) func(http.Handler) ht
 // RequireAdmin kiểm tra quyền quản trị (role == 'admin')
 func RequireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := domain.TenantIdentityFromContext(r.Context())
+		if ok {
+			if id.Role == "admin" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			writeAuthError(w, http.StatusForbidden, "admin_required", "Yêu cầu quyền quản trị viên (role: admin) để thực hiện thao tác này.")
+			return
+		}
+
 		vKey := domain.VirtualKeyFromContext(r.Context())
 		if vKey == nil {
 			writeAuthError(w, http.StatusUnauthorized, "unauthorized", "Yêu cầu xác thực khóa API.")

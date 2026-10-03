@@ -17,15 +17,22 @@ func AdminAuthMiddleware(adminCfg config.AdminConfig) func(http.Handler) http.Ha
 				return
 			}
 
-			expectedToken := adminCfg.GetSessionToken()
-			expectedUser := adminCfg.GetUsername()
-			expectedPass := adminCfg.GetPassword()
+			expectedToken := strings.TrimSpace(adminCfg.GetSessionToken())
+			expectedUser := strings.TrimSpace(adminCfg.GetUsername())
+			expectedPass := strings.TrimSpace(adminCfg.GetPassword())
+
+			if expectedToken == "" && expectedPass == "" {
+				http.Error(w, `{"error":"unauthorized","message":"chưa cấu hình thông tin xác thực quản trị viên"}`, http.StatusUnauthorized)
+				return
+			}
 
 			// 1. Kiểm tra Cookie dezuxk_admin_token
-			if cookie, err := r.Cookie("dezuxk_admin_token"); err == nil && cookie.Value != "" {
-				if cookie.Value == expectedToken {
-					next.ServeHTTP(w, r)
-					return
+			if expectedToken != "" {
+				if cookie, err := r.Cookie("dezuxk_admin_token"); err == nil && cookie.Value != "" {
+					if cookie.Value == expectedToken {
+						next.ServeHTTP(w, r)
+						return
+					}
 				}
 			}
 
@@ -33,7 +40,7 @@ func AdminAuthMiddleware(adminCfg config.AdminConfig) func(http.Handler) http.Ha
 			authHeader := r.Header.Get("Authorization")
 			if authHeader != "" {
 				// 2a. Bearer Token
-				if strings.HasPrefix(authHeader, "Bearer ") {
+				if expectedToken != "" && strings.HasPrefix(authHeader, "Bearer ") {
 					token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 					if token == expectedToken {
 						next.ServeHTTP(w, r)
@@ -42,7 +49,7 @@ func AdminAuthMiddleware(adminCfg config.AdminConfig) func(http.Handler) http.Ha
 				}
 
 				// 2b. Basic Auth
-				if strings.HasPrefix(authHeader, "Basic ") {
+				if expectedUser != "" && expectedPass != "" && strings.HasPrefix(authHeader, "Basic ") {
 					encoded := strings.TrimSpace(strings.TrimPrefix(authHeader, "Basic "))
 					decoded, err := base64.StdEncoding.DecodeString(encoded)
 					if err == nil {

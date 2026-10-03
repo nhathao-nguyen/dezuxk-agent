@@ -20,6 +20,12 @@ type ToolRegistry interface {
 	Execute(ctx context.Context, name string, argsJSON string) (string, error)
 }
 
+// ToolExecutionService định nghĩa ranh giới chính sách tập trung (Policy Engine) kiểm soát toàn bộ lời gọi công cụ
+type ToolExecutionService interface {
+	ExecuteTool(ctx context.Context, toolName string, argsJSON string) (string, error)
+	ValidateToolExecution(ctx context.Context, toolName string, argsJSON string) error
+}
+
 // AgentRunner giao diện điều phối vòng lặp tự trị ReAct
 type AgentRunner interface {
 	Run(ctx context.Context, goal string, opts domain.AgentRunOptions) (*domain.AgentState, error)
@@ -52,7 +58,9 @@ type MemoryRepository interface {
 // MemoryService giao diện quản lý tổng hợp 3 tầng bộ nhớ của Agent
 type MemoryService interface {
 	GetCoreMemory() *domain.CoreMemory
+	GetCoreMemoryForContext(ctx context.Context) *domain.CoreMemory
 	UpdateCoreMemory(update func(core *domain.CoreMemory))
+	UpdateCoreMemoryForContext(ctx context.Context, update func(core *domain.CoreMemory))
 	StoreArchival(ctx context.Context, key, content string, tags []string) error
 	SearchArchival(ctx context.Context, query string, topK int) ([]domain.MemorySearchResult, error)
 	CompactConversation(ctx context.Context, messages []domain.OpenAIMessage, threshold int) ([]domain.OpenAIMessage, error)
