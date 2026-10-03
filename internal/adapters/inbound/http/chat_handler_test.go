@@ -242,3 +242,94 @@ func TestChatHandler_StreamThroughTraceMiddleware(t *testing.T) {
 	}
 }
 
+func TestResponsesAPI_FunctionCallPreserved(t *testing.T) {
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	metrics := domain.NewContractMetrics()
+	mockCU := &mockChatUseCase{
+		syncResp: &domain.OpenAIChatResponse{
+			ID:     "resp-123",
+			Object: "chat.completion",
+			Model:  "gemini-3.8-flash",
+			Choices: []domain.OpenAIChoice{
+				{
+					Index: 0,
+					Message: domain.OpenAIMessage{
+						Role:    "assistant",
+						Content: "Hoàn tất đọc file.",
+					},
+				},
+			},
+		},
+	}
+	handler := adaptersHTTP.NewChatHandler(mockCU, mr, metrics)
+
+	payload := `{
+		"model": "gemini-3.8-flash",
+		"input": [
+			{"type": "message", "role": "user", "content": "Hãy đọc file"},
+			{"type": "function_call", "call_id": "call_abc", "name": "read_file", "arguments": "{\"path\": \"hello.txt\"}"},
+			{"type": "function_call_output", "call_id": "call_abc", "output": "Hello world"}
+		]
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	rec := httptest.NewRecorder()
+	handler.HandleResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got: %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	msgs := mockCU.lastReq.Messages
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	// Kiểm tra function_call đã được map thành assistant có ToolCalls
+	if msgs[1].Role != "assistant" || len(msgs[1].ToolCalls) != 1 {
+		t.Fatalf("expected assistant message with 1 tool call, got: %+v", msgs[1])
+	}
+	if msgs[1].ToolCalls[0].ID != "call_abc" || msgs[1].ToolCalls[0].Function.Name != "read_file" {
+		t.Errorf("expected call_abc and read_file, got: %+v", msgs[1].ToolCalls[0])
+	}
+	// Kiểm tra tool output message
+	if msgs[2].Role != "tool" || msgs[2].ToolCallID != "call_abc" {
+		t.Errorf("expected tool message with call_abc, got: %+v", msgs[2])
+	}
+}
+
+func TestResponsesAPI_ModelNotFoundReturns404JSON(t *testing.T) {
+	// Registry chỉ có model không thuộc ServiceGemini
+	mr := domain.NewModelRegistry([]domain.ModelDescriptor{
+		{
+			ID:            "claude-3-5-sonnet",
+			TargetService: domain.ServiceKind("claude"),
+			IsActive:      true,
+		},
+	})
+	metrics := domain.NewContractMetrics()
+	mockCU := &mockChatUseCase{}
+	handler := adaptersHTTP.NewChatHandler(mockCU, mr, metrics)
+
+	payload := `{
+		"model": "non-existent-gemini-model-999",
+		"input": "Hello"
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(payload))
+	rec := httptest.NewRecorder()
+	handler.HandleResponses(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found, got: %d", rec.Code)
+	}
+	contentType := rec.Header().Get("Content-Type")
+	if !strings.Contains(contentType, "application/json") {
+		t.Errorf("expected application/json content type, got: %s", contentType)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "model_not_found") {
+		t.Errorf("expected error type model_not_found, got: %s", body)
+	}
+}
+
+

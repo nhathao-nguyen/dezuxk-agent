@@ -176,6 +176,19 @@ func cleanToolCallBody(body string) string {
 
 // ExtractToolCalls bóc tách các lệnh gọi công cụ từ văn bản do mô hình sinh ra
 func ExtractToolCalls(rawText string) (string, []domain.OpenAIToolCall) {
+	return ExtractToolCallsWithAllowed(rawText, nil)
+}
+
+// hasToolCallSign kiểm tra xem jsonBody có dấu hiệu cấu trúc tối thiểu của một tool call (bắt buộc có name/tool và arguments/parameters/args/input)
+func hasToolCallSign(jsonBody string) bool {
+	hasName := strings.Contains(jsonBody, `"name"`) || strings.Contains(jsonBody, `"tool"`)
+	hasArgs := strings.Contains(jsonBody, `"arguments"`) || strings.Contains(jsonBody, `"parameters"`) ||
+		strings.Contains(jsonBody, `"args"`) || strings.Contains(jsonBody, `"input"`)
+	return hasName && hasArgs
+}
+
+// ExtractToolCallsWithAllowed bóc tách các lệnh gọi công cụ, sử dụng danh sách allowedTools để bảo vệ chống nuốt nhầm code block
+func ExtractToolCallsWithAllowed(rawText string, allowedTools []domain.OpenAITool) (string, []domain.OpenAIToolCall) {
 	var toolCalls []domain.OpenAIToolCall
 	cleanText := rawText
 
@@ -193,15 +206,34 @@ func ExtractToolCalls(rawText string) (string, []domain.OpenAIToolCall) {
 
 	// 2. Quét định dạng fallback Markdown codeblock nếu chưa có tool call từ XML
 	if len(toolCalls) == 0 {
+		var allowedMap map[string]bool
+		if len(allowedTools) > 0 {
+			allowedMap = make(map[string]bool, len(allowedTools))
+			for _, t := range allowedTools {
+				allowedMap[strings.ToLower(strings.TrimSpace(t.Function.Name))] = true
+			}
+		}
+
 		mdMatches := reToolCallMD.FindAllStringSubmatchIndex(cleanText, -1)
-		for _, match := range mdMatches {
+		// Duyệt ngược từ cuối lên để việc cắt chuỗi không làm lệch offset
+		for i := len(mdMatches) - 1; i >= 0; i-- {
+			match := mdMatches[i]
 			contentStart, contentEnd := match[2], match[3]
 			jsonBody := cleanText[contentStart:contentEnd]
-			// Chỉ parse nếu có dấu hiệu của tool call ("name" hoặc "tool")
-			if strings.Contains(jsonBody, `"name"`) || strings.Contains(jsonBody, `"tool"`) {
-				parsed := parseToolCallBody(jsonBody, len(toolCalls))
-				if len(parsed) > 0 {
-					toolCalls = append(toolCalls, parsed...)
+			// Chỉ parse khi có dấu hiệu cấu trúc đầy đủ của tool call (phải có cả name và arguments)
+			if hasToolCallSign(jsonBody) {
+				candidateCalls := parseToolCallBody(jsonBody, len(toolCalls))
+				allAllowed := len(candidateCalls) > 0
+				if allowedMap != nil {
+					for _, c := range candidateCalls {
+						if !allowedMap[strings.ToLower(strings.TrimSpace(c.Function.Name))] {
+							allAllowed = false
+							break
+						}
+					}
+				}
+				if allAllowed {
+					toolCalls = append(candidateCalls, toolCalls...)
 					fullStart, fullEnd := match[0], match[1]
 					cleanText = cleanText[:fullStart] + cleanText[fullEnd:]
 				}

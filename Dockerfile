@@ -1,6 +1,6 @@
 # Multi-stage build cho Dezuxk AI Gateway
 # Stage 1: Build binary với CGO (SQLite3)
-FROM golang:1.24-alpine AS builder
+FROM golang:alpine AS builder
 
 # Cài đặt build toolchain cho CGO (gcc, musl-dev)
 RUN apk add --no-cache gcc musl-dev git

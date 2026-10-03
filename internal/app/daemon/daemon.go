@@ -461,6 +461,8 @@ func startGeminiChatGoldenRunner(
 	ticker := time.NewTicker(interval)
 	go func() {
 		defer ticker.Stop()
+		loggedStandby := false
+		allowAny := os.Getenv("DEZUXK_GOLDEN_ALLOW_ANY_ACCOUNT") == "true"
 		for {
 			select {
 			case <-ctx.Done():
@@ -475,10 +477,17 @@ func startGeminiChatGoldenRunner(
 						break
 					}
 				}
+				if labAccount == nil && allowAny && len(accounts) > 0 {
+					labAccount = accounts[0]
+				}
 				if labAccount == nil {
-					log.Printf("[Golden Job Standby] Chưa có tài khoản lab (ID chứa '%s'). Bỏ qua đối soát StreamGenerate để đảm bảo an toàn tài khoản người dùng.", labPrefix)
+					if !loggedStandby {
+						log.Printf("[Golden Job Standby] Chưa có tài khoản lab (ID chứa '%s'). Bỏ qua đối soát StreamGenerate (thiết lập DEZUXK_GOLDEN_ALLOW_ANY_ACCOUNT=true để dùng tài khoản hiện có).", labPrefix)
+						loggedStandby = true
+					}
 					continue
 				}
+				loggedStandby = false
 				log.Printf("[Golden Job] Bắt đầu đối soát hợp đồng StreamGenerate trên tài khoản lab: %s", labAccount.ID)
 				report, err := job.Run(ctx, labAccount, "ping")
 				if err != nil {

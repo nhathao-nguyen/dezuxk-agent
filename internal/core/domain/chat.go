@@ -385,11 +385,17 @@ type GeminiPayloadBuilder struct {
 func ModelIdentityInstruction(modelID string) string {
 	m := strings.ToLower(strings.TrimSpace(modelID))
 	switch {
-	case strings.Contains(m, "flash-lite") || strings.Contains(m, "3.5"):
+	case strings.Contains(m, "3.5-flash-lite") || strings.Contains(m, "flash-lite"):
 		return "You are Gemini 3.5 Flash-Lite, Google's fastest high-efficiency model. When asked about your identity or model name, identify as Gemini 3.5 Flash-Lite."
-	case strings.Contains(m, "3.1-pro") || strings.Contains(m, "pro"):
+	case strings.Contains(m, "3.1-pro"):
 		return "You are Gemini 3.1 Pro, Google's advanced reasoning model. When asked about your identity or model name, identify as Gemini 3.1 Pro."
-	case strings.Contains(m, "3.8-flash") || strings.Contains(m, "flash"):
+	case strings.Contains(m, "3.8-flash"):
+		return "You are Gemini 3.8 Flash, Google's versatile multimodal model. When asked about your identity or model name, identify as Gemini 3.8 Flash."
+	case strings.Contains(m, "2.5-pro") || strings.Contains(m, "1.5-pro"):
+		return ""
+	case strings.Contains(m, "pro"):
+		return "You are Gemini 3.1 Pro, Google's advanced reasoning model. When asked about your identity or model name, identify as Gemini 3.1 Pro."
+	case strings.Contains(m, "flash"):
 		return "You are Gemini 3.8 Flash, Google's versatile multimodal model. When asked about your identity or model name, identify as Gemini 3.8 Flash."
 	default:
 		return ""
@@ -474,7 +480,12 @@ func FlattenMessagesForModelWithContext(messages []OpenAIMessage, modelID string
 			if callID == "" {
 				callID = "default"
 			}
-			dialogParts = append(dialogParts, fmt.Sprintf("[Tool Result (call_id: %s)]:\n%s", callID, m.Content))
+			content := m.Content
+			// Cắt tỉa tool result cũ nếu nội dung quá lớn (trên 15,000 ký tự) để chống phình to context (M1)
+			if i < len(messages)-2 && len(content) > 15000 {
+				content = content[:8000] + fmt.Sprintf("\n\n...[Đã lược bớt %d ký tự của kết quả tool cũ để tối ưu ngữ cảnh]...\n\n", len(content)-12000) + content[len(content)-4000:]
+			}
+			dialogParts = append(dialogParts, fmt.Sprintf("[Tool Result (call_id: %s)]:\n<tool_output>\n%s\n</tool_output>", callID, content))
 		default:
 			if strings.TrimSpace(m.Content) != "" {
 				dialogParts = append(dialogParts, m.Role+": "+m.Content)

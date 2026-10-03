@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -123,7 +124,17 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 		limiter = NewIPRateLimiter(maxReqs, time.Duration(windowSecs)*time.Second, trustedProxies)
 	}
-	r.Use(limiter.Middleware())
+	r.Use(func(next http.Handler) http.Handler {
+		limiterHandler := limiter.Middleware()(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+			if path == "/health" || path == "/ready" || path == "/metrics" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			limiterHandler.ServeHTTP(w, r)
+		})
+	})
 
 	// 3. Dynamic CORS Hardening
 	allowedOrigins := []string{"*"}
@@ -151,7 +162,11 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-API-Key", "Idempotency-Key"},
+		AllowedHeaders: []string{
+			"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-API-Key", "Idempotency-Key",
+			"OpenAI-Beta", "OpenAI-Organization", "X-Request-Id",
+			"X-Stainless-Lang", "X-Stainless-Package-Version", "X-Stainless-OS", "X-Stainless-Arch", "X-Stainless-Runtime",
+		},
 		ExposedHeaders:   []string{"Link", "Content-Range", "Accept-Ranges", "Retry-After", "X-Request-Id"},
 		AllowCredentials: allowCredentials,
 		MaxAge:           300,
@@ -302,8 +317,16 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					authHeader := r.Header.Get("Authorization")
 					expected := "Bearer " + deps.Config.Server.APIKey
-					if authHeader != expected {
-						http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					if subtle.ConstantTimeCompare([]byte(authHeader), []byte(expected)) != 1 {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusUnauthorized)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"error": map[string]any{
+								"message": "Sai API Key xác thực",
+								"type":    "authentication_error",
+								"code":    "invalid_api_key",
+							},
+						})
 						return
 					}
 					identity := domain.DefaultAdminIdentity()

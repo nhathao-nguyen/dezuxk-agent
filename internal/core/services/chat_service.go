@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -468,7 +469,7 @@ func (s *ChatService) streamRound(
 
 	toolCalls := filter.GetEmittedToolCalls()
 	if len(toolCalls) == 0 && (len(req.Tools) > 0 || req.ToolChoice != nil) {
-		_, fallbackCalls := ExtractToolCalls(reply.Text)
+		_, fallbackCalls := ExtractToolCallsWithAllowed(reply.Text, req.Tools)
 		if len(fallbackCalls) > 0 {
 			if validCalls, err := ValidateAndNormalizeToolCalls(fallbackCalls, req.Tools, req.ToolChoice); err == nil && len(validCalls) > 0 {
 				toolCalls = validCalls
@@ -649,15 +650,33 @@ func (s *ChatService) syncRound(
 		}
 	}
 
-	cleanText, rawCalls := ExtractToolCalls(reply.Text)
+	var cleanText = reply.Text
 	var toolCalls []domain.OpenAIToolCall
 	if len(req.Tools) > 0 || req.ToolChoice != nil {
+		cText, rawCalls := ExtractToolCallsWithAllowed(reply.Text, req.Tools)
+		cleanText = cText
 		if len(rawCalls) > 0 || req.ToolChoice != nil {
 			normCalls, err := ValidateAndNormalizeToolCalls(rawCalls, req.Tools, req.ToolChoice)
 			if err != nil {
-				return nil, err
+				// Nếu tool_choice không ép buộc (nil hoặc auto), fallback về plain text để không làm hỏng request
+				isStrict := false
+				if tc, ok := req.ToolChoice.(string); ok {
+					s := strings.ToLower(strings.TrimSpace(tc))
+					if s == "required" || s == "function" {
+						isStrict = true
+					}
+				} else if req.ToolChoice != nil {
+					isStrict = true
+				}
+				if isStrict {
+					return nil, err
+				}
+				log.Printf("[ChatService] Cảnh báo gọi tool không hợp lệ: %v. Fallback sang plain text.", err)
+				cleanText = reply.Text
+				toolCalls = nil
+			} else {
+				toolCalls = normCalls
 			}
-			toolCalls = normCalls
 		}
 	}
 
@@ -693,9 +712,11 @@ func (s *ChatService) syncRound(
 		for i := 1; i < len(reply.Drafts); i++ {
 			draftContent := reply.Drafts[i]
 			if strings.TrimSpace(draftContent) != "" && draftContent != reply.Text {
-				dClean, dRawCalls := ExtractToolCalls(draftContent)
+				dClean := draftContent
 				var dCalls []domain.OpenAIToolCall
 				if len(req.Tools) > 0 || req.ToolChoice != nil {
+					dc, dRawCalls := ExtractToolCallsWithAllowed(draftContent, req.Tools)
+					dClean = dc
 					if len(dRawCalls) > 0 || req.ToolChoice != nil {
 						if norm, err := ValidateAndNormalizeToolCalls(dRawCalls, req.Tools, req.ToolChoice); err == nil {
 							dCalls = norm

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/services"
 )
 
@@ -215,5 +216,56 @@ I am invoking: name: "fetch_url", arguments: {"url": "https://example.com"}
 			t.Errorf("expected url in arguments, got: %s", calls[0].Function.Arguments)
 		}
 	})
+
+	// Case 12: package.json chứa "name" không bao giờ bị nuốt thành tool call (Khắc phục Bug H1)
+	t.Run("PackageJsonNotSwallowedAsToolCall", func(t *testing.T) {
+		raw := "Đây là package.json mẫu của bạn:\n" +
+			"```json\n" +
+			"{\n" +
+			`  "name": "my-cool-frontend",` + "\n" +
+			`  "version": "1.0.0",` + "\n" +
+			`  "description": "Demo package"` + "\n" +
+			"}\n" +
+			"```\n" +
+			"Chúc bạn thành công."
+
+		clean, calls := services.ExtractToolCalls(raw)
+		if len(calls) != 0 {
+			t.Fatalf("expected 0 tool calls for package.json, got %d", len(calls))
+		}
+		if !strings.Contains(clean, "my-cool-frontend") {
+			t.Errorf("expected package.json content to be preserved, got: %s", clean)
+		}
+		if !strings.Contains(clean, "```json") {
+			t.Errorf("expected markdown code fences to be preserved, got: %s", clean)
+		}
+	})
+
+	// Case 13: AllowedTools whitelist lọc bỏ công cụ không thuộc danh sách
+	t.Run("AllowedToolsWhitelistFiltering", func(t *testing.T) {
+		raw := "Gọi lệnh:\n" +
+			"```json\n" +
+			`{"name": "unauthorized_tool", "arguments": {"action": "delete"}}` + "\n" +
+			"```\n" +
+			"Hoàn tất."
+
+		allowed := []domain.OpenAITool{
+			{
+				Type: "function",
+				Function: domain.OpenAIFunctionDef{
+					Name: "run_command",
+				},
+			},
+		}
+
+		clean, calls := services.ExtractToolCallsWithAllowed(raw, allowed)
+		if len(calls) != 0 {
+			t.Fatalf("expected 0 tool calls because unauthorized_tool is not allowed, got %d", len(calls))
+		}
+		if !strings.Contains(clean, "unauthorized_tool") {
+			t.Errorf("expected clean text to preserve unauthorized snippet, got: %s", clean)
+		}
+	})
 }
+
 

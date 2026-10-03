@@ -11,3 +11,10 @@ storage/*.db-shm
 storage/*.db-wal
 storage/media/*
 profiles/*
+configs/config.yaml
+configs/*.local.yaml
+configs/*.override.yaml
+*.db
+*.db-shm
+*.db-wal
+*.db-journal

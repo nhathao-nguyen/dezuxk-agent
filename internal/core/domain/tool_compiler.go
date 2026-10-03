@@ -65,7 +65,7 @@ func CompileToolsInstructionWithChoice(tools []OpenAITool, toolChoice any) strin
 	sb.WriteString("3. The \"arguments\" field MUST be a valid JSON object matching the parameters schema. Do NOT use unescaped newlines inside strings.\n")
 	sb.WriteString("4. You may invoke multiple tools in one turn by outputting multiple <tool_call>...</tool_call> blocks.\n")
 	sb.WriteString("5. When you invoke a tool, the environment executes it and returns the result in the next turn as:\n")
-	sb.WriteString("[Tool Result (call_id: ...)]:\n<output>\n")
+	sb.WriteString("[Tool Result (call_id: ...)]:\n<tool_output>\n...\n</tool_output>\n")
 	sb.WriteString("Carefully inspect the output to determine your next action or provide your final response.\n")
 	sb.WriteString("6. NEVER wrap <tool_call> inside Markdown code fences. NEVER invent tools that are not listed inside <tools>.\n")
 

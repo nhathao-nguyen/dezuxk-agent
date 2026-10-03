@@ -160,6 +160,7 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 		}
 
 		lazy := newLazyStreamWriter(w, flusher)
+		defer lazy.Close()
 		err := h.chatUseCase.ExecuteChatStream(r.Context(), &req, lazy, lazy.Flush)
 		if err != nil {
 			if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
@@ -213,20 +214,72 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	_, _ = w.Write(payload)
 }
 
+func writeOpenAIJSONError(w http.ResponseWriter, status int, message string, errType string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    errType,
+		},
+	})
+}
+
 type lazyStreamWriter struct {
 	w           http.ResponseWriter
 	flusher     http.Flusher
 	headersSent bool
+	mu          sync.Mutex
+	doneCh      chan struct{}
+	closeOnce   sync.Once
 }
 
 func newLazyStreamWriter(w http.ResponseWriter, flusher http.Flusher) *lazyStreamWriter {
-	return &lazyStreamWriter{
+	l := &lazyStreamWriter{
 		w:       w,
 		flusher: flusher,
+		doneCh:  make(chan struct{}),
 	}
+	l.startKeepAlive()
+	return l
+}
+
+func (l *lazyStreamWriter) startKeepAlive() {
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-l.doneCh:
+				return
+			case <-ticker.C:
+				l.mu.Lock()
+				if !l.headersSent {
+					l.w.Header().Set("Content-Type", "text/event-stream")
+					l.w.Header().Set("Cache-Control", "no-cache")
+					l.w.Header().Set("Connection", "keep-alive")
+					l.w.Header().Set("X-Accel-Buffering", "no")
+					l.headersSent = true
+				}
+				_, _ = fmt.Fprintf(l.w, ": keep-alive\n\n")
+				if l.flusher != nil {
+					l.flusher.Flush()
+				}
+				l.mu.Unlock()
+			}
+		}
+	}()
+}
+
+func (l *lazyStreamWriter) Close() {
+	l.closeOnce.Do(func() {
+		close(l.doneCh)
+	})
 }
 
 func (l *lazyStreamWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if !l.headersSent {
 		l.w.Header().Set("Content-Type", "text/event-stream")
 		l.w.Header().Set("Cache-Control", "no-cache")
@@ -238,6 +291,8 @@ func (l *lazyStreamWriter) Write(p []byte) (int, error) {
 }
 
 func (l *lazyStreamWriter) Flush() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.flusher != nil && l.headersSent {
 		l.flusher.Flush()
 	}
@@ -246,26 +301,29 @@ func (l *lazyStreamWriter) Flush() {
 // HandleResponses xử lý endpoint POST /v1/responses (OpenAI Responses API dành cho OpenAI Codex CLI & SDK mới)
 func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	if h.modelRegistry.Count() == 0 {
-		http.Error(w, `{"error":{"message":"chưa có phiên Gemini sẵn sàng","type":"service_unavailable"}}`, http.StatusServiceUnavailable)
+		writeOpenAIJSONError(w, http.StatusServiceUnavailable, "chưa có phiên Gemini sẵn sàng", "service_unavailable")
 		return
 	}
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, `{"error":{"message":"không thể đọc dữ liệu yêu cầu","type":"invalid_request_error"}}`, http.StatusBadRequest)
+		writeOpenAIJSONError(w, http.StatusBadRequest, "không thể đọc dữ liệu yêu cầu", "invalid_request_error")
 		return
 	}
 
 	var raw struct {
-		Model        string          `json:"model"`
-		Instructions string          `json:"instructions"`
-		Input        any             `json:"input"`
-		Tools        json.RawMessage `json:"tools"`
-		Stream       bool            `json:"stream"`
-		Temperature  *float64        `json:"temperature"`
+		Model           string          `json:"model"`
+		Instructions    string          `json:"instructions"`
+		Input           any             `json:"input"`
+		Tools           json.RawMessage `json:"tools"`
+		ToolChoice      any             `json:"tool_choice"`
+		Stream          bool            `json:"stream"`
+		Temperature     *float64        `json:"temperature"`
+		MaxOutputTokens *int            `json:"max_output_tokens"`
+		ReasoningEffort string          `json:"reasoning_effort"`
 	}
 	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
-		http.Error(w, `{"error":{"message":"dữ liệu JSON không hợp lệ","type":"invalid_request_error"}}`, http.StatusBadRequest)
+		writeOpenAIJSONError(w, http.StatusBadRequest, "dữ liệu JSON không hợp lệ", "invalid_request_error")
 		return
 	}
 
@@ -337,6 +395,23 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 					})
 					continue
 				}
+				if itemType == "function_call" {
+					callID, _ := itemMap["call_id"].(string)
+					name, _ := itemMap["name"].(string)
+					args, _ := itemMap["arguments"].(string)
+					messages = append(messages, domain.OpenAIMessage{
+						Role: "assistant",
+						ToolCalls: []domain.OpenAIToolCall{{
+							ID:   callID,
+							Type: "function",
+							Function: domain.OpenAIFunctionCallData{
+								Name:      name,
+								Arguments: args,
+							},
+						}},
+					})
+					continue
+				}
 				if role == "" {
 					role = "user"
 				}
@@ -375,17 +450,16 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	if desc, ok := h.modelRegistry.ResolveGeminiModel(targetModel); ok {
 		targetModel = desc.ID
 	} else {
-		descriptors := h.modelRegistry.List()
-		if len(descriptors) > 0 {
-			targetModel = descriptors[0].ID
-		}
+		writeOpenAIJSONError(w, http.StatusNotFound, fmt.Sprintf("Mô hình %q không tồn tại", targetModel), "model_not_found")
+		return
 	}
 
 	chatReq := &domain.OpenAIChatRequest{
-		Model:    targetModel,
-		Messages: messages,
-		Tools:    tools,
-		Stream:   raw.Stream,
+		Model:      targetModel,
+		Messages:   messages,
+		Tools:      tools,
+		ToolChoice: raw.ToolChoice,
+		Stream:     raw.Stream,
 	}
 	if raw.Temperature != nil {
 		chatReq.Temperature = *raw.Temperature
@@ -409,7 +483,7 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if !ok {
-			http.Error(w, `{"error":{"message":"máy chủ không hỗ trợ luồng","type":"upstream_error"}}`, http.StatusInternalServerError)
+			writeOpenAIJSONError(w, http.StatusInternalServerError, "máy chủ không hỗ trợ luồng", "upstream_error")
 			return
 		}
 
@@ -430,13 +504,13 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := h.chatUseCase.ExecuteChatSync(r.Context(), chatReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":{"message":%q,"type":"upstream_error"}}`, err.Error()), http.StatusInternalServerError)
+		writeOpenAIJSONError(w, http.StatusInternalServerError, err.Error(), "upstream_error")
 		return
 	}
 
 	var outputItems []any
 	var replyText string
-	if len(resp.Choices) > 0 {
+	if resp != nil && len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
 		replyText = choice.Message.Content
 		outputItems = append(outputItems, map[string]any{

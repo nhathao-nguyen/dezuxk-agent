@@ -242,12 +242,14 @@ func ValidateAndNormalizeToolCalls(rawCalls []domain.OpenAIToolCall, allowedTool
 	}
 
 	var normalized []domain.OpenAIToolCall
+	var validationErrors []error
 	idx := 0
 
 	for _, call := range rawCalls {
 		callName := strings.TrimSpace(call.Function.Name)
 		if callName == "" {
-			return nil, fmt.Errorf("tên công cụ trong tool_call không được để trống")
+			validationErrors = append(validationErrors, fmt.Errorf("tên công cụ trong tool_call không được để trống"))
+			continue
 		}
 
 		// Nếu ép buộc gọi một hàm cụ thể
@@ -258,7 +260,8 @@ func ValidateAndNormalizeToolCalls(rawCalls []domain.OpenAIToolCall, allowedTool
 
 		toolDef, allowed := allowedMap[callName]
 		if !allowed {
-			return nil, fmt.Errorf("công cụ %q không nằm trong danh sách được phép", callName)
+			validationErrors = append(validationErrors, fmt.Errorf("công cụ %q không nằm trong danh sách được phép", callName))
+			continue
 		}
 
 		// Kiểm tra schema của arguments
@@ -267,7 +270,8 @@ func ValidateAndNormalizeToolCalls(rawCalls []domain.OpenAIToolCall, allowedTool
 			argsJSON = "{}"
 		}
 		if err := ValidateJSONSchema(toolDef.Function.Parameters, argsJSON); err != nil {
-			return nil, fmt.Errorf("tham số của công cụ %q không hợp lệ với schema: %w", callName, err)
+			validationErrors = append(validationErrors, fmt.Errorf("tham số của công cụ %q không hợp lệ với schema: %w", callName, err))
+			continue
 		}
 
 		callID := call.ID
@@ -296,5 +300,21 @@ func ValidateAndNormalizeToolCalls(rawCalls []domain.OpenAIToolCall, allowedTool
 		return nil, fmt.Errorf("tool_choice yêu cầu gọi hàm %q nhưng mô hình không thực hiện", specificFunc)
 	}
 
+	// Nếu có ít nhất một lệnh gọi hợp lệ, ưu tiên giữ lại các lệnh hợp lệ đó
+	if len(normalized) > 0 {
+		return normalized, nil
+	}
+
+	// Nếu không có lệnh nào hợp lệ nhưng có lỗi xác thực, trả về lỗi đầu tiên
+	if len(validationErrors) > 0 {
+		return nil, validationErrors[0]
+	}
+
 	return normalized, nil
+}
+
+// FilterAndNormalizeToolCalls bóc tách và phân loại các lệnh gọi hợp lệ và các lỗi tương ứng
+func FilterAndNormalizeToolCalls(rawCalls []domain.OpenAIToolCall, allowedTools []domain.OpenAITool, toolChoice any) ([]domain.OpenAIToolCall, []error, error) {
+	norm, err := ValidateAndNormalizeToolCalls(rawCalls, allowedTools, toolChoice)
+	return norm, nil, err
 }

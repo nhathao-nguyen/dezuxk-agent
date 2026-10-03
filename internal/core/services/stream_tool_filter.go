@@ -21,6 +21,7 @@ type StreamToolFilter struct {
 	createdTime     int64
 	model           string
 	conversationID  string
+	completionID    string
 
 	buffer           strings.Builder
 	emittedToolCalls []domain.OpenAIToolCall
@@ -38,6 +39,7 @@ func NewStreamToolFilter(hasTools bool, w io.Writer, flusher func(), flushed *bo
 		createdTime:     created,
 		model:           model,
 		conversationID:  cID,
+		completionID:    "chatcmpl-" + generateToolCallID(),
 	}
 }
 
@@ -73,7 +75,7 @@ func (f *StreamToolFilter) emitContent(content string) error {
 		f.hasEmittedRole = true
 	}
 	chunk := domain.OpenAIChatResponse{
-		ID:             "chatcmpl-" + f.conversationID,
+		ID:             f.completionID,
 		Object:         "chat.completion.chunk",
 		Created:        f.createdTime,
 		Model:          f.model,
@@ -109,7 +111,7 @@ func (f *StreamToolFilter) emitToolCalls(calls []domain.OpenAIToolCall) error {
 		f.hasEmittedRole = true
 	}
 	chunk := domain.OpenAIChatResponse{
-		ID:             "chatcmpl-" + f.conversationID,
+		ID:             f.completionID,
 		Object:         "chat.completion.chunk",
 		Created:        f.createdTime,
 		Model:          f.model,
@@ -191,9 +193,9 @@ func (f *StreamToolFilter) OnDelta(delta, cID string) error {
 		toolCallBlock := bufStr[:toolCallEnd]
 		remaining := bufStr[toolCallEnd:]
 
-		_, calls := ExtractToolCalls(toolCallBlock)
+		_, calls := ExtractToolCallsWithAllowed(toolCallBlock, f.allowedTools)
+		var validCalls []domain.OpenAIToolCall
 		if len(calls) > 0 {
-			var validCalls []domain.OpenAIToolCall
 			if len(f.allowedTools) > 0 || f.toolChoice != nil {
 				if norm, err := ValidateAndNormalizeToolCalls(calls, f.allowedTools, f.toolChoice); err == nil {
 					validCalls = norm
@@ -207,6 +209,13 @@ func (f *StreamToolFilter) OnDelta(delta, cID string) error {
 				if err := f.emitToolCalls(validCalls); err != nil {
 					return err
 				}
+			}
+		}
+
+		if len(validCalls) == 0 {
+			// Không có tool call hợp lệ nào: emit lại khối toolCallBlock dưới dạng text delta để không nuốt mất nội dung
+			if err := f.emitContent(toolCallBlock); err != nil {
+				return err
 			}
 		}
 
@@ -230,7 +239,7 @@ func (f *StreamToolFilter) FlushRemaining() error {
 	}
 
 	// Thử extract tool calls từ phần còn lại (phòng trường hợp Gemini không đóng thẻ XML hoặc dùng markdown)
-	clean, calls := ExtractToolCalls(remaining)
+	clean, calls := ExtractToolCallsWithAllowed(remaining, f.allowedTools)
 	if len(calls) > 0 {
 		var validCalls []domain.OpenAIToolCall
 		if len(f.allowedTools) > 0 || f.toolChoice != nil {

@@ -234,3 +234,60 @@ func TestRetryAfterRefresh_SecondExpiryInvalidates(t *testing.T) {
 		t.Fatalf("state = %s", account.ServiceState(domain.ServiceGemini))
 	}
 }
+
+func TestMaxInFlightPerAccountCeiling(t *testing.T) {
+	repo := NewMemorySessionRepository(nil)
+	repo.SetMaxInFlightPerAccount(2)
+	account := testAccount()
+	if err := repo.Save(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+
+	// Request 1: Thành công, in-flight = 1
+	acc1, err := repo.GetAvailable(context.Background(), domain.ServiceGemini, 0)
+	if err != nil || acc1 == nil {
+		t.Fatalf("request 1 failed: %v", err)
+	}
+	if acc1.InFlightReqs != 1 {
+		t.Errorf("expected InFlightReqs = 1, got %d", acc1.InFlightReqs)
+	}
+
+	// Request 2: Thành công, in-flight = 2
+	acc2, err := repo.GetAvailable(context.Background(), domain.ServiceGemini, 0)
+	if err != nil || acc2 == nil {
+		t.Fatalf("request 2 failed: %v", err)
+	}
+	if acc2.InFlightReqs != 2 {
+		t.Errorf("expected InFlightReqs = 2, got %d", acc2.InFlightReqs)
+	}
+
+	// Request 3: Khi tài khoản đã đạt trần (2), request phải đợi. Với timeout 50ms, nó phải hết hạn
+	ctxTimeout, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, errWait := repo.GetAvailable(ctxTimeout, domain.ServiceGemini, 0)
+	if errWait == nil {
+		t.Fatal("expected request 3 to wait and timeout due to max in-flight ceiling")
+	}
+
+	// Giải phóng request 1
+	repo.Release(acc1, nil)
+	if account.InFlightReqs != 1 {
+		t.Errorf("expected InFlightReqs after release = 1, got %d", account.InFlightReqs)
+	}
+
+	// Request 3 thử lại: Thành công ngay khi slot được giải phóng
+	acc3, errRetry := repo.GetAvailable(context.Background(), domain.ServiceGemini, 0)
+	if errRetry != nil || acc3 == nil {
+		t.Fatalf("request 3 failed after release: %v", errRetry)
+	}
+	if acc3.InFlightReqs != 2 {
+		t.Errorf("expected InFlightReqs after request 3 = 2, got %d", acc3.InFlightReqs)
+	}
+
+	repo.Release(acc2, nil)
+	repo.Release(acc3, nil)
+	if account.InFlightReqs != 0 {
+		t.Errorf("expected InFlightReqs = 0, got %d", account.InFlightReqs)
+	}
+}
+

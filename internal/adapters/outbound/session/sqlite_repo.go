@@ -32,6 +32,7 @@ type SqliteSessionRepository struct {
 	coolingDuration time.Duration
 	alertDispatcher ports.AlertDispatcher
 	strategy        ports.AccountSelectionStrategy
+	maxInFlight     int
 }
 
 func (r *SqliteSessionRepository) DB() *sql.DB {
@@ -402,11 +403,24 @@ func (r *SqliteSessionRepository) hasServiceCookie(acc *domain.ManagedAccount, s
 	return acc.Jar.HasKey("__Secure-1PSID")
 }
 
+func (r *SqliteSessionRepository) SetMaxInFlightPerAccount(max int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxInFlight = max
+}
+
 func (r *SqliteSessionRepository) usable(acc *domain.ManagedAccount, service domain.ServiceKind, minCredits int) bool {
 	if acc == nil || !acc.ServiceReady(service) {
 		return false
 	}
 	if acc.Jar == nil || !acc.Jar.HasKey("__Secure-1PSID") {
+		return false
+	}
+	limit := r.maxInFlight
+	if limit <= 0 {
+		limit = DefaultMaxInFlightPerAccount
+	}
+	if acc.InFlightReqs >= int64(limit) {
 		return false
 	}
 	return true
@@ -461,6 +475,27 @@ func (r *SqliteSessionRepository) GetAvailable(ctx context.Context, service doma
 		r.mu.Unlock()
 
 		if wait == nil {
+			// Nếu tất cả tài khoản đều đang bận do chạm trần in-flight, chờ ngắn rồi thử lại
+			limit := r.maxInFlight
+			if limit <= 0 {
+				limit = DefaultMaxInFlightPerAccount
+			}
+			allBusy := false
+			for _, id := range r.order {
+				if a := r.accounts[id]; a != nil && a.InFlightReqs >= int64(limit) {
+					allBusy = true
+					break
+				}
+			}
+			if allBusy {
+				select {
+				case <-time.After(100 * time.Millisecond):
+					continue
+				case <-ctx.Done():
+					return nil, domain.ClassifyTransport(domain.OpSession, "", service, ctx.Err())
+				}
+			}
+
 			if paused == domain.ClassUpstreamUnavailable {
 				return nil, domain.UpstreamUnavailable(domain.OpSession, "", service, "phiên đang nghỉ sau lỗi kết nối")
 			}
