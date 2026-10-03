@@ -37,7 +37,7 @@ services:
 
   # 3. MinIO - Lưu trữ đối tượng S3 dùng chung cho media đa phương tiện
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     container_name: dezuxk-minio
     restart: unless-stopped
     ports:
@@ -52,7 +52,7 @@ services:
 
   # Khởi tạo bucket dezuxk-media và dezuxk-test tự động
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     container_name: dezuxk-minio-init
     depends_on:
       - minio
