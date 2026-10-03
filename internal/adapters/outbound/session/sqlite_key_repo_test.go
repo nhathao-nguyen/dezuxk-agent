@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"dezuxk-gateway/internal/core/domain"
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 func TestSqliteKeyRepository_CRUDAndQuota(t *testing.T) {
@@ -235,5 +235,3 @@ func TestSqliteKeyRepository_TokenUsage(t *testing.T) {
 		t.Errorf("expected 3600 total tokens in system history after master, got %d", sysHistoryAfterMaster[0].TotalTokens)
 	}
 }
-
-

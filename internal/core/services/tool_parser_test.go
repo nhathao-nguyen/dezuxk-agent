@@ -267,5 +267,3 @@ I am invoking: name: "fetch_url", arguments: {"url": "https://example.com"}
 		}
 	})
 }
-
-

@@ -10,7 +10,7 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 // Test 5: P0 Fix SQLite Legacy Migration Order

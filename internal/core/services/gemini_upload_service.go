@@ -168,7 +168,9 @@ func (s *GeminiUploadService) UploadFileWithAccount(
 
 func (s *GeminiUploadService) httpClientForAccount(account *domain.ManagedAccount) *http.Client {
 	if s.upstream != nil {
-		if provider, ok := s.upstream.(interface{ ClientForAccount(account *domain.ManagedAccount) *http.Client }); ok {
+		if provider, ok := s.upstream.(interface {
+			ClientForAccount(account *domain.ManagedAccount) *http.Client
+		}); ok {
 			return provider.ClientForAccount(account)
 		}
 	}

@@ -8,7 +8,7 @@ import (
 
 	"dezuxk-gateway/internal/core/domain"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 func TestSqliteMemoryRepository_HybridSearch(t *testing.T) {

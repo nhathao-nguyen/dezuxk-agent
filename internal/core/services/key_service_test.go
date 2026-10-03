@@ -104,7 +104,6 @@ func TestKeyService_MasterKeyBypass(t *testing.T) {
 	}
 }
 
-
 func TestKeyService_RevokeKey(t *testing.T) {
 	repo := session.NewMemoryKeyRepository()
 	service := NewKeyService(repo, "")

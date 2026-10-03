@@ -217,4 +217,53 @@ func TestValidateAndNormalizeToolCalls(t *testing.T) {
 			t.Errorf("call 1 mismatch: %+v", res[1])
 		}
 	})
+
+	t.Run("DuplicateToolCallID_AutoDeduplication", func(t *testing.T) {
+		calls := []domain.OpenAIToolCall{
+			{
+				ID: "duplicate_id",
+				Function: domain.OpenAIFunctionCallData{
+					Name:      "read_file",
+					Arguments: `{"path": "a.txt"}`,
+				},
+			},
+			{
+				ID: "duplicate_id", // Trùng ID do LLM sinh
+				Function: domain.OpenAIFunctionCallData{
+					Name:      "read_file",
+					Arguments: `{"path": "b.txt"}`,
+				},
+			},
+		}
+		res, err := services.ValidateAndNormalizeToolCalls(calls, allowedTools, "auto")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(res) != 2 {
+			t.Fatalf("expected 2 calls, got %d", len(res))
+		}
+		if res[0].ID == res[1].ID {
+			t.Fatalf("tool_call_ids must be unique, both are: %s", res[0].ID)
+		}
+		if res[0].ID != "duplicate_id" || res[1].ID != "duplicate_id_2" {
+			t.Errorf("unexpected deduplicated IDs: %s, %s", res[0].ID, res[1].ID)
+		}
+	})
+
+	t.Run("OversizedArguments_Rejected", func(t *testing.T) {
+		hugeArgs := `{"path": "` + strings.Repeat("A", 11*1024*1024) + `"}`
+		calls := []domain.OpenAIToolCall{
+			{
+				ID: "oversized_call",
+				Function: domain.OpenAIFunctionCallData{
+					Name:      "read_file",
+					Arguments: hugeArgs,
+				},
+			},
+		}
+		_, err := services.ValidateAndNormalizeToolCalls(calls, allowedTools, "auto")
+		if err == nil || !strings.Contains(err.Error(), "vượt quá giới hạn kích thước") {
+			t.Fatalf("expected oversized arguments error, got: %v", err)
+		}
+	})
 }

@@ -653,5 +653,3 @@ func InitCriticalRepositories(cfg *config.Config, db *sql.DB) (ports.CheckpointR
 
 	return checkpointRepo, memoryRepo, agentRunRepo, nil
 }
-
-

@@ -61,4 +61,3 @@ func (w *WireAdapter) DematerializeChatStream(
 	}
 	return ReadGeminiStreamWithThinking(ctx, resp.Body, metrics, onContent, onReasoning)
 }
-

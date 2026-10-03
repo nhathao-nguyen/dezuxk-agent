@@ -384,7 +384,3 @@ func TestReadGeminiStreamWithThinking(t *testing.T) {
 		t.Errorf("expected conversation ID c_thk, got %q", reply.ConversationID)
 	}
 }
-
-
-
-

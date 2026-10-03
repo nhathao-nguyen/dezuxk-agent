@@ -77,6 +77,21 @@ type MessageImageURL struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+func (u *MessageImageURL) UnmarshalJSON(data []byte) error {
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		u.URL = str
+		return nil
+	}
+	type Alias MessageImageURL
+	var alias Alias
+	if err := json.Unmarshal(data, &alias); err != nil {
+		return err
+	}
+	*u = MessageImageURL(alias)
+	return nil
+}
+
 type OpenAITool struct {
 	Type     string            `json:"type"`
 	Function OpenAIFunctionDef `json:"function"`
@@ -101,22 +116,24 @@ type OpenAIFunctionCallData struct {
 }
 
 type OpenAIMessage struct {
-	Role             string               `json:"role"`
-	Content          string               `json:"content"`
-	ReasoningContent string               `json:"reasoning_content,omitempty"`
-	ContentParts     []MessageContentPart `json:"content_parts,omitempty"`
-	ToolCalls        []OpenAIToolCall     `json:"tool_calls,omitempty"`
-	ToolCallID       string               `json:"tool_call_id,omitempty"`
+	Role             string                  `json:"role"`
+	Content          string                  `json:"content"`
+	ReasoningContent string                  `json:"reasoning_content,omitempty"`
+	ContentParts     []MessageContentPart    `json:"content_parts,omitempty"`
+	ToolCalls        []OpenAIToolCall        `json:"tool_calls,omitempty"`
+	ToolCallID       string                  `json:"tool_call_id,omitempty"`
+	FunctionCall     *OpenAIFunctionCallData `json:"function_call,omitempty"`
 }
 
 func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Role             string               `json:"role"`
-		Content          json.RawMessage      `json:"content"`
-		ReasoningContent string               `json:"reasoning_content,omitempty"`
-		ContentParts     []MessageContentPart `json:"content_parts,omitempty"`
-		ToolCalls        []OpenAIToolCall     `json:"tool_calls,omitempty"`
-		ToolCallID       string               `json:"tool_call_id,omitempty"`
+		Role             string                  `json:"role"`
+		Content          json.RawMessage         `json:"content"`
+		ReasoningContent string                  `json:"reasoning_content,omitempty"`
+		ContentParts     []MessageContentPart    `json:"content_parts,omitempty"`
+		ToolCalls        []OpenAIToolCall        `json:"tool_calls,omitempty"`
+		ToolCallID       string                  `json:"tool_call_id,omitempty"`
+		FunctionCall     *OpenAIFunctionCallData `json:"function_call,omitempty"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -126,6 +143,19 @@ func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 	m.ContentParts = raw.ContentParts
 	m.ToolCalls = raw.ToolCalls
 	m.ToolCallID = raw.ToolCallID
+	m.FunctionCall = raw.FunctionCall
+
+	// Tương thích ngược: Chuyển đổi function_call đơn lẻ sang tool_calls chuẩn
+	if m.FunctionCall != nil && len(m.ToolCalls) == 0 {
+		m.ToolCalls = []OpenAIToolCall{
+			{
+				Index:    0,
+				ID:       "call_" + m.FunctionCall.Name,
+				Type:     "function",
+				Function: *m.FunctionCall,
+			},
+		}
+	}
 
 	if len(raw.Content) == 0 || string(raw.Content) == "null" {
 		return nil
@@ -144,7 +174,7 @@ func (m *OpenAIMessage) UnmarshalJSON(data []byte) error {
 		m.ContentParts = append(m.ContentParts, parts...)
 		var texts []string
 		for _, part := range parts {
-			if (part.Type == "text" || part.Type == "") && part.Text != "" {
+			if (part.Type == "text" || part.Type == "input_text" || part.Type == "") && part.Text != "" {
 				texts = append(texts, part.Text)
 			}
 		}
@@ -193,19 +223,19 @@ func (m *OpenAIMessage) HasImages() bool {
 }
 
 type OpenAIChatRequest struct {
-	Model            string             `json:"model"`
-	Messages         []OpenAIMessage    `json:"messages"`
-	Stream           bool               `json:"stream"`
-	Temperature      float64            `json:"temperature"`
-	ConversationID   string             `json:"conversation_id,omitempty"`
-	ResponseID       string             `json:"response_id,omitempty"`
-	ChoiceID         string             `json:"choice_id,omitempty"`
-	ContextBlob      string             `json:"context_blob,omitempty"`
-	Thinking         *bool              `json:"thinking,omitempty"`
-	ReasoningEffort  string             `json:"reasoning_effort,omitempty"` // "low" | "medium" | "high" | "none"
-	ThinkingBudget   *int               `json:"thinking_budget,omitempty"`  // Token budget (ví dụ: 0, 1024, 8192)
-	BudgetTokens     *int               `json:"budget_tokens,omitempty"`    // Alias cho thinking_budget (chuẩn Anthropic / OpenAI o-series)
-	SearchGrounding  *bool              `json:"grounding,omitempty"`
+	Model               string             `json:"model"`
+	Messages            []OpenAIMessage    `json:"messages"`
+	Stream              bool               `json:"stream"`
+	Temperature         float64            `json:"temperature"`
+	ConversationID      string             `json:"conversation_id,omitempty"`
+	ResponseID          string             `json:"response_id,omitempty"`
+	ChoiceID            string             `json:"choice_id,omitempty"`
+	ContextBlob         string             `json:"context_blob,omitempty"`
+	Thinking            *bool              `json:"thinking,omitempty"`
+	ReasoningEffort     string             `json:"reasoning_effort,omitempty"` // "low" | "medium" | "high" | "none"
+	ThinkingBudget      *int               `json:"thinking_budget,omitempty"`  // Token budget (ví dụ: 0, 1024, 8192)
+	BudgetTokens        *int               `json:"budget_tokens,omitempty"`    // Alias cho thinking_budget (chuẩn Anthropic / OpenAI o-series)
+	SearchGrounding     *bool              `json:"grounding,omitempty"`
 	CodeInterpreter     *bool              `json:"code_interpreter,omitempty"`
 	Attachments         []GeminiAttachment `json:"attachments,omitempty"`
 	ParentResponseID    string             `json:"parent_response_id,omitempty"`
@@ -215,10 +245,28 @@ type OpenAIChatRequest struct {
 	ResponseFormat      any                `json:"response_format,omitempty"`
 	MaxTokens           *int               `json:"max_tokens,omitempty"`
 	MaxCompletionTokens *int               `json:"max_completion_tokens,omitempty"`
+	MaxOutputTokens     *int               `json:"max_output_tokens,omitempty"`
 	TopP                *float64           `json:"top_p,omitempty"`
 	N                   *int               `json:"n,omitempty"`
 	User                string             `json:"user,omitempty"`
 	Seed                *int               `json:"seed,omitempty"`
+}
+
+// EffectiveMaxTokens trả về giới hạn token phản hồi được thiết lập theo bất kỳ chuẩn nào
+func (r *OpenAIChatRequest) EffectiveMaxTokens() *int {
+	if r == nil {
+		return nil
+	}
+	if r.MaxCompletionTokens != nil {
+		return r.MaxCompletionTokens
+	}
+	if r.MaxTokens != nil {
+		return r.MaxTokens
+	}
+	if r.MaxOutputTokens != nil {
+		return r.MaxOutputTokens
+	}
+	return nil
 }
 
 func (r *OpenAIChatRequest) UnmarshalJSON(data []byte) error {

@@ -13,7 +13,7 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/services/policy"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 // countingFakeRunner đếm số lần gọi Run bằng atomic counter
@@ -425,8 +425,8 @@ func TestHardening_PreserveSecurityContextInWorker(t *testing.T) {
 		KeyID:                 "key-sec-test-777",
 		Role:                  "user",
 		Scopes:                []string{domain.ScopeAgent}, // KHÔNG có ScopeShell
-		AllowedTools:          []string{"read_file"},      // KHÔNG có run_command
-		AllowShell:            false,                      // Cấm shell
+		AllowedTools:          []string{"read_file"},       // KHÔNG có run_command
+		AllowShell:            false,                       // Cấm shell
 		RequireApproval:       false,
 		AllowedWorkspaceRoots: []string{tempDir},
 		MaxToolRuntime:        5 * time.Second,

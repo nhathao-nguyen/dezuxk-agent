@@ -18,9 +18,9 @@ type mockTool struct {
 	executeFn   func(ctx context.Context, args string) (string, error)
 }
 
-func (m *mockTool) Name() string                     { return m.name }
-func (m *mockTool) Description() string              { return m.description }
-func (m *mockTool) Parameters() json.RawMessage     { return json.RawMessage("{}") }
+func (m *mockTool) Name() string                       { return m.name }
+func (m *mockTool) Description() string                { return m.description }
+func (m *mockTool) Parameters() json.RawMessage        { return json.RawMessage("{}") }
 func (m *mockTool) Permission() domain.PermissionLevel { return m.permission }
 func (m *mockTool) Execute(ctx context.Context, args string) (string, error) {
 	if m.executeFn != nil {

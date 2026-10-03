@@ -108,7 +108,7 @@ type ManagedAccount struct {
 	Jar                 *CookieJar
 	GeminiSNlM0e        string
 	UserAgent           string
-	Tier                int // 1: Free, 2: Pro
+	Tier                int    // 1: Free, 2: Pro
 	ActiveModeID        string // Mode ID hiện tại (RPC L5adhe)
 	ProxyURL            string
 	InFlightReqs        int64

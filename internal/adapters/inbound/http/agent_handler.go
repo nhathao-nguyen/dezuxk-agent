@@ -271,45 +271,45 @@ func (h *AgentHandler) HandleRunStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	opts.OnProgress = func(step int, kind string, message string) {
-			sseEvent := "progress"
-			switch kind {
-			case "node_change", "node_plan", "node_execute", "node_verify", "node_fix", "node_complete":
-				sseEvent = kind
-			case "plan_created":
-				sseEvent = "plan_created"
-			case "reasoning":
-				sseEvent = "reasoning"
-			case "thinking":
-				sseEvent = "thinking"
-			case "tool_start":
-				sseEvent = "tool_start"
-			case "tool_end":
-				sseEvent = "tool_end"
-			case "verify_exec":
-				sseEvent = "verify_exec"
-			case "verify_pass":
-				sseEvent = "verify_pass"
-			case "verify_fail":
-				sseEvent = "verify_fail"
-			case "approval_wait":
-				sseEvent = "approval_wait"
-			case "enforce_action":
-				sseEvent = "enforce_action"
-			case "checkpoint":
-				sseEvent = "checkpoint"
-			case "sandbox_created":
-				sseEvent = "sandbox_created"
-			case "git_diff":
-				sseEvent = "git_diff"
-			}
-
-			sendSSE(sseEvent, map[string]any{
-				"step":      step,
-				"kind":      kind,
-				"message":   message,
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
+		sseEvent := "progress"
+		switch kind {
+		case "node_change", "node_plan", "node_execute", "node_verify", "node_fix", "node_complete":
+			sseEvent = kind
+		case "plan_created":
+			sseEvent = "plan_created"
+		case "reasoning":
+			sseEvent = "reasoning"
+		case "thinking":
+			sseEvent = "thinking"
+		case "tool_start":
+			sseEvent = "tool_start"
+		case "tool_end":
+			sseEvent = "tool_end"
+		case "verify_exec":
+			sseEvent = "verify_exec"
+		case "verify_pass":
+			sseEvent = "verify_pass"
+		case "verify_fail":
+			sseEvent = "verify_fail"
+		case "approval_wait":
+			sseEvent = "approval_wait"
+		case "enforce_action":
+			sseEvent = "enforce_action"
+		case "checkpoint":
+			sseEvent = "checkpoint"
+		case "sandbox_created":
+			sseEvent = "sandbox_created"
+		case "git_diff":
+			sseEvent = "git_diff"
 		}
+
+		sendSSE(sseEvent, map[string]any{
+			"step":      step,
+			"kind":      kind,
+			"message":   message,
+			"timestamp": time.Now().Format(time.RFC3339),
+		})
+	}
 
 	sendSSE("run_start", map[string]any{
 		"workflow":  req.Workflow,
@@ -1081,7 +1081,3 @@ func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Requ
 		}
 	}
 }
-
-
-
-

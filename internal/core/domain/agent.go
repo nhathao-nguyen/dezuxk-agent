@@ -43,11 +43,11 @@ type AgentTool interface {
 
 // ApprovalRequest yêu cầu phê duyệt từ Human-in-the-Loop
 type ApprovalRequest struct {
-	ToolName    string    `json:"tool_name"`
-	Arguments   string    `json:"arguments"`
-	Description string    `json:"description"`
+	ToolName    string          `json:"tool_name"`
+	Arguments   string          `json:"arguments"`
+	Description string          `json:"description"`
 	Permission  PermissionLevel `json:"permission"`
-	RequestedAt time.Time `json:"requested_at"`
+	RequestedAt time.Time       `json:"requested_at"`
 }
 
 // StepProgressCallback hàm callback nhận thông báo tiến trình từng bước
@@ -72,16 +72,16 @@ type AgentRunOptions struct {
 	Model                  string               `json:"model"`
 	MaxSteps               int                  `json:"max_steps"`
 	MaxToolCalls           int                  `json:"max_tool_calls,omitempty"`           // Giới hạn tổng số tool calls cho cả run (mặc định 50)
-	MaxRepeatedCalls       int                  `json:"max_repeated_calls,omitempty"`        // Giới hạn số lần gọi trùng lặp tool+args (mặc định 3)
-	MaxExecutionDuration   time.Duration        `json:"max_execution_duration,omitempty"`    // Giới hạn thời lượng chạy tối đa cho cả run (mặc định 10 phút)
-	MaxConsecutiveFailures int                  `json:"max_consecutive_failures,omitempty"`  // Giới hạn lỗi liên tiếp của tool (mặc định 5)
-	Supervised             bool                 `json:"supervised"`                          // Bán tự trị: yêu cầu xác nhận khi gặp lệnh destructive
+	MaxRepeatedCalls       int                  `json:"max_repeated_calls,omitempty"`       // Giới hạn số lần gọi trùng lặp tool+args (mặc định 3)
+	MaxExecutionDuration   time.Duration        `json:"max_execution_duration,omitempty"`   // Giới hạn thời lượng chạy tối đa cho cả run (mặc định 10 phút)
+	MaxConsecutiveFailures int                  `json:"max_consecutive_failures,omitempty"` // Giới hạn lỗi liên tiếp của tool (mặc định 5)
+	Supervised             bool                 `json:"supervised"`                         // Bán tự trị: yêu cầu xác nhận khi gặp lệnh destructive
 	Workspace              string               `json:"workspace"`
-	CustomPrompt           string               `json:"custom_prompt,omitempty"`             // Tùy biến system prompt nếu có
-	RequireAction          bool                 `json:"require_action,omitempty"`           // Bắt buộc phải có tool call để sửa đổi thực tế, không chấp nhận text suông
-	UseSandbox             bool                 `json:"use_sandbox,omitempty"`              // Tự động tạo git worktree sandbox (.dezuxk/worktrees/<task_id>)
-	AutoMerge              bool                 `json:"auto_merge,omitempty"`               // Tự động merge vào nhánh chính khi hoàn tất thành công
-	InitialState           *AgentState          `json:"initial_state,omitempty"`            // Trạng thái Agent khởi điểm khi phục hồi từ Checkpoint (Resume)
+	CustomPrompt           string               `json:"custom_prompt,omitempty"`  // Tùy biến system prompt nếu có
+	RequireAction          bool                 `json:"require_action,omitempty"` // Bắt buộc phải có tool call để sửa đổi thực tế, không chấp nhận text suông
+	UseSandbox             bool                 `json:"use_sandbox,omitempty"`    // Tự động tạo git worktree sandbox (.dezuxk/worktrees/<task_id>)
+	AutoMerge              bool                 `json:"auto_merge,omitempty"`     // Tự động merge vào nhánh chính khi hoàn tất thành công
+	InitialState           *AgentState          `json:"initial_state,omitempty"`  // Trạng thái Agent khởi điểm khi phục hồi từ Checkpoint (Resume)
 	OnProgress             StepProgressCallback `json:"-"`
 }
 
@@ -110,7 +110,7 @@ type AgentState struct {
 	StopReason     string          `json:"stop_reason"` // Xem các hằng số StopReason
 	FinalAnswer    string          `json:"final_answer"`
 	Error          string          `json:"error,omitempty"`
-	GitDiff        string          `json:"git_diff,omitempty"`     // Git Diff sau khi tác vụ hoàn thành
+	GitDiff        string          `json:"git_diff,omitempty"`      // Git Diff sau khi tác vụ hoàn thành
 	WorktreePath   string          `json:"worktree_path,omitempty"` // Thư mục sandbox nếu có
 	BranchName     string          `json:"branch_name,omitempty"`   // Nhánh git tạm nếu có
 	CreatedAt      time.Time       `json:"created_at"`

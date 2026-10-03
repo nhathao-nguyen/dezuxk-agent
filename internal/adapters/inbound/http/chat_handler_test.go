@@ -331,5 +331,3 @@ func TestResponsesAPI_ModelNotFoundReturns404JSON(t *testing.T) {
 		t.Errorf("expected error type model_not_found, got: %s", body)
 	}
 }
-
-

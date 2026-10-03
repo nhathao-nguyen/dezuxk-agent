@@ -15,20 +15,20 @@ import (
 // Tuyệt đối không chứa tài khoản, cookie hay mô hình Gemini/Flow.
 // CHÚ Ý BẢO MẬT: Bất kỳ secret nào từng được commit lên Git phải được xoay (rotate) ngay lập tức!
 type Config struct {
-	Environment string                       `yaml:"environment"` // "development", "staging", "production"
-	Server      ServerConfig                 `yaml:"server"`
-	Operations Operations                   `yaml:"operations"`
-	Profiles   ProfilesConfig               `yaml:"profiles"`
-	Media      MediaConfig                  `yaml:"media"`
-	Vision     VisionConfig                 `yaml:"vision"`
-	Tokens     TokensConfig                 `yaml:"tokens"`
-	Failover   FailoverConfig               `yaml:"failover"`
-	Storage    StorageConfig                `yaml:"storage"`
-	GoldenJob  GoldenJobConfig              `yaml:"golden_job"`
-	KeepAlive  KeepAliveConfig              `yaml:"keep_alive"`
-	Security   SecurityConfig               `yaml:"security"`
-	Alerts     AlertsConfig                 `yaml:"alerts"`
-	Cache      CacheConfig                  `yaml:"cache"`
+	Environment  string                       `yaml:"environment"` // "development", "staging", "production"
+	Server       ServerConfig                 `yaml:"server"`
+	Operations   Operations                   `yaml:"operations"`
+	Profiles     ProfilesConfig               `yaml:"profiles"`
+	Media        MediaConfig                  `yaml:"media"`
+	Vision       VisionConfig                 `yaml:"vision"`
+	Tokens       TokensConfig                 `yaml:"tokens"`
+	Failover     FailoverConfig               `yaml:"failover"`
+	Storage      StorageConfig                `yaml:"storage"`
+	GoldenJob    GoldenJobConfig              `yaml:"golden_job"`
+	KeepAlive    KeepAliveConfig              `yaml:"keep_alive"`
+	Security     SecurityConfig               `yaml:"security"`
+	Alerts       AlertsConfig                 `yaml:"alerts"`
+	Cache        CacheConfig                  `yaml:"cache"`
 	Admin        AdminConfig                  `yaml:"admin"`
 	ChatDefaults ChatDefaultsConfig           `yaml:"chat_defaults"`
 	MCPServers   map[string]MCPServerConfig   `yaml:"mcp_servers"`

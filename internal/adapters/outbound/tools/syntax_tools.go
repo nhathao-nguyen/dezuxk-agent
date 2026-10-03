@@ -57,14 +57,14 @@ type ReadSymbolArgs struct {
 }
 
 type SymbolMatch struct {
-	SymbolName  string
-	Kind        string // "Function", "Method", "Struct", "Interface", "Type"
-	Package     string
-	FilePath    string
-	StartLine   int
-	EndLine     int
-	DocComment  string
-	Definition  string
+	SymbolName string
+	Kind       string // "Function", "Method", "Struct", "Interface", "Type"
+	Package    string
+	FilePath   string
+	StartLine  int
+	EndLine    int
+	DocComment string
+	Definition string
 }
 
 func (t *ReadSymbolDefinitionTool) Execute(ctx context.Context, argsJSON string) (string, error) {

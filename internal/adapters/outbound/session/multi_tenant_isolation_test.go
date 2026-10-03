@@ -9,7 +9,7 @@ import (
 	"dezuxk-gateway/internal/adapters/outbound/session"
 	"dezuxk-gateway/internal/core/domain"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 func TestMultiTenantMemoryIsolation(t *testing.T) {

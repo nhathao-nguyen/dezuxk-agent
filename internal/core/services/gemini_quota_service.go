@@ -188,11 +188,12 @@ func (s *GeminiQuotaService) GetAccountTierForAccount(ctx context.Context, accou
 
 	// 3. Đồng bộ cấp độ Tier vào tài khoản và lưu trữ SQLite
 	if account != nil {
-		if tierInfo.TierCode == "GOOGLE_AI_PRO" || tierInfo.TierCode == "GOOGLE_ONE_AI_PREMIUM" {
+		switch tierInfo.TierCode {
+		case "GOOGLE_AI_PRO", "GOOGLE_ONE_AI_PREMIUM":
 			account.Tier = 2 // 2: Pro
-		} else if tierInfo.TierCode == "WORKSPACE_ENTERPRISE" {
+		case "WORKSPACE_ENTERPRISE":
 			account.Tier = 3 // 3: Enterprise / Ultra
-		} else {
+		default:
 			account.Tier = 1 // 1: Free
 		}
 		if s.sessionRepo != nil {

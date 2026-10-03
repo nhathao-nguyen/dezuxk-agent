@@ -499,6 +499,3 @@ func TestFlattenMessagesForModelWithContext_RemoteHistoryOptimization(t *testing
 		t.Errorf("expected current prompt to be preserved, got: %s", promptOptimized)
 	}
 }
-
-
-

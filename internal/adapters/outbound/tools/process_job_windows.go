@@ -47,12 +47,12 @@ type ioCounters struct {
 }
 
 type jobObjectExtendedLimitInformation struct {
-	BasicLimitInformation jobObjectBasicLimitInformation
-	IoInfo                ioCounters
-	ProcessMemoryLimit    uintptr
-	JobMemoryLimit        uintptr
+	BasicLimitInformation  jobObjectBasicLimitInformation
+	IoInfo                 ioCounters
+	ProcessMemoryLimit     uintptr
+	JobMemoryLimit         uintptr
 	PeakProcessMemoryLimit uintptr
-	PeakJobMemoryLimit    uintptr
+	PeakJobMemoryLimit     uintptr
 }
 
 type processJobGroup struct {

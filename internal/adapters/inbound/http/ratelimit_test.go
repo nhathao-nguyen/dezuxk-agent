@@ -3,8 +3,11 @@ package http
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"dezuxk-gateway/internal/core/ports"
 )
 
 func TestIPRateLimiter(t *testing.T) {
@@ -95,4 +98,73 @@ func TestIPRateLimiter_TrustedProxies(t *testing.T) {
 	if w2.Code != http.StatusOK {
 		t.Fatalf("trusted proxy req2 (different client) expected 200, got %d", w2.Code)
 	}
+}
+
+func TestLocalRateLimiter_MultiTierAndHashing(t *testing.T) {
+	limiter := NewLocalRateLimiter(2, 200*time.Millisecond)
+	limiter.SetMaxConcurrent(2)
+	limiter.SetMaxAgentRuns(1)
+
+	// 1. Kiểm tra SHA-256 Key Hashing
+	rawKey1 := "sk-prod-test-key-abcdef-123456"
+	rawKey2 := "sk-prod-test-key-abcdef-999999" // Same prefix, different token
+	hash1 := HashKeyID(rawKey1)
+	hash2 := HashKeyID(rawKey2)
+	if hash1 == hash2 {
+		t.Fatalf("Key hash collision for different tokens: %s == %s", hash1, hash2)
+	}
+	if strings.Contains(hash1, "sk-prod") {
+		t.Fatalf("Key hash must NOT leak raw token prefix, got: %s", hash1)
+	}
+
+	// 2. Multi-tier isolation: Tenant A vs Tenant B
+	idA := ports.RateLimitIdentity{TenantID: "tenant-A", KeyID: hash1}
+	idB := ports.RateLimitIdentity{TenantID: "tenant-B", KeyID: hash2}
+
+	// Tenant A uses 2 requests
+	for i := 0; i < 2; i++ {
+		d, err := limiter.Allow(t.Context(), idA)
+		if err != nil || !d.Allowed {
+			t.Fatalf("Tenant A req %d should be allowed: %+v, err: %v", i+1, d, err)
+		}
+	}
+
+	// Tenant A 3rd request -> rate limited with Retry-After
+	dA, err := limiter.Allow(t.Context(), idA)
+	if err != nil {
+		t.Fatalf("Tenant A check error: %v", err)
+	}
+	if dA.Allowed {
+		t.Fatalf("Tenant A 3rd request should be blocked")
+	}
+	if dA.RetryAfterSec <= 0 {
+		t.Fatalf("Expected RetryAfterSec > 0, got %d", dA.RetryAfterSec)
+	}
+
+	// Tenant B is isolated and must still be allowed
+	dB, err := limiter.Allow(t.Context(), idB)
+	if err != nil || !dB.Allowed {
+		t.Fatalf("Tenant B should be allowed regardless of Tenant A: %+v, err: %v", dB, err)
+	}
+
+	// 3. Concurrency Limiter: Agent Runs MaxConcurrent = 1
+	idAgent := ports.RateLimitIdentity{TenantID: "tenant-A", KeyID: hash1, IsAgentRun: true}
+	release1, ok1, err := limiter.AcquireConcurrency(t.Context(), idAgent)
+	if err != nil || !ok1 {
+		t.Fatalf("First concurrent agent run should succeed")
+	}
+
+	// Second concurrent agent run -> blocked
+	_, ok2, _ := limiter.AcquireConcurrency(t.Context(), idAgent)
+	if ok2 {
+		t.Fatalf("Second concurrent agent run should be rejected by maxAgentRuns limit")
+	}
+
+	// Release first agent run -> subsequent can acquire
+	release1()
+	release3, ok3, err := limiter.AcquireConcurrency(t.Context(), idAgent)
+	if err != nil || !ok3 {
+		t.Fatalf("Agent run after release should succeed")
+	}
+	release3()
 }

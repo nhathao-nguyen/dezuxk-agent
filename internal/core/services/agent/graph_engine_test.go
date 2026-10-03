@@ -24,7 +24,7 @@ func TestGraphEngine_PlanExecuteVerifyComplete(t *testing.T) {
 				Choices: []domain.OpenAIChoice{
 					{
 						Message: domain.OpenAIMessage{
-							Role: "assistant",
+							Role:    "assistant",
 							Content: "{\"steps\": [{\"id\": 1, \"title\": \"Tạo file và kiểm thử\", \"description\": \"Tạo file hello.txt\", \"verification_cmd\": \"echo VERIFY_PASS\"}]}",
 						},
 					},
@@ -102,7 +102,7 @@ func TestGraphEngine_VerifyFailAndFixCycle(t *testing.T) {
 				Choices: []domain.OpenAIChoice{
 					{
 						Message: domain.OpenAIMessage{
-							Role: "assistant",
+							Role:    "assistant",
 							Content: `{"steps": [{"id": 1, "title": "Sửa code", "description": "Tạo fix", "verification_cmd": "echo FIXED"}]}`,
 						},
 					},

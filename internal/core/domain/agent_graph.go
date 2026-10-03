@@ -34,9 +34,9 @@ type PlanStep struct {
 	Description         string         `json:"description"`
 	VerificationCommand string         `json:"verification_cmd,omitempty"` // Lệnh kiểm thử (ví dụ: go test ./...)
 	Status              PlanStepStatus `json:"status"`
-	Evidence            string         `json:"evidence,omitempty"`         // Bằng chứng kiểm thử tươi mới khi PASS
-	ErrorOutput         string         `json:"error_output,omitempty"`     // Log lỗi stdout/stderr khi FAIL
-	FixAttempts         int            `json:"fix_attempts"`               // Số lần đã thử tự động sửa
+	Evidence            string         `json:"evidence,omitempty"`     // Bằng chứng kiểm thử tươi mới khi PASS
+	ErrorOutput         string         `json:"error_output,omitempty"` // Log lỗi stdout/stderr khi FAIL
+	FixAttempts         int            `json:"fix_attempts"`           // Số lần đã thử tự động sửa
 	UpdatedAt           time.Time      `json:"updated_at"`
 }
 
@@ -84,19 +84,19 @@ type AgentCheckpoint struct {
 
 // AgentGraphState trạng thái tổng hợp của luồng Workflow State Machine
 type AgentGraphState struct {
-	TaskID       string          `json:"task_id"`
-	Goal         string          `json:"goal"`
-	CurrentNode  GraphNodeKind   `json:"current_node"`
-	Plan         TaskPlan        `json:"plan"`
-	AgentState   AgentState      `json:"agent_state"`
-	MaxFixRetry  int             `json:"max_fix_retry"` // Mặc định 3 lần tự sửa lỗi trước khi dừng
-	Checkpoints  int             `json:"checkpoints_count"`
-	IsCompleted  bool            `json:"is_completed"`
-	FinalSummary string          `json:"final_summary"`
-	Error        string          `json:"error,omitempty"`
-	GitDiff      string          `json:"git_diff,omitempty"`      // Git Diff sau khi workflow hoàn thành
-	WorktreePath string          `json:"worktree_path,omitempty"`  // Thư mục sandbox nếu có
-	BranchName   string          `json:"branch_name,omitempty"`    // Nhánh git tạm nếu có
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	TaskID       string        `json:"task_id"`
+	Goal         string        `json:"goal"`
+	CurrentNode  GraphNodeKind `json:"current_node"`
+	Plan         TaskPlan      `json:"plan"`
+	AgentState   AgentState    `json:"agent_state"`
+	MaxFixRetry  int           `json:"max_fix_retry"` // Mặc định 3 lần tự sửa lỗi trước khi dừng
+	Checkpoints  int           `json:"checkpoints_count"`
+	IsCompleted  bool          `json:"is_completed"`
+	FinalSummary string        `json:"final_summary"`
+	Error        string        `json:"error,omitempty"`
+	GitDiff      string        `json:"git_diff,omitempty"`      // Git Diff sau khi workflow hoàn thành
+	WorktreePath string        `json:"worktree_path,omitempty"` // Thư mục sandbox nếu có
+	BranchName   string        `json:"branch_name,omitempty"`   // Nhánh git tạm nếu có
+	CreatedAt    time.Time     `json:"created_at"`
+	UpdatedAt    time.Time     `json:"updated_at"`
 }

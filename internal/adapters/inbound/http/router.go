@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -160,8 +161,8 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		allowCredentials = len(cleanOrigins) > 0
 	}
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   allowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedOrigins: allowedOrigins,
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{
 			"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-API-Key", "Idempotency-Key",
 			"OpenAI-Beta", "OpenAI-Organization", "X-Request-Id",
@@ -172,13 +173,43 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		MaxAge:           300,
 	}))
 
-	// 4. Prometheus Metrics Endpoint
+	// 4. Prometheus Metrics Endpoint (Bảo vệ chống rò rỉ dữ liệu vận hành ra public internet)
 	metricsExporter := NewPrometheusMetricsExporter(deps.SessionRepo, deps.ModelRegistry, deps.AgentRunRepo, deps.Metrics)
-	r.Method(http.MethodGet, "/metrics", metricsExporter)
+	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if deps.Config != nil && deps.Config.IsProduction() {
+			authorized := false
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+				if (deps.Config.Server.APIKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Server.APIKey)) == 1) ||
+					(deps.Config.Admin.SessionToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Admin.SessionToken)) == 1) ||
+					(deps.Config.Admin.Password != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Admin.Password)) == 1) {
+					authorized = true
+				}
+			}
+			peerIP := r.RemoteAddr
+			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				peerIP = host
+			}
+			if peerIP == "127.0.0.1" || peerIP == "::1" || (limiter != nil && limiter.trustedChecker != nil && limiter.trustedChecker.IsTrusted(peerIP)) {
+				authorized = true
+			}
 
-	// 5. Health & Liveness Check (Liveness Probe)
+			if !authorized {
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte("Unauthorized: /metrics endpoint requires authentication or trusted network access in production\n"))
+				return
+			}
+		}
+		metricsExporter.ServeHTTP(w, r)
+	})
+
+	// 5. Health Check (Liveness Probe - Kiểm tra tiến trình sống còn)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
 		activeModels := 0
 		if deps.ModelRegistry != nil {
 			activeModels = deps.ModelRegistry.Count()
@@ -187,12 +218,8 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		if deps.ReadinessManager != nil && !deps.ReadinessManager.IsReady() {
 			isReady = false
 		}
-		status := "ok"
-		if !isReady {
-			status = "degraded"
-		}
 		payload := map[string]any{
-			"status":        status,
+			"status":        "ok",
 			"ready":         isReady,
 			"models_active": activeModels,
 			"timestamp":     time.Now().Format(time.RFC3339),
@@ -203,6 +230,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		_ = json.NewEncoder(w).Encode(payload)
 	})
 
+	// 6. Readiness Check (Readiness Probe - Kiểm tra khả năng phục vụ lưu lượng thực tế)
 	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		checks := make(map[string]string)
@@ -234,6 +262,24 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			}
 		} else {
 			checks["sessions"] = "ok"
+		}
+
+		// Kiểm tra trạng thái tài khoản khả dụng nếu có session repo
+		if deps.SessionRepo != nil {
+			accounts := deps.SessionRepo.ListAll(r.Context())
+			hasUsable := false
+			for _, acc := range accounts {
+				if acc != nil && acc.GetHealthStatus() != domain.HealthStatusUnavailable {
+					hasUsable = true
+					break
+				}
+			}
+			if len(accounts) > 0 && !hasUsable {
+				checks["accounts"] = "all upstream accounts are degraded or unavailable"
+				isReady = false
+			} else {
+				checks["accounts"] = "ok"
+			}
 		}
 
 		status := http.StatusOK

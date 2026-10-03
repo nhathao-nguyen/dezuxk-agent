@@ -977,4 +977,3 @@ func (r *SqliteAgentRunRepository) MarkUnknownAfterRestart(ctx context.Context, 
 
 var _ ports.AgentRunRepository = (*SqliteAgentRunRepository)(nil)
 var _ ports.ToolExecutionLedger = (*SqliteAgentRunRepository)(nil)
-

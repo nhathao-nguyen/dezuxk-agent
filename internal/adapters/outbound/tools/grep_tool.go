@@ -97,10 +97,7 @@ func (t *GrepCodeTool) Execute(ctx context.Context, argsJSON string) (string, er
 	rgBin := findRipgrepBinary()
 	if rgBin != "" {
 		out, err := executeRipgrep(ctx, rgBin, searchPath, args, maxResults)
-		if err == nil && out != "" {
-			return out, nil
-		}
-		if out != "" {
+		if err == nil {
 			return out, nil
 		}
 	}
@@ -118,12 +115,11 @@ func findRipgrepBinary() string {
 		return p
 	}
 
-	// Kiểm tra các đường dẫn cài đặt phổ biến trên Windows
+	// Kiểm tra các đường dẫn cài đặt ripgrep phổ biến trên Windows
 	candidates := []string{
 		`C:\Users\PC\AppData\Local\OpenAI\Codex\bin\rg.exe`,
 		`C:\Users\PC\AppData\Local\Programs\Antigravity IDE\resources\app\node_modules\@vscode\ripgrep\bin\rg.exe`,
 		`C:\Users\PC\AppData\Local\Programs\Microsoft VS Code\resources\app\node_modules.asar.unpacked\@vscode\ripgrep\bin\rg.exe`,
-		`C:\Program Files\Git\usr\bin\grep.exe`,
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
@@ -166,7 +162,10 @@ func executeRipgrep(ctx context.Context, rgBin, searchPath string, args GrepCode
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	_ = cmd.Run()
+	err := cmd.Run()
+	if err != nil && stdout.Len() == 0 {
+		return "", fmt.Errorf("ripgrep execution failed: %w: %s", err, stderr.String())
+	}
 	outLines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	var validLines []string
 	for _, l := range outLines {

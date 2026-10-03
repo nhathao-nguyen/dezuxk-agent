@@ -19,12 +19,12 @@ type JSONSchemaDef struct {
 
 // JSONSchemaProperty mô tả thuộc tính trong JSON Schema
 type JSONSchemaProperty struct {
-	Type        any                  `json:"type"` // string hoặc []any
-	Description string               `json:"description,omitempty"`
-	Enum        []any                `json:"enum,omitempty"`
-	Items       *JSONSchemaProperty  `json:"items,omitempty"`
+	Type        any                           `json:"type"` // string hoặc []any
+	Description string                        `json:"description,omitempty"`
+	Enum        []any                         `json:"enum,omitempty"`
+	Items       *JSONSchemaProperty           `json:"items,omitempty"`
 	Properties  map[string]JSONSchemaProperty `json:"properties,omitempty"`
-	Required    []string             `json:"required,omitempty"`
+	Required    []string                      `json:"required,omitempty"`
 }
 
 // ValidateJSONSchema kiểm tra chuỗi arguments JSON có khớp với định nghĩa parameters JSON Schema không
@@ -243,6 +243,7 @@ func ValidateAndNormalizeToolCalls(rawCalls []domain.OpenAIToolCall, allowedTool
 
 	var normalized []domain.OpenAIToolCall
 	var validationErrors []error
+	seenIDs := make(map[string]int)
 	idx := 0
 
 	for _, call := range rawCalls {
@@ -269,14 +270,27 @@ func ValidateAndNormalizeToolCalls(rawCalls []domain.OpenAIToolCall, allowedTool
 		if argsJSON == "" {
 			argsJSON = "{}"
 		}
+		// Kiểm tra kích thước tham số để chống DoS / phình to bộ nhớ (M1)
+		if len(argsJSON) > 10*1024*1024 {
+			validationErrors = append(validationErrors, fmt.Errorf("tham số của công cụ %q vượt quá giới hạn kích thước cho phép (10MB)", callName))
+			continue
+		}
+
 		if err := ValidateJSONSchema(toolDef.Function.Parameters, argsJSON); err != nil {
 			validationErrors = append(validationErrors, fmt.Errorf("tham số của công cụ %q không hợp lệ với schema: %w", callName, err))
 			continue
 		}
 
-		callID := call.ID
-		if strings.TrimSpace(callID) == "" {
+		callID := strings.TrimSpace(call.ID)
+		if callID == "" {
 			callID = generateToolCallID()
+		}
+		// Đảm bảo tính độc nhất của tool_call_id (chống duplicate tool_call_id từ LLM làm crash client)
+		if count, exists := seenIDs[callID]; exists {
+			seenIDs[callID] = count + 1
+			callID = fmt.Sprintf("%s_%d", callID, count+1)
+		} else {
+			seenIDs[callID] = 1
 		}
 
 		normalized = append(normalized, domain.OpenAIToolCall{

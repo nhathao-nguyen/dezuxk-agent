@@ -96,4 +96,3 @@ func TestRouter_AdminWebDashboard(t *testing.T) {
 		t.Fatalf("expected TotalRequests to be 1 after /v1/models, got %d", snap.TotalRequests)
 	}
 }
-

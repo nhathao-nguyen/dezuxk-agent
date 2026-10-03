@@ -90,7 +90,34 @@ func (e *PrometheusMetricsExporter) ServeHTTP(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// 4. Agent Runs Metrics
+	// 4. Agent Runs & Execution Metrics
+	if e.metrics != nil {
+		snap := e.metrics.Snapshot()
+		sb.WriteString("# HELP gateway_request_duration_seconds Average gateway request duration in seconds.\n")
+		sb.WriteString("# TYPE gateway_request_duration_seconds gauge\n")
+		sb.WriteString(fmt.Sprintf("gateway_request_duration_seconds %.4f\n", snap.AvgRequestLatencyMs/1000.0))
+
+		sb.WriteString("# HELP llm_latency_seconds Average LLM upstream call latency in seconds.\n")
+		sb.WriteString("# TYPE llm_latency_seconds gauge\n")
+		sb.WriteString(fmt.Sprintf("llm_latency_seconds %.4f\n", snap.AvgUpstreamLatencyMs/1000.0))
+
+		sb.WriteString("# HELP tool_duration_seconds Average tool execution duration in seconds.\n")
+		sb.WriteString("# TYPE tool_duration_seconds gauge\n")
+		sb.WriteString(fmt.Sprintf("tool_duration_seconds %.4f\n", snap.AvgToolLatencyMs/1000.0))
+
+		sb.WriteString("# HELP tool_errors_total Total number of tool execution failures.\n")
+		sb.WriteString("# TYPE tool_errors_total counter\n")
+		sb.WriteString(fmt.Sprintf("tool_errors_total %d\n", snap.ToolErrors+snap.MCPErrors))
+
+		sb.WriteString("# HELP agent_active_runs Current number of actively running agents.\n")
+		sb.WriteString("# TYPE agent_active_runs gauge\n")
+		sb.WriteString(fmt.Sprintf("agent_active_runs %d\n", snap.ActiveAgents))
+
+		sb.WriteString("# HELP upstream_failover_total Total number of upstream failover events triggered.\n")
+		sb.WriteString("# TYPE upstream_failover_total counter\n")
+		sb.WriteString(fmt.Sprintf("upstream_failover_total %d\n", snap.Failovers))
+	}
+
 	if e.agentRunRepo != nil {
 		sb.WriteString("# HELP agent_runs_total Total durable agent runs submitted.\n")
 		sb.WriteString("# TYPE agent_runs_total counter\n")

@@ -113,8 +113,6 @@ func (s *KeyService) isMasterAdminKey(key string) bool {
 	return false
 }
 
-
-
 // CreateKey tạo một Virtual API Key mới với hạn ngạch cấu hình
 func (s *KeyService) CreateKey(ctx context.Context, req domain.CreateKeyRequest) (*domain.VirtualKeyCreated, error) {
 	name := strings.TrimSpace(req.Name)

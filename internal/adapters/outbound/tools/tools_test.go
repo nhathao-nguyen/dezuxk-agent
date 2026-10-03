@@ -283,5 +283,3 @@ func TestPathSandboxing(t *testing.T) {
 		t.Errorf("Lỗi trả về không chứa thông điệp Path Sandboxing: %v", err)
 	}
 }
-
-

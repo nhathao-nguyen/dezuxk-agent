@@ -249,4 +249,3 @@ func TestAttachmentResolver_PDFAndTextDocuments(t *testing.T) {
 		t.Errorf("expected upload_doc_2.csv, got %s", attachments[1].FileName)
 	}
 }
-

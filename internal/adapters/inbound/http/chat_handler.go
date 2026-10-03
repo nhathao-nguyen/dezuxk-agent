@@ -62,7 +62,7 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 
 	desc, ok := h.modelRegistry.ResolveGeminiModel(req.Model)
 	if !ok {
-		writeChatError(w, r, h.metrics, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, "chưa có mô hình Gemini khả dụng"), false)
+		writeOpenAIJSONError(w, http.StatusNotFound, fmt.Sprintf("The model '%s' does not exist", req.Model), "invalid_request_error", "model_not_found")
 		return
 	}
 	req.Model = desc.ID
@@ -214,14 +214,18 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	_, _ = w.Write(payload)
 }
 
-func writeOpenAIJSONError(w http.ResponseWriter, status int, message string, errType string) {
+func writeOpenAIJSONError(w http.ResponseWriter, status int, message string, errType string, code ...string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+	errObj := map[string]any{
+		"message": message,
+		"type":    errType,
+	}
+	if len(code) > 0 && code[0] != "" {
+		errObj["code"] = code[0]
+	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]any{
-			"message": message,
-			"type":    errType,
-		},
+		"error": errObj,
 	})
 }
 
@@ -382,6 +386,15 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 	case []any:
 		for _, item := range v {
+			if strItem, ok := item.(string); ok {
+				if strings.TrimSpace(strItem) != "" {
+					messages = append(messages, domain.OpenAIMessage{
+						Role:    "user",
+						Content: strings.TrimSpace(strItem),
+					})
+				}
+				continue
+			}
 			if itemMap, ok := item.(map[string]any); ok {
 				role, _ := itemMap["role"].(string)
 				itemType, _ := itemMap["type"].(string)
@@ -463,6 +476,12 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw.Temperature != nil {
 		chatReq.Temperature = *raw.Temperature
+	}
+	if raw.MaxOutputTokens != nil {
+		chatReq.MaxOutputTokens = raw.MaxOutputTokens
+	}
+	if raw.ReasoningEffort != "" {
+		chatReq.ReasoningEffort = raw.ReasoningEffort
 	}
 
 	log.Printf("[HandleResponses] Model: %s, Stream: %v", targetModel, raw.Stream)
@@ -728,20 +747,20 @@ func (t *responsesStreamTranslator) Write(p []byte) (int, error) {
 					fmt.Fprintf(t.w, "event: response.output_item.added\ndata: %s\n\n", itemAdded)
 
 					argsDelta, _ := json.Marshal(map[string]any{
-						"type":          "response.function_call_arguments.delta",
-						"response_id":   t.respID,
-						"item_id":       tc.ID,
-						"output_index":  1,
-						"delta":         tc.Function.Arguments,
+						"type":         "response.function_call_arguments.delta",
+						"response_id":  t.respID,
+						"item_id":      tc.ID,
+						"output_index": 1,
+						"delta":        tc.Function.Arguments,
 					})
 					fmt.Fprintf(t.w, "event: response.function_call_arguments.delta\ndata: %s\n\n", argsDelta)
 
 					argsDone, _ := json.Marshal(map[string]any{
-						"type":          "response.function_call_arguments.done",
-						"response_id":   t.respID,
-						"item_id":       tc.ID,
-						"output_index":  1,
-						"arguments":     tc.Function.Arguments,
+						"type":         "response.function_call_arguments.done",
+						"response_id":  t.respID,
+						"item_id":      tc.ID,
+						"output_index": 1,
+						"arguments":    tc.Function.Arguments,
 					})
 					fmt.Fprintf(t.w, "event: response.function_call_arguments.done\ndata: %s\n\n", argsDone)
 

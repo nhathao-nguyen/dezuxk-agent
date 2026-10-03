@@ -206,14 +206,14 @@ func TestResume_CannotEscalatePrivileges(t *testing.T) {
 
 	// 1. Admin tạo tác vụ với đầy đủ quyền tối cao
 	adminSecCtx := &domain.AgentSecurityContext{
-		TenantID:        "tenant-multi",
-		Role:            "admin",
-		Scopes:          []string{domain.ScopeAgent, domain.ScopeShell, domain.ScopeAdmin},
-		AllowedModels:   []string{"*"},
-		AllowedTools:    []string{"*"},
-		AllowShell:      true,
-		RequireApproval: false,
-		EnforceSandbox:  false,
+		TenantID:         "tenant-multi",
+		Role:             "admin",
+		Scopes:           []string{domain.ScopeAgent, domain.ScopeShell, domain.ScopeAdmin},
+		AllowedModels:    []string{"*"},
+		AllowedTools:     []string{"*"},
+		AllowShell:       true,
+		RequireApproval:  false,
+		EnforceSandbox:   false,
 		AutoMergeAllowed: true,
 	}
 

@@ -275,4 +275,3 @@ func TestAgentRunner_MaxToolCallsReached(t *testing.T) {
 		t.Fatalf("expected StopReason %s, got %s", domain.StopReasonMaxToolCallsReached, state.StopReason)
 	}
 }
-

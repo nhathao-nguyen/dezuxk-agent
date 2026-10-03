@@ -11,7 +11,7 @@ import (
 
 	"dezuxk-gateway/internal/core/domain"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 func newTestSqliteAgentRunRepo(t *testing.T) (*SqliteAgentRunRepository, *sql.DB) {

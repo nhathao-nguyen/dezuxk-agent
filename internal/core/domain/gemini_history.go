@@ -542,4 +542,3 @@ func ParseModeSwitchResponse(rawJSON string) (bool, error) {
 	}
 	return true, nil
 }
-

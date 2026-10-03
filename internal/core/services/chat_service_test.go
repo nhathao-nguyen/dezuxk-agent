@@ -429,6 +429,3 @@ func TestNormalizeWireErr(t *testing.T) {
 		t.Fatalf("expected ClassSchemaUnexpected for empty 200 payload, got: %+v", errEmptySchema)
 	}
 }
-
-
-

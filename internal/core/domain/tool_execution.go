@@ -56,3 +56,28 @@ func ResolveToolSemantics(tool AgentTool) ToolExecutionSemantics {
 	}
 	return ToolExecutionSemantics{ReadOnly: false, Idempotent: false}
 }
+
+// CanonicalToolCall chuẩn hóa biểu diễn nội bộ của một lời gọi công cụ
+type CanonicalToolCall struct {
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Arguments  string              `json:"arguments"`
+	TenantID   string              `json:"tenant_id"`
+	RunID      string              `json:"run_id"`
+	TraceID    string              `json:"trace_id"`
+	Permission PermissionLevel     `json:"permission"`
+	Timeout    time.Duration       `json:"timeout"`
+	Status     ToolExecutionStatus `json:"status"`
+	CreatedAt  time.Time           `json:"created_at"`
+}
+
+// CanonicalToolResult chuẩn hóa kết quả thực thi của một lời gọi công cụ
+type CanonicalToolResult struct {
+	ToolCallID string              `json:"tool_call_id"`
+	Name       string              `json:"name"`
+	Output     string              `json:"output"`
+	Error      string              `json:"error,omitempty"`
+	Status     ToolExecutionStatus `json:"status"`
+	DurationMs int64               `json:"duration_ms"`
+	ExecutedAt time.Time           `json:"executed_at"`
+}

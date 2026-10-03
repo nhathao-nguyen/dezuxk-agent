@@ -20,13 +20,13 @@ import (
 )
 
 type ChatService struct {
-	modelRegistry  *domain.ModelRegistry
-	sessionRepo    ports.SessionRepository
-	upstream       ports.UpstreamGoogleTransport
-	wire           ports.WireCodec
-	metrics        *domain.ContractMetrics
-	storage        ports.MediaRepository
-	visionResolver *VisionResolver
+	modelRegistry    *domain.ModelRegistry
+	sessionRepo      ports.SessionRepository
+	upstream         ports.UpstreamGoogleTransport
+	wire             ports.WireCodec
+	metrics          *domain.ContractMetrics
+	storage          ports.MediaRepository
+	visionResolver   *VisionResolver
 	tokenCounter     *TokenCounter
 	failoverConfig   config.FailoverConfig
 	leaseWaitTimeout time.Duration
@@ -1032,4 +1032,3 @@ func normalizeWireErr(err error) error {
 func NormalizeWireErr(err error) error {
 	return normalizeWireErr(err)
 }
-

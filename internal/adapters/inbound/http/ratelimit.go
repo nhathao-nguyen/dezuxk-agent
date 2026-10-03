@@ -1,6 +1,9 @@
 package http
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -8,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"dezuxk-gateway/internal/core/domain"
+	"dezuxk-gateway/internal/core/ports"
 )
 
 // TrustedProxyChecker kiểm tra xem IP kết nối trực tiếp có thuộc danh sách proxy tin cậy hay không
@@ -69,61 +75,72 @@ func (c *TrustedProxyChecker) IsTrusted(ipStr string) bool {
 	return false
 }
 
-// IPRateLimiter quản lý giới hạn tần suất request đa tầng (IP, Tenant, API Key) và đồng thời (Concurrency)
-type IPRateLimiter struct {
-	mu             sync.Mutex
-	visitors       map[string]*visitor
-	inFlight       map[string]int
-	maxConcurrent  int
-	rate           int           // Số request tối đa trong window
-	window         time.Duration // Độ dài cửa sổ thời gian
-	cleanupFreq    time.Duration
-	trustedChecker *TrustedProxyChecker
+// HashKeyID băm cryptographic SHA-256 khóa API để làm định danh, tuyệt đối không lưu hay dùng prefix của raw key
+func HashKeyID(rawKey string) string {
+	rawKey = strings.TrimSpace(rawKey)
+	if rawKey == "" {
+		return "anonymous"
+	}
+	h := sha256.Sum256([]byte(rawKey))
+	return "key_" + hex.EncodeToString(h[:12])
 }
 
-type visitor struct {
+type visitorBucket struct {
 	tokens     int
 	lastRefill time.Time
 }
 
-// NewIPRateLimiter khởi tạo một Rate Limiter cho HTTP Router
-func NewIPRateLimiter(rate int, window time.Duration, trustedProxies ...[]string) *IPRateLimiter {
+// LocalRateLimiter triển khai ports.RateLimiter hỗ trợ đầy đủ các chiều:
+// IP, tenant_id, key_id, endpoint, model, agent runs và concurrency.
+type LocalRateLimiter struct {
+	mu             sync.Mutex
+	buckets        map[string]*visitorBucket
+	inFlight       map[string]int
+	defaultRPM     int
+	window         time.Duration
+	maxConcurrent  int
+	maxAgentRuns   int
+	cleanupFreq    time.Duration
+	trustedChecker *TrustedProxyChecker
+}
+
+var _ ports.RateLimiter = (*LocalRateLimiter)(nil)
+
+// NewLocalRateLimiter khởi tạo LocalRateLimiter chuẩn production
+func NewLocalRateLimiter(rate int, window time.Duration, trustedProxies ...[]string) *LocalRateLimiter {
 	var checker *TrustedProxyChecker
 	if len(trustedProxies) > 0 && len(trustedProxies[0]) > 0 {
 		checker = NewTrustedProxyChecker(trustedProxies[0])
 	}
+	if rate <= 0 {
+		rate = 120
+	}
+	if window <= 0 {
+		window = 1 * time.Minute
+	}
 
-	limiter := &IPRateLimiter{
-		visitors:       make(map[string]*visitor),
+	l := &LocalRateLimiter{
+		buckets:        make(map[string]*visitorBucket),
 		inFlight:       make(map[string]int),
-		maxConcurrent:  30, // Mặc định 30 kết nối đồng thời trên mỗi định danh
-		rate:           rate,
+		defaultRPM:     rate,
 		window:         window,
+		maxConcurrent:  30,
+		maxAgentRuns:   5,
 		cleanupFreq:    1 * time.Minute,
 		trustedChecker: checker,
 	}
-	go limiter.cleanupLoop()
-	return limiter
+	go l.cleanupLoop()
+	return l
 }
 
-// SetMaxConcurrent thiết lập số lượng request đồng thời tối đa
-func (lim *IPRateLimiter) SetMaxConcurrent(max int) {
-	lim.mu.Lock()
-	defer lim.mu.Unlock()
-	if max > 0 {
-		lim.maxConcurrent = max
-	}
-}
-
-// ExtractClientIP trích xuất IP của client thực sự, bảo vệ chống giả mạo header X-Forwarded-For
-func (lim *IPRateLimiter) ExtractClientIP(r *http.Request) string {
+// ExtractClientIP trích xuất IP client thực từ request, bảo vệ chống giả mạo header
+func (l *LocalRateLimiter) ExtractClientIP(r *http.Request) string {
 	peerIP := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		peerIP = host
 	}
 
-	// Chỉ đọc X-Forwarded-For hoặc X-Real-IP nếu peerIP thuộc danh sách trusted_proxies
-	if lim.trustedChecker != nil && lim.trustedChecker.IsTrusted(peerIP) {
+	if l.trustedChecker != nil && l.trustedChecker.IsTrusted(peerIP) {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			clientIP := strings.TrimSpace(parts[0])
@@ -141,107 +158,206 @@ func (lim *IPRateLimiter) ExtractClientIP(r *http.Request) string {
 	return peerIP
 }
 
-func (lim *IPRateLimiter) allow(key string) (bool, int) {
-	lim.mu.Lock()
-	defer lim.mu.Unlock()
+func (l *LocalRateLimiter) buildBucketKey(id ports.RateLimitIdentity) string {
+	if id.TenantID != "" && id.TenantID != "default" {
+		if id.KeyID != "" {
+			return fmt.Sprintf("tenant:%s:key:%s", id.TenantID, id.KeyID)
+		}
+		return "tenant:" + id.TenantID
+	}
+	if id.KeyID != "" {
+		return "key:" + id.KeyID
+	}
+	if id.IP != "" {
+		return "ip:" + id.IP
+	}
+	return "global:anonymous"
+}
+
+// Allow kiểm tra tần suất yêu cầu (Rate Limit) theo danh tính đa chiều
+func (l *LocalRateLimiter) Allow(ctx context.Context, id ports.RateLimitIdentity) (ports.RateLimitDecision, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
 	now := time.Now()
-	v, exists := lim.visitors[key]
+	key := l.buildBucketKey(id)
+
+	limit := l.defaultRPM
+	v, exists := l.buckets[key]
 	if !exists {
-		lim.visitors[key] = &visitor{
-			tokens:     lim.rate - 1,
+		l.buckets[key] = &visitorBucket{
+			tokens:     limit - 1,
 			lastRefill: now,
 		}
-		return true, 0
+		return ports.RateLimitDecision{
+			Allowed:       true,
+			RetryAfterSec: 0,
+			Remaining:     limit - 1,
+			Limit:         limit,
+			ResetAt:       now.Add(l.window),
+		}, nil
 	}
 
-	// Refill tokens dựa trên thời gian trôi qua
 	elapsed := now.Sub(v.lastRefill)
-	if elapsed >= lim.window {
-		v.tokens = lim.rate
+	if elapsed >= l.window {
+		v.tokens = limit
 		v.lastRefill = now
+		elapsed = 0
 	}
 
 	if v.tokens > 0 {
 		v.tokens--
-		return true, 0
+		return ports.RateLimitDecision{
+			Allowed:       true,
+			RetryAfterSec: 0,
+			Remaining:     v.tokens,
+			Limit:         limit,
+			ResetAt:       v.lastRefill.Add(l.window),
+		}, nil
 	}
 
-	// Tính toán số giây còn lại cần chờ trước khi có token mới
-	retryAfter := int((lim.window - elapsed).Seconds())
+	retryAfter := int((l.window - elapsed).Seconds())
 	if retryAfter <= 0 {
 		retryAfter = 1
 	}
-	return false, retryAfter
+
+	return ports.RateLimitDecision{
+		Allowed:       false,
+		RetryAfterSec: retryAfter,
+		Remaining:     0,
+		Limit:         limit,
+		ResetAt:       v.lastRefill.Add(l.window),
+		Reason:        "rate_limit_exceeded",
+	}, nil
 }
 
-func (lim *IPRateLimiter) acquireConcurrency(key string) bool {
-	lim.mu.Lock()
-	defer lim.mu.Unlock()
+// AcquireConcurrency kiểm tra và chiếm giữ 1 slot đồng thời
+func (l *LocalRateLimiter) AcquireConcurrency(ctx context.Context, id ports.RateLimitIdentity) (func(), bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
-	current := lim.inFlight[key]
-	if lim.maxConcurrent > 0 && current >= lim.maxConcurrent {
-		return false
+	key := l.buildBucketKey(id)
+	current := l.inFlight[key]
+
+	max := l.maxConcurrent
+	if id.IsAgentRun {
+		max = l.maxAgentRuns
 	}
-	lim.inFlight[key] = current + 1
-	return true
-}
 
-func (lim *IPRateLimiter) releaseConcurrency(key string) {
-	lim.mu.Lock()
-	defer lim.mu.Unlock()
-
-	current := lim.inFlight[key]
-	if current <= 1 {
-		delete(lim.inFlight, key)
-	} else {
-		lim.inFlight[key] = current - 1
+	if max > 0 && current >= max {
+		return nil, false, nil
 	}
+
+	l.inFlight[key] = current + 1
+
+	released := false
+	release := func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if released {
+			return
+		}
+		released = true
+		cur := l.inFlight[key]
+		if cur <= 1 {
+			delete(l.inFlight, key)
+		} else {
+			l.inFlight[key] = cur - 1
+		}
+	}
+
+	return release, true, nil
 }
 
-func (lim *IPRateLimiter) cleanupLoop() {
-	ticker := time.NewTicker(lim.cleanupFreq)
+func (l *LocalRateLimiter) cleanupLoop() {
+	ticker := time.NewTicker(l.cleanupFreq)
 	for range ticker.C {
-		lim.mu.Lock()
+		l.mu.Lock()
 		now := time.Now()
-		for key, v := range lim.visitors {
-			if now.Sub(v.lastRefill) > 2*lim.window {
-				delete(lim.visitors, key)
+		for key, v := range l.buckets {
+			if now.Sub(v.lastRefill) > 2*l.window {
+				delete(l.buckets, key)
 			}
 		}
-		lim.mu.Unlock()
+		l.mu.Unlock()
 	}
 }
 
-// Middleware trả về hàm middleware của Chi hỗ trợ đa tầng: IP, Tenant Identity, và Concurrency
-func (lim *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
+// SetMaxConcurrent thiết lập số lượng request đồng thời tối đa
+func (l *LocalRateLimiter) SetMaxConcurrent(max int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if max > 0 {
+		l.maxConcurrent = max
+	}
+}
+
+// SetMaxAgentRuns thiết lập số lượng agent run đồng thời tối đa
+func (l *LocalRateLimiter) SetMaxAgentRuns(max int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if max > 0 {
+		l.maxAgentRuns = max
+	}
+}
+
+// -------------------------------------------------------------------------
+// HTTP Middlewares
+// -------------------------------------------------------------------------
+
+// AuthenticatedRateLimitMiddleware tạo middleware Rate Limit & Concurrency Limit chạy SAU Authentication
+func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if limiter == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Bỏ qua rate limit cho endpoint sức khỏe nội bộ
 			if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			// 1. Xác định định danh: Ưu tiên Tenant ID / API Key nếu có, fallback về Client IP
-			ip := lim.ExtractClientIP(r)
-			rateKey := "ip:" + ip
-			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				token := strings.TrimPrefix(auth, "Bearer ")
-				if len(token) > 10 {
-					rateKey = "key:" + token[:10]
+			// 1. Phân giải định danh an toàn (TenantID / KeyID / Hash) từ Context đã xác thực
+			identity := ports.RateLimitIdentity{
+				Endpoint: r.URL.Path,
+			}
+			if extractIP != nil {
+				identity.IP = extractIP(r)
+			}
+
+			if id, ok := domain.TenantIdentityFromContext(r.Context()); ok {
+				identity.TenantID = id.TenantID
+				identity.KeyID = id.KeyID
+			} else if vKey := domain.VirtualKeyFromContext(r.Context()); vKey != nil {
+				identity.TenantID = vKey.TenantID
+				identity.KeyID = vKey.ID
+			}
+
+			// Nếu chưa có KeyID nhưng có raw Authorization header, băm cryptographic SHA-256 (tuyệt đối không dùng prefix)
+			if identity.KeyID == "" {
+				if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+					identity.KeyID = HashKeyID(strings.TrimPrefix(auth, "Bearer "))
+				} else if xKey := r.Header.Get("x-api-key"); xKey != "" {
+					identity.KeyID = HashKeyID(xKey)
 				}
 			}
 
-			// 2. Kiểm tra giới hạn tần suất (Rate Limit)
-			allowed, retryAfterSec := lim.allow(rateKey)
-			if !allowed {
+			if strings.Contains(r.URL.Path, "/agent/") || strings.Contains(r.URL.Path, "/runs") {
+				identity.IsAgentRun = true
+			}
+
+			// 2. Kiểm tra Rate Limit (RPM)
+			decision, err := limiter.Allow(r.Context(), identity)
+			if err == nil && !decision.Allowed {
 				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfterSec))
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", decision.RetryAfterSec))
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"error": map[string]any{
-						"message": fmt.Sprintf("Rate limit exceeded. Please wait %d seconds before retrying.", retryAfterSec),
+						"message": fmt.Sprintf("Rate limit exceeded. Please wait %d seconds before retrying.", decision.RetryAfterSec),
 						"type":    "rate_limit_error",
 						"code":    "rate_limit_exceeded",
 					},
@@ -249,8 +365,9 @@ func (lim *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
 				return
 			}
 
-			// 3. Kiểm tra giới hạn đồng thời (Concurrency Limit)
-			if !lim.acquireConcurrency(rateKey) {
+			// 3. Kiểm tra Concurrency Limit
+			release, allowed, err := limiter.AcquireConcurrency(r.Context(), identity)
+			if err == nil && !allowed {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "2")
 				w.WriteHeader(http.StatusTooManyRequests)
@@ -263,11 +380,29 @@ func (lim *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
 				})
 				return
 			}
-			defer lim.releaseConcurrency(rateKey)
+			if release != nil {
+				defer release()
+			}
 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// IPRateLimiter giữ tương thích ngược 100% cho cấu trúc và test cũ
+type IPRateLimiter struct {
+	*LocalRateLimiter
+}
+
+// NewIPRateLimiter khởi tạo IPRateLimiter bọc LocalRateLimiter
+func NewIPRateLimiter(rate int, window time.Duration, trustedProxies ...[]string) *IPRateLimiter {
+	local := NewLocalRateLimiter(rate, window, trustedProxies...)
+	return &IPRateLimiter{LocalRateLimiter: local}
+}
+
+// Middleware cung cấp tương thích ngược cho Chi router
+func (lim *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
+	return AuthenticatedRateLimitMiddleware(lim.LocalRateLimiter, lim.LocalRateLimiter.ExtractClientIP)
 }
 
 // MaxBodySizeMiddleware giới hạn kích thước tối đa của request body để chống DoS

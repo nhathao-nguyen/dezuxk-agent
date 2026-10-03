@@ -7,7 +7,7 @@ import (
 	"dezuxk-gateway/internal/app/daemon"
 	"dezuxk-gateway/internal/config"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 func TestCheckpointMigrationFailure_ProductionStartupFails(t *testing.T) {
@@ -55,4 +55,3 @@ func TestCheckpointMigrationFailure_DevModeMayFallback(t *testing.T) {
 func TestCheckpointRepoFailureProductionFailsStartup(t *testing.T) {
 	TestCheckpointMigrationFailure_ProductionStartupFails(t)
 }
-

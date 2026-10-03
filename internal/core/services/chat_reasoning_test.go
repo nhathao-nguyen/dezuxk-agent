@@ -10,7 +10,6 @@ import (
 	"dezuxk-gateway/internal/core/services"
 )
 
-
 func TestOpenAIChatRequest_ReasoningEffortAndThinkingBudget(t *testing.T) {
 	// 1. Test JSON deserialization of reasoning_effort and thinking_budget
 	jsonInput := `{

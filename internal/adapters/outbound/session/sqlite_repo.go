@@ -15,7 +15,7 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "dezuxk-gateway/internal/pkg/sqlite"
 )
 
 // SqliteSessionRepository triển khai ports.SessionRepository bền vững với cơ sở dữ liệu SQLite cục bộ (WAL mode)

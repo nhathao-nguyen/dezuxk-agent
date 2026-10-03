@@ -20,18 +20,18 @@ const (
 )
 
 var (
-	geminiTemplateMu   sync.RWMutex
-	geminiBaseSlots    []any
-	geminiThinkSlots   []any
-	geminiTemplateErr  error
+	geminiTemplateMu    sync.RWMutex
+	geminiBaseSlots     []any
+	geminiThinkSlots    []any
+	geminiTemplateErr   error
 	geminiTemplatesInit bool
 )
 
 // GeminiTemplateConfig định nghĩa cấu trúc lưu trữ chuỗi template cho gemini
 type GeminiTemplateConfig struct {
-	Description     string `json:"description,omitempty"`
-	Version         string `json:"version,omitempty"`
-	NewChatTemplate string `json:"new_chat_template"`
+	Description      string `json:"description,omitempty"`
+	Version          string `json:"version,omitempty"`
+	NewChatTemplate  string `json:"new_chat_template"`
 	ThinkingTemplate string `json:"thinking_template"`
 }
 
