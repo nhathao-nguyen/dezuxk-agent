@@ -85,6 +85,20 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 	r.Use(RequestTraceMiddleware(enableLog))
 	r.Use(MaxBodySizeMiddleware(50 * 1024 * 1024)) // 50MB trần tối đa cho toàn bộ requests
 
+	// Node identification header for observability & cluster test verification (Instruction 43)
+	nodeID := ""
+	if deps.Config != nil {
+		nodeID = deps.Config.Cluster.GetNodeID()
+	}
+	if nodeID != "" {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Dezuxk-Node-ID", nodeID)
+				next.ServeHTTP(w, r)
+			})
+		})
+	}
+
 	var trustedProxies []string
 	if deps.Config != nil && len(deps.Config.Server.TrustedProxies) > 0 {
 		trustedProxies = deps.Config.Server.TrustedProxies
@@ -229,6 +243,8 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		checks := make(map[string]string)
 		isReady := true
 
+		isProd := deps.Config != nil && deps.Config.IsProduction()
+
 		if deps.ReadinessManager != nil && !deps.ReadinessManager.IsReady() {
 			checks["gateway"] = "server is starting up or shutting down"
 			isReady = false
@@ -250,7 +266,11 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
 			defer pingCancel()
 			if err := pinger.Ping(pingCtx); err != nil {
-				checks["storage"] = fmt.Sprintf("database ping error: %v", err)
+				if isProd {
+					checks["storage"] = "unavailable"
+				} else {
+					checks["storage"] = fmt.Sprintf("database ping error: %v", err)
+				}
 				isReady = false
 			} else {
 				checks["storage"] = "ok"
@@ -283,7 +303,11 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		if deps.ClusterClient != nil {
 			pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
 			if err := deps.ClusterClient.Ping(pingCtx); err != nil {
-				checks["redis"] = fmt.Sprintf("redis ping error: %v", err)
+				if isProd {
+					checks["redis"] = "unavailable"
+				} else {
+					checks["redis"] = fmt.Sprintf("redis ping error: %v", err)
+				}
 				isReady = false
 			} else {
 				checks["redis"] = "ok"
@@ -296,7 +320,11 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			if pinger, ok := deps.MediaStorage.(interface{ Ping(context.Context) error }); ok {
 				pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
 				if err := pinger.Ping(pingCtx); err != nil {
-					checks["media_storage"] = fmt.Sprintf("media ping error: %v", err)
+					if isProd {
+						checks["media_storage"] = "unavailable"
+					} else {
+						checks["media_storage"] = fmt.Sprintf("media ping error: %v", err)
+					}
 					isReady = false
 				} else {
 					checks["media_storage"] = "ok"

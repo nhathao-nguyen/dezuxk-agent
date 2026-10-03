@@ -8,8 +8,38 @@ on:
   workflow_dispatch:
 
 jobs:
-  multinode-verify:
-    name: Multi-Node Concurrency & Failover Tests
+  # Job 1: Deterministic Multi-Node Suite & Concurrency Race Detection
+  deterministic-and-race:
+    name: Deterministic & Race Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Verify Module Dependencies
+        run: go mod verify
+
+      - name: Deterministic Multi-Node Suite
+        run: go test -v -count=1 ./tests/multinode/...
+
+      - name: Tool Fencing Verification
+        run: go test -v -count=1 ./internal/core/services/agent -run TestToolFencing
+
+      - name: Race Verification
+        run: go test -race -v -count=1 ./tests/multinode/...
+
+      - name: Tool Fencing Race Verification
+        run: go test -race -v -count=1 ./internal/core/services/agent -run TestToolFencing
+
+  # Job 2: Real PostgreSQL, Redis & MinIO Infrastructure Integration
+  infra-integration:
+    name: Real PostgreSQL, Redis & MinIO Integration
     runs-on: ubuntu-latest
 
     services:
@@ -37,6 +67,21 @@ jobs:
           --health-timeout 3s
           --health-retries 5
 
+      minio:
+        image: minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadminpassword
+        ports:
+          - 9000:9000
+          - 9001:9001
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+        command: server /data --console-address ":9001"
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -47,17 +92,135 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Verify Module Dependencies
-        run: go mod verify
+      - name: Initialize MinIO Test Buckets
+        run: |
+          curl -sS https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set local http://localhost:9000 minioadmin minioadminpassword
+          mc mb --ignore-existing local/dezuxk-test
+          mc mb --ignore-existing local/dezuxk-media
 
-      - name: Run Multi-Node Deterministic Acceptance Suite
-        run: go test -v -count=1 ./tests/multinode/...
+      - name: Real PostgreSQL Integration & Migration Concurrency
+        env:
+          TEST_POSTGRES_DSN: "postgres://dezuxk:dezuxk_dev_cluster_pwd@localhost:5432/dezuxk?sslmode=disable"
+        run: go test -v -count=1 ./internal/adapters/outbound/storage/postgres/...
 
-      - name: Run Multi-Node Concurrency Race Verification
-        run: go test -race -v -count=1 ./tests/multinode/...
+      - name: Real MinIO & S3 Integration
+        env:
+          TEST_POSTGRES_DSN: "postgres://dezuxk:dezuxk_dev_cluster_pwd@localhost:5432/dezuxk?sslmode=disable"
+          TEST_S3_ENDPOINT: "http://localhost:9000"
+          TEST_S3_BUCKET: "dezuxk-test"
+          TEST_S3_ACCESS_KEY: "minioadmin"
+          TEST_S3_SECRET_KEY: "minioadminpassword"
+        run: go test -v -count=1 ./internal/adapters/outbound/storage/s3/...
 
-      - name: Run Multi-Node Suite Against Real PostgreSQL & Redis
+      - name: Real Infrastructure Multi-Node Tests
         env:
           TEST_POSTGRES_DSN: "postgres://dezuxk:dezuxk_dev_cluster_pwd@localhost:5432/dezuxk?sslmode=disable"
           TEST_REDIS_ADDR: "localhost:6379"
+          TEST_S3_ENDPOINT: "http://localhost:9000"
+          TEST_S3_BUCKET: "dezuxk-test"
+          TEST_S3_ACCESS_KEY: "minioadmin"
+          TEST_S3_SECRET_KEY: "minioadminpassword"
         run: go test -v -count=1 ./tests/multinode/...
+
+  # Job 3: Real 3-Gateway Cluster End-to-End & Chaos Verification
+  real-cluster-e2e:
+    name: Real 3-Gateway Cluster E2E
+    runs-on: ubuntu-latest
+    needs: [deterministic-and-race, infra-integration]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: 3-Gateway Cluster Boot
+        run: docker compose -f docker-compose.multinode.yml up -d --build
+
+      - name: Wait for Real Cluster Health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8081/ready > /dev/null 2>&1 && \
+               curl -fsS http://localhost:8082/ready > /dev/null 2>&1 && \
+               curl -fsS http://localhost:8083/ready > /dev/null 2>&1 && \
+               curl -fsS http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Cụm Gateway A/B/C và Nginx Load Balancer đã READY thành công!"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "LỖI: Cụm không đạt trạng thái ready trong thời gian quy định!"
+          docker compose -f docker-compose.multinode.yml ps
+          docker compose -f docker-compose.multinode.yml logs
+          exit 1
+
+      - name: Real HTTP Cross-Node Tests & Load Balancer
+        env:
+          TEST_CLUSTER_HTTP_E2E: "true"
+        run: go test -v -count=1 -run "TestClusterProcess_" ./tests/multinode/...
+
+      - name: Real Node Crash Test
+        run: |
+          echo "Simulating crash of Gateway Node A..."
+          docker kill dezuxk-gateway-a
+          sleep 2
+          curl -fsS http://localhost:8080/health > /dev/null
+          echo "Starting Gateway Node A back up..."
+          docker compose -f docker-compose.multinode.yml start gateway-a
+          sleep 5
+          curl -fsS http://localhost:8081/ready > /dev/null
+          echo "Gateway Node A recovered and rejoined cluster successfully."
+
+      - name: Real Redis Failure Test
+        run: |
+          echo "Stopping Redis..."
+          docker stop dezuxk-redis
+          sleep 2
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/ready || true)
+          echo "Readiness response during Redis outage: $status (503 expected)"
+          docker start dezuxk-redis
+          sleep 4
+          curl -fsS http://localhost:8081/ready > /dev/null
+          echo "Readiness restored after Redis recovery."
+
+      - name: Real PostgreSQL Failure Test
+        run: |
+          echo "Stopping PostgreSQL..."
+          docker stop dezuxk-postgres
+          sleep 2
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/ready || true)
+          echo "Readiness response during Postgres outage: $status (503 expected)"
+          docker start dezuxk-postgres
+          sleep 4
+          curl -fsS http://localhost:8081/ready > /dev/null
+          echo "Readiness restored after PostgreSQL recovery."
+
+      - name: Collect Cluster Logs on Failure
+        if: failure()
+        run: |
+          mkdir -p cluster-logs
+          docker compose -f docker-compose.multinode.yml ps > cluster-logs/docker-compose-ps.txt || true
+          docker compose -f docker-compose.multinode.yml logs gateway-a > cluster-logs/gateway-a.log || true
+          docker compose -f docker-compose.multinode.yml logs gateway-b > cluster-logs/gateway-b.log || true
+          docker compose -f docker-compose.multinode.yml logs gateway-c > cluster-logs/gateway-c.log || true
+          docker compose -f docker-compose.multinode.yml logs loadbalancer > cluster-logs/loadbalancer.log || true
+          docker compose -f docker-compose.multinode.yml logs postgres > cluster-logs/postgres.log || true
+          docker compose -f docker-compose.multinode.yml logs redis > cluster-logs/redis.log || true
+          docker compose -f docker-compose.multinode.yml logs minio > cluster-logs/minio.log || true
+
+      - name: Upload Cluster Logs Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-failure-logs
+          path: cluster-logs/
+
+      - name: Teardown Cluster
+        if: always()
+        run: docker compose -f docker-compose.multinode.yml down -v --remove-orphans || true

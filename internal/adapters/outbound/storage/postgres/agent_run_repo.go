@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,7 +20,6 @@ import (
 
 // PostgresAgentRunRepository triển khai ports.AgentRunRepository và ports.ToolExecutionLedger trên PostgreSQL
 type PostgresAgentRunRepository struct {
-	mu   sync.Mutex
 	pool *pgxpool.Pool
 }
 
@@ -103,9 +101,6 @@ func (r *PostgresAgentRunRepository) Create(ctx context.Context, run *domain.Age
 		return errors.New("run không hợp lệ hoặc thiếu ID")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var secCtxJSON any = nil
 	if run.SecurityContext != nil {
 		b, err := json.Marshal(run.SecurityContext)
@@ -182,9 +177,6 @@ func (r *PostgresAgentRunRepository) Update(ctx context.Context, run *domain.Age
 		return errors.New("run không hợp lệ hoặc thiếu ID")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	run.UpdatedAt = time.Now()
 
 	query := `
@@ -216,9 +208,6 @@ func (r *PostgresAgentRunRepository) UpdateWithTransition(ctx context.Context, r
 	if run == nil || run.ID == "" {
 		return false, errors.New("run không hợp lệ hoặc thiếu ID")
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	run.UpdatedAt = time.Now()
 
@@ -315,9 +304,6 @@ func (r *PostgresAgentRunRepository) AppendEvent(ctx context.Context, event *dom
 		return errors.New("event không hợp lệ hoặc thiếu RunID")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if event.TenantID == "" {
 		var tid string
 		_ = r.pool.QueryRow(ctx, "SELECT tenant_id FROM agent_runs WHERE id = $1", event.RunID).Scan(&tid)
@@ -391,9 +377,6 @@ func (r *PostgresAgentRunRepository) GetEventsForTenant(ctx context.Context, ten
 }
 
 func (r *PostgresAgentRunRepository) Cancel(ctx context.Context, runID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var currentStatus string
 	err := r.pool.QueryRow(ctx, "SELECT status FROM agent_runs WHERE id = $1", runID).Scan(&currentStatus)
 	if err != nil {
@@ -418,9 +401,6 @@ func (r *PostgresAgentRunRepository) Cancel(ctx context.Context, runID string) e
 }
 
 func (r *PostgresAgentRunRepository) CancelForTenant(ctx context.Context, tenantID, runID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var currentTenant, currentStatus string
 	err := r.pool.QueryRow(ctx, "SELECT tenant_id, status FROM agent_runs WHERE id = $1", runID).Scan(&currentTenant, &currentStatus)
 	if err != nil {
@@ -451,9 +431,6 @@ func (r *PostgresAgentRunRepository) CancelForTenant(ctx context.Context, tenant
 // ClaimRun sử dụng PostgreSQL atomic statement kết hợp database time NOW()
 // ngăn ngừa clock skew giữa các node Gateway và đảm bảo single worker ownership duy nhất.
 func (r *PostgresAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	leaseSeconds := int64(leaseDuration.Seconds())
 	if leaseSeconds <= 0 {
 		leaseSeconds = 60
@@ -485,9 +462,6 @@ func (r *PostgresAgentRunRepository) ClaimRun(ctx context.Context, runID, worker
 }
 
 func (r *PostgresAgentRunRepository) RenewLease(ctx context.Context, runID, workerID string, claimGeneration int64, leaseDuration time.Duration) (bool, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	leaseSeconds := int64(leaseDuration.Seconds())
 	if leaseSeconds <= 0 {
 		leaseSeconds = 60
@@ -513,9 +487,6 @@ func (r *PostgresAgentRunRepository) UpdateOwned(ctx context.Context, run *domai
 	if run == nil || run.ID == "" {
 		return false, errors.New("run không hợp lệ hoặc thiếu ID")
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	run.UpdatedAt = time.Now()
 
@@ -563,9 +534,6 @@ func (r *PostgresAgentRunRepository) AppendOwnedEvent(ctx context.Context, event
 		return false, errors.New("event không hợp lệ hoặc thiếu RunID")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if event.TenantID == "" {
 		var tid string
 		_ = r.pool.QueryRow(ctx, "SELECT tenant_id FROM agent_runs WHERE id = $1", event.RunID).Scan(&tid)
@@ -608,13 +576,34 @@ func (r *PostgresAgentRunRepository) AppendOwnedEvent(ctx context.Context, event
 	return true, nil
 }
 
+// ValidateOwnership kiểm tra tức thời xem worker_id và claim_generation còn nắm giữ lease hợp lệ hay không
+func (r *PostgresAgentRunRepository) ValidateOwnership(ctx context.Context, runID, workerID string, claimGeneration int64) (bool, error) {
+	if runID == "" || workerID == "" || claimGeneration <= 0 {
+		return false, nil
+	}
+	query := `
+	SELECT 1 FROM agent_runs
+	WHERE id = $1 AND worker_id = $2 AND claim_generation = $3
+	  AND status IN ('running', 'recovering', 'waiting_for_tool')
+	  AND (lease_until IS NULL OR lease_until > NOW())
+	LIMIT 1;
+	`
+	var dummy int
+	err := r.pool.QueryRow(ctx, query, runID, workerID, claimGeneration).Scan(&dummy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // ToolExecutionLedger implementation
 func (r *PostgresAgentRunRepository) RecordPlannedOrRunning(ctx context.Context, exec *domain.ToolExecutionRecord) error {
 	if exec == nil || exec.RunID == "" || exec.ToolCallID == "" {
 		return errors.New("record không hợp lệ hoặc thiếu RunID/ToolCallID")
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if exec.TenantID == "" {
 		exec.TenantID = "default"
@@ -622,18 +611,6 @@ func (r *PostgresAgentRunRepository) RecordPlannedOrRunning(ctx context.Context,
 	now := time.Now()
 	if exec.StartedAt == nil {
 		exec.StartedAt = &now
-	}
-
-	// Fencing check: nếu có worker_id và claim_generation, kiểm tra xem worker có còn sở hữu run hay không
-	if exec.WorkerID != "" && exec.ClaimGeneration > 0 {
-		var curWorker string
-		var curGen int64
-		err := r.pool.QueryRow(ctx, "SELECT worker_id, claim_generation FROM agent_runs WHERE id = $1", exec.RunID).Scan(&curWorker, &curGen)
-		if err == nil {
-			if curWorker != exec.WorkerID || curGen != exec.ClaimGeneration {
-				return fmt.Errorf("%w: worker %s (gen %d) đã mất quyền sở hữu run %s (hiện tại: %s gen %d)", session.ErrLeaseLost, exec.WorkerID, exec.ClaimGeneration, exec.RunID, curWorker, curGen)
-			}
-		}
 	}
 
 	query := `
@@ -658,10 +635,62 @@ func (r *PostgresAgentRunRepository) RecordPlannedOrRunning(ctx context.Context,
 	return err
 }
 
-func (r *PostgresAgentRunRepository) RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// RecordPlannedOrRunningOwned áp dụng Fencing Token: từ chối ghi nhận nếu worker mất quyền sở hữu hoặc lease hết hạn
+func (r *PostgresAgentRunRepository) RecordPlannedOrRunningOwned(ctx context.Context, exec *domain.ToolExecutionRecord, workerID string, claimGeneration int64) (bool, error) {
+	if exec == nil || exec.RunID == "" || exec.ToolCallID == "" {
+		return false, errors.New("record không hợp lệ hoặc thiếu RunID/ToolCallID")
+	}
 
+	if exec.TenantID == "" {
+		exec.TenantID = "default"
+	}
+	now := time.Now()
+	if exec.StartedAt == nil {
+		exec.StartedAt = &now
+	}
+	exec.WorkerID = workerID
+	exec.ClaimGeneration = claimGeneration
+
+	// Đảm bảo nguyên tử: chỉ INSERT/UPDATE nếu agent_runs vẫn thuộc về worker và lease còn hiệu lực
+	query := `
+	INSERT INTO agent_tool_executions (
+		tenant_id, run_id, tool_call_id, tool_name, args_hash, status, result_json, error,
+		worker_id, claim_generation, started_at, finished_at
+	)
+	SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+	WHERE EXISTS (
+		SELECT 1 FROM agent_runs
+		WHERE id = $2 AND worker_id = $9 AND claim_generation = $10
+		  AND status IN ('running', 'recovering', 'waiting_for_tool')
+		  AND (lease_until IS NULL OR lease_until > NOW())
+	)
+	ON CONFLICT (tenant_id, run_id, tool_call_id) DO UPDATE SET
+		status = EXCLUDED.status,
+		worker_id = EXCLUDED.worker_id,
+		claim_generation = EXCLUDED.claim_generation,
+		started_at = EXCLUDED.started_at
+	WHERE EXISTS (
+		SELECT 1 FROM agent_runs
+		WHERE id = EXCLUDED.run_id AND worker_id = EXCLUDED.worker_id AND claim_generation = EXCLUDED.claim_generation
+		  AND status IN ('running', 'recovering', 'waiting_for_tool')
+		  AND (lease_until IS NULL OR lease_until > NOW())
+	);
+	`
+	res, err := r.pool.Exec(ctx, query,
+		exec.TenantID, exec.RunID, exec.ToolCallID, exec.ToolName, exec.ArgsHash,
+		string(exec.Status), exec.ResultJSON, exec.Error, workerID, claimGeneration,
+		exec.StartedAt, exec.FinishedAt,
+	)
+	if err != nil {
+		return false, err
+	}
+	if res.RowsAffected() == 0 {
+		return false, nil // Ownership lost or lease expired!
+	}
+	return true, nil
+}
+
+func (r *PostgresAgentRunRepository) RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error {
 	if tenantID == "" {
 		tenantID = "default"
 	}
@@ -682,10 +711,7 @@ func (r *PostgresAgentRunRepository) RecordFinished(ctx context.Context, tenantI
 }
 
 // RecordFinishedOwned cập nhật kết quả công cụ với điều kiện fencing token hợp lệ
-func (r *PostgresAgentRunRepository) RecordFinishedOwned(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string, workerID string, claimGeneration int64) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
+func (r *PostgresAgentRunRepository) RecordFinishedOwned(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string, workerID string, claimGeneration int64) (bool, error) {
 	if tenantID == "" {
 		tenantID = "default"
 	}
@@ -695,16 +721,21 @@ func (r *PostgresAgentRunRepository) RecordFinishedOwned(ctx context.Context, te
 		status = $1, result_json = $2, error = $3, finished_at = NOW()
 	WHERE tenant_id = $4 AND run_id = $5 AND tool_call_id = $6
 	  AND (worker_id = $7 OR worker_id = '')
-	  AND (claim_generation = $8 OR claim_generation = 0);
+	  AND (claim_generation = $8 OR claim_generation = 0)
+	  AND EXISTS (
+		SELECT 1 FROM agent_runs
+		WHERE id = $5 AND worker_id = $7 AND claim_generation = $8
+		  AND status != 'cancelled'
+	  );
 	`
 	res, err := r.pool.Exec(ctx, query, string(status), resultJSON, errStr, tenantID, runID, toolCallID, workerID, claimGeneration)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if res.RowsAffected() == 0 {
-		return fmt.Errorf("%w: tool execution %s không thể cập nhật do mất quyền sở hữu (worker %s, gen %d)", session.ErrLeaseLost, toolCallID, workerID, claimGeneration)
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 func (r *PostgresAgentRunRepository) GetExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error) {
@@ -742,9 +773,6 @@ func (r *PostgresAgentRunRepository) GetExecution(ctx context.Context, tenantID,
 }
 
 func (r *PostgresAgentRunRepository) MarkUnknownAfterRestart(ctx context.Context, tenantID, runID, toolCallID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if tenantID == "" {
 		tenantID = "default"
 	}

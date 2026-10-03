@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,7 +14,6 @@ import (
 
 // PostgresMediaMetadataRepository quản lý siêu dữ liệu Media Assets bền vững trên PostgreSQL
 type PostgresMediaMetadataRepository struct {
-	mu   sync.Mutex
 	pool *pgxpool.Pool
 }
 
@@ -30,9 +28,6 @@ func (r *PostgresMediaMetadataRepository) SaveAssetMetadata(ctx context.Context,
 	if asset == nil || asset.ID == "" {
 		return errors.New("asset không hợp lệ hoặc thiếu ID")
 	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	tenantID := asset.TenantID
 	if tenantID == "" {
@@ -98,9 +93,6 @@ func (r *PostgresMediaMetadataRepository) GetAssetMetadata(ctx context.Context, 
 }
 
 func (r *PostgresMediaMetadataRepository) DeleteAssetMetadata(ctx context.Context, assetID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	_, err := r.pool.Exec(ctx, "DELETE FROM media_assets WHERE asset_id = $1", assetID)
 	return err
 }
@@ -145,9 +137,6 @@ func (r *PostgresMediaMetadataRepository) DeleteExpiredMetadata(ctx context.Cont
 		return nil, nil
 	}
 	cutoff := time.Now().AddDate(0, 0, -maxAgeDays)
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	query := `
 	DELETE FROM media_assets

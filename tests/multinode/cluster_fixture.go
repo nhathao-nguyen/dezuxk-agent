@@ -13,11 +13,13 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	redisadapter "dezuxk-gateway/internal/adapters/outbound/distributed/redis"
 	"dezuxk-gateway/internal/adapters/outbound/session"
 	pgstorage "dezuxk-gateway/internal/adapters/outbound/storage/postgres"
+	s3storage "dezuxk-gateway/internal/adapters/outbound/storage/s3"
 	"dezuxk-gateway/internal/config"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
@@ -29,6 +31,7 @@ import (
 type TestCluster struct {
 	RedisClient    *redis.Client
 	MiniRedis      *miniredis.Miniredis
+	PgPool         *pgxpool.Pool
 	EventBus       ports.EventBus
 	Locker         ports.DistributedLocker
 	RateLimiter    ports.SharedRateLimiter
@@ -42,6 +45,15 @@ type TestCluster struct {
 	CoordB         *leader.Coordinator
 	CoordC         *leader.Coordinator
 	IsRealPostgres bool
+	IsRealS3       bool
+}
+
+// RequireRealPostgres xác nhận cluster đang chạy trên PostgreSQL thật, fail ngay nếu chạy in-memory fake
+func RequireRealPostgres(t *testing.T, cluster *TestCluster) {
+	t.Helper()
+	if !cluster.IsRealPostgres {
+		t.Fatalf("integration test required real PostgreSQL, but running with fake/in-memory repo")
+	}
 }
 
 // Close dọn dẹp toàn bộ cụm sau khi test hoàn tất
@@ -69,6 +81,9 @@ func (c *TestCluster) Close() {
 	}
 	if c.MiniRedis != nil {
 		c.MiniRedis.Close()
+	}
+	if c.PgPool != nil {
+		c.PgPool.Close()
 	}
 }
 
@@ -98,40 +113,88 @@ func SetupTestCluster(t *testing.T) *TestCluster {
 	locker := redisadapter.NewRedisDistributedLocker(rdb)
 	rateLimiter := redisadapter.NewRedisSharedRateLimiter(rdb, 120, time.Minute)
 
-	// 2. Khởi tạo Storage (Real Postgres nếu có TEST_POSTGRES_DSN, không thì FencedClusterRepo)
+	// 2. Khởi tạo Storage (Real Postgres nếu có TEST_POSTGRES_DSN, không được fallback sang fake)
 	var runsRepo ports.AgentRunRepository
 	var checkRepo ports.CheckpointRepository
+	var mediaRepo *pgstorage.PostgresMediaMetadataRepository
+	var pgPool *pgxpool.Pool
 	isRealPG := false
 
 	pgDSN := os.Getenv("TEST_POSTGRES_DSN")
 	if pgDSN != "" {
 		pgCfg := config.PostgresConfig{
-			Host:     "localhost",
-			Port:     5432,
+			DSN:      pgDSN,
 			MaxConns: 10,
 		}
 		pool, err := pgstorage.NewPool(context.Background(), pgCfg)
-		if err == nil {
-			_ = pgstorage.RunMigrations(context.Background(), pool)
-			arRepo, err1 := pgstorage.NewPostgresAgentRunRepository(pool)
-			cpRepo, err2 := pgstorage.NewPostgresCheckpointRepository(pool)
-			if err1 == nil && err2 == nil {
-				runsRepo = arRepo
-				checkRepo = cpRepo
-				isRealPG = true
-			}
+		if err != nil {
+			t.Fatalf("TEST_POSTGRES_DSN được cấu hình nhưng kết nối pgstorage.NewPool thất bại: %v", err)
 		}
-	}
-
-	if runsRepo == nil {
+		if err := pgstorage.RunMigrations(context.Background(), pool); err != nil {
+			t.Fatalf("Chạy PostgreSQL migrations thất bại: %v", err)
+		}
+		arRepo, err1 := pgstorage.NewPostgresAgentRunRepository(pool)
+		if err1 != nil {
+			t.Fatalf("Khởi tạo PostgresAgentRunRepository thất bại: %v", err1)
+		}
+		cpRepo, err2 := pgstorage.NewPostgresCheckpointRepository(pool)
+		if err2 != nil {
+			t.Fatalf("Khởi tạo PostgresCheckpointRepository thất bại: %v", err2)
+		}
+		mRepo, err3 := pgstorage.NewPostgresMediaMetadataRepository(pool)
+		if err3 != nil {
+			t.Fatalf("Khởi tạo PostgresMediaMetadataRepository thất bại: %v", err3)
+		}
+		runsRepo = arRepo
+		checkRepo = cpRepo
+		mediaRepo = mRepo
+		pgPool = pool
+		isRealPG = true
+	} else {
 		clusterDB := NewClusterFencedDB()
 		runsRepo = clusterDB
 		checkRepo = clusterDB
 	}
 
-	sharedMedia := NewClusterSharedMediaStorage()
+	// 3. Khởi tạo Media Storage (Real S3/MinIO nếu có TEST_S3_ENDPOINT, không được fallback)
+	var sharedMedia ports.MediaStorage
+	isRealS3 := false
+	s3Endpoint := os.Getenv("TEST_S3_ENDPOINT")
+	if s3Endpoint != "" {
+		if !isRealPG {
+			t.Fatalf("TEST_S3_ENDPOINT được cấu hình nhưng TEST_POSTGRES_DSN chưa sẵn sàng để lưu metadata")
+		}
+		s3Bucket := os.Getenv("TEST_S3_BUCKET")
+		if s3Bucket == "" {
+			s3Bucket = "dezuxk-test"
+		}
+		s3AccessKey := os.Getenv("TEST_S3_ACCESS_KEY")
+		if s3AccessKey == "" {
+			s3AccessKey = "minioadmin"
+		}
+		s3SecretKey := os.Getenv("TEST_S3_SECRET_KEY")
+		if s3SecretKey == "" {
+			s3SecretKey = "minioadmin"
+		}
+		s3Cfg := config.S3MediaConfig{
+			Bucket:       s3Bucket,
+			Endpoint:     s3Endpoint,
+			Region:       "us-east-1",
+			AccessKey:    s3AccessKey,
+			SecretKey:    s3SecretKey,
+			UsePathStyle: true,
+		}
+		s3Adapter, err := s3storage.NewS3StorageAdapter(s3Cfg, "http://localhost:8080", mediaRepo)
+		if err != nil {
+			t.Fatalf("Khởi tạo S3StorageAdapter với TEST_S3_ENDPOINT %s thất bại: %v", s3Endpoint, err)
+		}
+		sharedMedia = s3Adapter
+		isRealS3 = true
+	} else {
+		sharedMedia = NewClusterSharedMediaStorage()
+	}
 
-	// 3. Khởi tạo 3 Gateway Nodes dùng chung Repository và Redis EventBus
+	// 4. Khởi tạo 3 Gateway Nodes dùng chung Repository và Redis EventBus
 	dummyRunner := &dummyAgentRunner{}
 
 	nodeA := agent.NewJobService(runsRepo, dummyRunner)
@@ -159,6 +222,7 @@ func SetupTestCluster(t *testing.T) *TestCluster {
 	cluster := &TestCluster{
 		RedisClient:    rdb,
 		MiniRedis:      mr,
+		PgPool:         pgPool,
 		EventBus:       eventBus,
 		Locker:         locker,
 		RateLimiter:    rateLimiter,
@@ -172,6 +236,7 @@ func SetupTestCluster(t *testing.T) *TestCluster {
 		CoordB:         coordB,
 		CoordC:         coordC,
 		IsRealPostgres: isRealPG,
+		IsRealS3:       isRealS3,
 	}
 
 	t.Cleanup(func() {
@@ -529,6 +594,175 @@ func (db *ClusterFencedDB) FindByTenantAndIdempotencyKey(ctx context.Context, te
 	}
 	cp := *r
 	return &cp, nil
+}
+
+func (db *ClusterFencedDB) ValidateOwnership(ctx context.Context, runID, workerID string, claimGeneration int64) (bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	cur, exists := db.runs[runID]
+	if !exists {
+		return false, nil
+	}
+	if cur.WorkerID != workerID || cur.ClaimGeneration != claimGeneration {
+		return false, nil
+	}
+	if cur.Status != domain.RunStatusRunning && cur.Status != domain.RunStatusRecovering && cur.Status != domain.RunStatusWaitingForTool {
+		return false, nil
+	}
+	now := time.Now()
+	if cur.LeaseUntil != nil && cur.LeaseUntil.Before(now) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func (db *ClusterFencedDB) RecordPlannedOrRunning(ctx context.Context, exec *domain.ToolExecutionRecord) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if exec == nil {
+		return errors.New("exec is nil")
+	}
+	key := fmt.Sprintf("%s:%s:%s", exec.TenantID, exec.RunID, exec.ToolCallID)
+	now := time.Now()
+	if exec.StartedAt == nil {
+		exec.StartedAt = &now
+	}
+	cp := *exec
+	db.toolLedger[key] = &cp
+	return nil
+}
+
+func (db *ClusterFencedDB) RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	key := fmt.Sprintf("%s:%s:%s", tenantID, runID, toolCallID)
+	now := time.Now()
+	rec, exists := db.toolLedger[key]
+	if !exists {
+		db.toolLedger[key] = &domain.ToolExecutionRecord{
+			TenantID:   tenantID,
+			RunID:      runID,
+			ToolCallID: toolCallID,
+			Status:     status,
+			ResultJSON: resultJSON,
+			Error:      errStr,
+			FinishedAt: &now,
+		}
+		return nil
+	}
+	rec.Status = status
+	rec.ResultJSON = resultJSON
+	rec.Error = errStr
+	rec.FinishedAt = &now
+	return nil
+}
+
+func (db *ClusterFencedDB) GetToolExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	key := fmt.Sprintf("%s:%s:%s", tenantID, runID, toolCallID)
+	rec, exists := db.toolLedger[key]
+	if !exists {
+		return nil, nil
+	}
+	cp := *rec
+	return &cp, nil
+}
+
+func (db *ClusterFencedDB) ListToolExecutions(ctx context.Context, tenantID, runID string) ([]*domain.ToolExecutionRecord, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	prefix := fmt.Sprintf("%s:%s:", tenantID, runID)
+	var list []*domain.ToolExecutionRecord
+	for k, rec := range db.toolLedger {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			cp := *rec
+			list = append(list, &cp)
+		}
+	}
+	return list, nil
+}
+
+func (db *ClusterFencedDB) RecordPlannedOrRunningOwned(ctx context.Context, exec *domain.ToolExecutionRecord, workerID string, claimGeneration int64) (bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if exec == nil {
+		return false, errors.New("exec is nil")
+	}
+	cur, exists := db.runs[exec.RunID]
+	if !exists {
+		return false, nil
+	}
+	if cur.WorkerID != workerID || cur.ClaimGeneration != claimGeneration {
+		return false, nil
+	}
+	if cur.Status != domain.RunStatusRunning && cur.Status != domain.RunStatusRecovering && cur.Status != domain.RunStatusWaitingForTool {
+		return false, nil
+	}
+	now := time.Now()
+	if cur.LeaseUntil != nil && cur.LeaseUntil.Before(now) {
+		return false, nil
+	}
+
+	key := fmt.Sprintf("%s:%s:%s", exec.TenantID, exec.RunID, exec.ToolCallID)
+	if existing, found := db.toolLedger[key]; found {
+		if existing.Status == domain.ToolExecutionSucceeded {
+			return false, nil
+		}
+	}
+	if exec.StartedAt == nil {
+		exec.StartedAt = &now
+	}
+	cp := *exec
+	cp.WorkerID = workerID
+	cp.ClaimGeneration = claimGeneration
+	db.toolLedger[key] = &cp
+	return true, nil
+}
+
+func (db *ClusterFencedDB) RecordFinishedOwned(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string, workerID string, claimGeneration int64) (bool, error) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	cur, exists := db.runs[runID]
+	if !exists {
+		return false, nil
+	}
+	if cur.WorkerID != workerID || cur.ClaimGeneration != claimGeneration {
+		return false, nil
+	}
+	if cur.Status == domain.RunStatusCancelled {
+		return false, nil
+	}
+
+	key := fmt.Sprintf("%s:%s:%s", tenantID, runID, toolCallID)
+	now := time.Now()
+	rec, exists := db.toolLedger[key]
+	if !exists {
+		db.toolLedger[key] = &domain.ToolExecutionRecord{
+			TenantID:        tenantID,
+			RunID:           runID,
+			ToolCallID:      toolCallID,
+			Status:          status,
+			ResultJSON:      resultJSON,
+			Error:           errStr,
+			WorkerID:        workerID,
+			ClaimGeneration: claimGeneration,
+			FinishedAt:      &now,
+		}
+		return true, nil
+	}
+	rec.Status = status
+	rec.ResultJSON = resultJSON
+	rec.Error = errStr
+	rec.FinishedAt = &now
+	return true, nil
 }
 
 // CheckpointRepository implementation

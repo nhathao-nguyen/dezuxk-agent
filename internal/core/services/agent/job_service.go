@@ -64,6 +64,7 @@ func NewJobService(repo ports.AgentRunRepository, runner ports.AgentRunner) *Job
 		recoveryInterval: 15 * time.Second,
 	}
 	if r, ok := runner.(*Runner); ok {
+		r.SetAgentRunRepository(repo)
 		if l, ok := repo.(ports.ToolExecutionLedger); ok {
 			r.SetToolExecutionLedger(l)
 		}
@@ -730,9 +731,16 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 		run.WorkerID = claimedRun.WorkerID
 	}
 
-	// Thiết lập context thực thi và goroutine heartbeat gia hạn lease
+	// Thiết lập context thực thi gắn với quyền sở hữu (ExecutionOwnership) và goroutine heartbeat gia hạn lease
 	execCtx, cancelExec := context.WithCancel(ctx)
 	defer cancelExec()
+
+	ownership := domain.ExecutionOwnership{
+		RunID:           run.ID,
+		WorkerID:        s.workerID,
+		ClaimGeneration: workerClaimGen,
+	}
+	execCtx = domain.ContextWithExecutionOwnership(execCtx, ownership)
 
 	// Lắng nghe tín hiệu cross-node cancel qua EventBus nếu có
 	s.mu.RLock()

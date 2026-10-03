@@ -36,6 +36,7 @@ type Runner struct {
 	memorySvc      ports.MemoryService
 	checkpointRepo ports.CheckpointRepository
 	toolLedger     ports.ToolExecutionLedger
+	runRepo        ports.AgentRunRepository
 }
 
 // NewRunner khởi tạo một Agent Runner
@@ -60,6 +61,11 @@ func (r *Runner) SetCheckpointRepository(cp ports.CheckpointRepository) {
 // SetToolExecutionLedger thiết lập ledger lưu vết công cụ bền vững
 func (r *Runner) SetToolExecutionLedger(ledger ports.ToolExecutionLedger) {
 	r.toolLedger = ledger
+}
+
+// SetAgentRunRepository thiết lập AgentRunRepository phục vụ lease renewal và kiểm tra quyền sở hữu
+func (r *Runner) SetAgentRunRepository(repo ports.AgentRunRepository) {
+	r.runRepo = repo
 }
 
 // SetPolicyEngine thiết lập engine chính sách điều phối kiểm soát tool
@@ -516,26 +522,73 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 					}
 				}
 
-				// Ghi nhận trạng thái running vào ledger
+				var targetTool domain.AgentTool
+				if r.tools != nil {
+					targetTool, _ = r.tools.GetTool(toolName)
+				}
+				sem := domain.ResolveToolSemantics(targetTool)
+
 				now := time.Now()
-				_ = r.toolLedger.RecordPlannedOrRunning(execCtx, &domain.ToolExecutionRecord{
-					TenantID:   identity.TenantID,
-					RunID:      state.TaskID,
-					ToolCallID: tc.ID,
-					ToolName:   toolName,
-					ArgsHash:   domain.HashKey(toolArgs),
-					Status:     domain.ToolExecutionRunning,
-					StartedAt:  &now,
-				})
+				ownership, hasOwnership := domain.ExecutionOwnershipFromContext(execCtx)
+				if hasOwnership {
+					if !sem.ReadOnly && !sem.Idempotent && r.runRepo != nil {
+						// Gia hạn lease trước công cụ destructive để tránh hết hạn giữa chừng
+						_, _ = r.runRepo.RenewLease(execCtx, state.TaskID, ownership.WorkerID, ownership.ClaimGeneration, 30*time.Second)
+					}
+					ok, err := r.toolLedger.RecordPlannedOrRunningOwned(execCtx, &domain.ToolExecutionRecord{
+						TenantID:        identity.TenantID,
+						RunID:           state.TaskID,
+						ToolCallID:      tc.ID,
+						ToolName:        toolName,
+						ArgsHash:        domain.HashKey(toolArgs),
+						Status:          domain.ToolExecutionRunning,
+						WorkerID:        ownership.WorkerID,
+						ClaimGeneration: ownership.ClaimGeneration,
+						StartedAt:       &now,
+					}, ownership.WorkerID, ownership.ClaimGeneration)
+					if err != nil || !ok {
+						state.StopReason = domain.StopReasonVerificationFailed
+						state.Error = fmt.Sprintf("Mất quyền sở hữu tác vụ (worker=%s, claim_gen=%d); từ chối thực thi công cụ [%s] để bảo vệ hệ thống",
+							ownership.WorkerID, ownership.ClaimGeneration, toolName)
+						stepRecord.ToolResults = append(stepRecord.ToolResults, state.Error)
+						state.Steps = append(state.Steps, stepRecord)
+						return state, nil
+					}
+				} else {
+					_ = r.toolLedger.RecordPlannedOrRunning(execCtx, &domain.ToolExecutionRecord{
+						TenantID:   identity.TenantID,
+						RunID:      state.TaskID,
+						ToolCallID: tc.ID,
+						ToolName:   toolName,
+						ArgsHash:   domain.HashKey(toolArgs),
+						Status:     domain.ToolExecutionRunning,
+						StartedAt:  &now,
+					})
+				}
 			}
 
 			// Thực thi công cụ tuyệt đối thông qua Policy Engine với ngữ cảnh có thời hạn
 			toolOutput, execErr := r.getPolicyEngine().ExecuteTool(execCtx, toolName, toolArgs)
 			if r.toolLedger != nil && state.TaskID != "" && tc.ID != "" {
+				targetStatus := domain.ToolExecutionSucceeded
+				errStr := ""
 				if execErr != nil {
-					_ = r.toolLedger.RecordFinished(execCtx, identity.TenantID, state.TaskID, tc.ID, domain.ToolExecutionFailed, toolOutput, execErr.Error())
+					targetStatus = domain.ToolExecutionFailed
+					errStr = execErr.Error()
+				}
+
+				ownership, hasOwnership := domain.ExecutionOwnershipFromContext(execCtx)
+				if hasOwnership {
+					ok, err := r.toolLedger.RecordFinishedOwned(execCtx, identity.TenantID, state.TaskID, tc.ID, targetStatus, toolOutput, errStr, ownership.WorkerID, ownership.ClaimGeneration)
+					if err != nil || !ok {
+						// Mất quyền sở hữu trong quá trình gọi tool! Discard kết quả, dừng worker ngay lập tức
+						state.StopReason = domain.StopReasonVerificationFailed
+						state.Error = fmt.Sprintf("Mất quyền sở hữu tác vụ (worker=%s, claim_gen=%d) trong khi thực thi công cụ [%s]; hủy bỏ kết quả",
+							ownership.WorkerID, ownership.ClaimGeneration, toolName)
+						return state, nil
+					}
 				} else {
-					_ = r.toolLedger.RecordFinished(execCtx, identity.TenantID, state.TaskID, tc.ID, domain.ToolExecutionSucceeded, toolOutput, "")
+					_ = r.toolLedger.RecordFinished(execCtx, identity.TenantID, state.TaskID, tc.ID, targetStatus, toolOutput, errStr)
 				}
 			}
 			if execErr != nil {

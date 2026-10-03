@@ -47,3 +47,26 @@ func GetLiveOutput(ctx context.Context) LiveOutputFunc {
 	}
 	return nil
 }
+
+type executionOwnershipContextKey struct{}
+
+// ExecutionOwnership định danh quyền sở hữu thực thi của một worker trên một AgentRun cụ thể
+type ExecutionOwnership struct {
+	RunID           string `json:"run_id"`
+	WorkerID        string `json:"worker_id"`
+	ClaimGeneration int64  `json:"claim_generation"`
+}
+
+// ContextWithExecutionOwnership đính kèm ExecutionOwnership vào context thực thi
+func ContextWithExecutionOwnership(ctx context.Context, own ExecutionOwnership) context.Context {
+	return context.WithValue(ctx, executionOwnershipContextKey{}, own)
+}
+
+// ExecutionOwnershipFromContext trích xuất ExecutionOwnership từ context thực thi
+func ExecutionOwnershipFromContext(ctx context.Context) (ExecutionOwnership, bool) {
+	if ctx == nil {
+		return ExecutionOwnership{}, false
+	}
+	own, ok := ctx.Value(executionOwnershipContextKey{}).(ExecutionOwnership)
+	return own, ok
+}

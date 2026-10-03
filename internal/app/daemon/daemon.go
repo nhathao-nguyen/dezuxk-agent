@@ -137,8 +137,14 @@ func Run(configPath string, portOverride int) error {
 	metrics := domain.NewContractMetrics()
 
 	// 4. Khởi tạo Outbound Adapters với lớp bọc Upstream Resilience (Circuit Breaker, Backoff, Jitter, Retry-After)
-	rawUpstream := google.NewGoogleTransportAdapter(cfg)
-	upstreamTransport := google.NewResilientUpstreamClient(rawUpstream)
+	var upstreamTransport ports.UpstreamGoogleTransport
+	if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+		log.Println("[Test Mode] DEZUXK_TEST_MODE=true: Kích hoạt Fake Upstream Transport cho kiểm thử cụm CI")
+		upstreamTransport = google.NewFakeUpstreamTransport()
+	} else {
+		rawUpstream := google.NewGoogleTransportAdapter(cfg)
+		upstreamTransport = google.NewResilientUpstreamClient(rawUpstream)
+	}
 
 	// 5. Khởi tạo Profile Manager (Mỗi tài khoản Google 1 folder riêng, lưu cookies & cấu hình)
 	profileManager, err := session.NewProfileManager(cfg, sessionRepo, modelRegistry, tokenExtractor, vault)
@@ -153,6 +159,40 @@ func Run(configPath string, portOverride int) error {
 		log.Printf("[Profile] Cảnh báo khi quét profiles: %v", err)
 	} else {
 		log.Printf("[Profile] Đã quét %d thư mục profile trong %s", len(discovered), cfg.Profiles.BaseDir)
+	}
+
+	// Khi chạy kiểm thử phân tán trong CI (DEZUXK_TEST_MODE=true), tự động nạp mock model và mock account
+	if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+		log.Println("[Test Mode] Đăng ký mock models & test account cho môi trường kiểm thử cluster")
+		if modelRegistry.Count() == 0 {
+			modelRegistry.Register(domain.ModelDescriptor{
+				ID:            "gemini-3.8-flash",
+				DisplayName:   "Gemini 3.8 Flash (Test Mock)",
+				TargetService: domain.ServiceGemini,
+				Capabilities:  []domain.ModelCapability{domain.CapChat},
+				IsActive:      true,
+			})
+			modelRegistry.Register(domain.ModelDescriptor{
+				ID:            "gemini-2.5-pro",
+				DisplayName:   "Gemini 2.5 Pro (Test Mock)",
+				TargetService: domain.ServiceGemini,
+				Capabilities:  []domain.ModelCapability{domain.CapChat},
+				IsActive:      true,
+			})
+		}
+		if sessionRepo != nil {
+			mockAcc := &domain.ManagedAccount{
+				ID:           "cluster-test-account",
+				Email:        "cluster-test@dezuxk.local",
+				IsHealthy:    true,
+				HealthStatus: domain.HealthStatusHealthy,
+				Tier:         2,
+				GeminiSNlM0e: "mock-sn-token",
+				Jar:          domain.NewCookieJar(map[string]string{"__Secure-1PSID": "mock-psid"}),
+			}
+			mockAcc.SetAtToken(domain.ServiceGemini, "mock-at-token")
+			_ = sessionRepo.Save(ctx, mockAcc)
+		}
 	}
 
 	activeCount := modelRegistry.Count()

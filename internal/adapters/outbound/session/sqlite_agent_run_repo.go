@@ -859,6 +859,32 @@ func (r *SqliteAgentRunRepository) AppendOwnedEvent(ctx context.Context, event *
 	return true, nil
 }
 
+// ValidateOwnership kiểm tra xem worker_id và claim_generation còn nắm giữ lease hợp lệ hay không
+func (r *SqliteAgentRunRepository) ValidateOwnership(ctx context.Context, runID, workerID string, claimGeneration int64) (bool, error) {
+	if runID == "" || workerID == "" || claimGeneration <= 0 {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	var exists int
+	query := `
+	SELECT 1 FROM agent_runs
+	WHERE id = ? AND worker_id = ? AND claim_generation = ?
+	  AND status IN ('running', 'recovering', 'waiting_for_tool')
+	  AND (lease_until IS NULL OR lease_until > ?)
+	`
+	err := r.db.QueryRowContext(ctx, query, runID, workerID, claimGeneration, now).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // ToolExecutionLedger implementation
 func (r *SqliteAgentRunRepository) RecordPlannedOrRunning(ctx context.Context, exec *domain.ToolExecutionRecord) error {
 	if exec == nil || exec.RunID == "" || exec.ToolCallID == "" {
@@ -892,6 +918,59 @@ func (r *SqliteAgentRunRepository) RecordPlannedOrRunning(ctx context.Context, e
 	return err
 }
 
+// RecordPlannedOrRunningOwned kiểm tra tính sở hữu trước khi ghi nhận tool planned/running
+func (r *SqliteAgentRunRepository) RecordPlannedOrRunningOwned(ctx context.Context, exec *domain.ToolExecutionRecord, workerID string, claimGeneration int64) (bool, error) {
+	if exec == nil || exec.RunID == "" || exec.ToolCallID == "" {
+		return false, errors.New("record không hợp lệ hoặc thiếu RunID/ToolCallID")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	var exists int
+	checkQuery := `
+	SELECT 1 FROM agent_runs
+	WHERE id = ? AND worker_id = ? AND claim_generation = ?
+	  AND status IN ('running', 'recovering', 'waiting_for_tool')
+	  AND (lease_until IS NULL OR lease_until > ?)
+	`
+	err := r.db.QueryRowContext(ctx, checkQuery, exec.RunID, workerID, claimGeneration, now).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if exec.TenantID == "" {
+		exec.TenantID = "default"
+	}
+	if exec.StartedAt == nil {
+		exec.StartedAt = &now
+	}
+	exec.WorkerID = workerID
+	exec.ClaimGeneration = claimGeneration
+
+	query := `
+	INSERT INTO agent_tool_executions (tenant_id, run_id, tool_call_id, tool_name, args_hash, status, result_json, error, worker_id, claim_generation, started_at, finished_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(tenant_id, run_id, tool_call_id) DO UPDATE SET
+		status = excluded.status,
+		worker_id = excluded.worker_id,
+		claim_generation = excluded.claim_generation,
+		started_at = excluded.started_at;
+	`
+	_, err = r.db.ExecContext(ctx, query,
+		exec.TenantID, exec.RunID, exec.ToolCallID, exec.ToolName, exec.ArgsHash,
+		string(exec.Status), exec.ResultJSON, exec.Error, workerID, claimGeneration,
+		exec.StartedAt, exec.FinishedAt,
+	)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r *SqliteAgentRunRepository) RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -907,6 +986,46 @@ func (r *SqliteAgentRunRepository) RecordFinished(ctx context.Context, tenantID,
 	`
 	_, err := r.db.ExecContext(ctx, query, string(status), resultJSON, errStr, now, tenantID, runID, toolCallID)
 	return err
+}
+
+// RecordFinishedOwned cập nhật kết quả thực thi công cụ có kiểm tra điều kiện fencing token
+func (r *SqliteAgentRunRepository) RecordFinishedOwned(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string, workerID string, claimGeneration int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var exists int
+	checkQuery := `
+	SELECT 1 FROM agent_runs
+	WHERE id = ? AND worker_id = ? AND claim_generation = ? AND status != 'cancelled'
+	`
+	err := r.db.QueryRowContext(ctx, checkQuery, runID, workerID, claimGeneration).Scan(&exists)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	now := time.Now()
+	query := `
+	UPDATE agent_tool_executions
+	SET status = ?, result_json = ?, error = ?, finished_at = ?
+	WHERE tenant_id = ? AND run_id = ? AND tool_call_id = ?
+	  AND (worker_id = ? OR worker_id = '')
+	  AND (claim_generation = ? OR claim_generation = 0);
+	`
+	res, err := r.db.ExecContext(ctx, query, string(status), resultJSON, errStr, now, tenantID, runID, toolCallID, workerID, claimGeneration)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }
 
 func (r *SqliteAgentRunRepository) GetExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error) {

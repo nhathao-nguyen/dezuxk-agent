@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -17,7 +16,6 @@ import (
 
 // PostgresCheckpointRepository lưu trữ các snapshot trạng thái Agent trong PostgreSQL
 type PostgresCheckpointRepository struct {
-	mu   sync.Mutex
 	pool *pgxpool.Pool
 }
 
@@ -32,9 +30,6 @@ func NewPostgresCheckpointRepository(pool *pgxpool.Pool) (*PostgresCheckpointRep
 }
 
 func (r *PostgresCheckpointRepository) SaveCheckpoint(ctx context.Context, cp *domain.AgentCheckpoint) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if cp.TenantID == "" {
 		if id, ok := domain.TenantIdentityFromContext(ctx); ok && id.TenantID != "" {
 			cp.TenantID = id.TenantID
@@ -71,9 +66,6 @@ func (r *PostgresCheckpointRepository) SaveCheckpoint(ctx context.Context, cp *d
 }
 
 func (r *PostgresCheckpointRepository) GetLatestCheckpoint(ctx context.Context, taskID string) (*domain.AgentCheckpoint, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var query string
 	var args []any
 
@@ -128,9 +120,6 @@ func (r *PostgresCheckpointRepository) GetLatestCheckpoint(ctx context.Context, 
 }
 
 func (r *PostgresCheckpointRepository) ListCheckpoints(ctx context.Context, taskID string) ([]*domain.AgentCheckpoint, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var query string
 	var args []any
 
@@ -184,9 +173,6 @@ func (r *PostgresCheckpointRepository) ListCheckpoints(ctx context.Context, task
 }
 
 func (r *PostgresCheckpointRepository) DeleteCheckpoints(ctx context.Context, taskID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	var query string
 	var args []any
 

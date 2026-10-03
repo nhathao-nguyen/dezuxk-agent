@@ -402,6 +402,27 @@ func (m *MemoryAgentRunRepository) AppendOwnedEvent(ctx context.Context, event *
 	return true, nil
 }
 
+// ValidateOwnership kiểm tra tức thời quyền sở hữu của worker
+func (m *MemoryAgentRunRepository) ValidateOwnership(ctx context.Context, runID, workerID string, claimGeneration int64) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	run, ok := m.runs[runID]
+	if !ok {
+		return false, nil
+	}
+	if run.WorkerID != workerID || run.ClaimGeneration != claimGeneration {
+		return false, nil
+	}
+	if run.Status != domain.RunStatusRunning && run.Status != domain.RunStatusRecovering && run.Status != domain.RunStatusWaitingForTool {
+		return false, nil
+	}
+	if run.LeaseUntil != nil && run.LeaseUntil.Before(time.Now()) {
+		return false, nil
+	}
+	return true, nil
+}
+
 // ToolExecutionLedger implementation
 func (m *MemoryAgentRunRepository) makeToolExecKey(tenantID, runID, toolCallID string) string {
 	if tenantID == "" {
@@ -426,6 +447,37 @@ func (m *MemoryAgentRunRepository) RecordPlannedOrRunning(ctx context.Context, e
 	copied := *exec
 	m.toolExecs[k] = &copied
 	return nil
+}
+
+func (m *MemoryAgentRunRepository) RecordPlannedOrRunningOwned(ctx context.Context, exec *domain.ToolExecutionRecord, workerID string, claimGeneration int64) (bool, error) {
+	if exec == nil || exec.RunID == "" || exec.ToolCallID == "" {
+		return false, fmt.Errorf("record không hợp lệ")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, ok := m.runs[exec.RunID]
+	if !ok || run.WorkerID != workerID || run.ClaimGeneration != claimGeneration {
+		return false, nil // Ownership lost!
+	}
+	if run.Status != domain.RunStatusRunning && run.Status != domain.RunStatusRecovering && run.Status != domain.RunStatusWaitingForTool {
+		return false, nil
+	}
+	if run.LeaseUntil != nil && run.LeaseUntil.Before(time.Now()) {
+		return false, nil // Lease expired!
+	}
+
+	k := m.makeToolExecKey(exec.TenantID, exec.RunID, exec.ToolCallID)
+	now := time.Now()
+	if exec.StartedAt == nil {
+		exec.StartedAt = &now
+	}
+	copied := *exec
+	copied.WorkerID = workerID
+	copied.ClaimGeneration = claimGeneration
+	m.toolExecs[k] = &copied
+	return true, nil
 }
 
 func (m *MemoryAgentRunRepository) RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error {
@@ -453,6 +505,40 @@ func (m *MemoryAgentRunRepository) RecordFinished(ctx context.Context, tenantID,
 	existing.Error = errStr
 	existing.FinishedAt = &now
 	return nil
+}
+
+func (m *MemoryAgentRunRepository) RecordFinishedOwned(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string, workerID string, claimGeneration int64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, ok := m.runs[runID]
+	if !ok || run.WorkerID != workerID || run.ClaimGeneration != claimGeneration || run.Status == domain.RunStatusCancelled {
+		return false, nil // Ownership lost!
+	}
+
+	k := m.makeToolExecKey(tenantID, runID, toolCallID)
+	existing, ok := m.toolExecs[k]
+	now := time.Now()
+	if !ok {
+		m.toolExecs[k] = &domain.ToolExecutionRecord{
+			TenantID:        tenantID,
+			RunID:           runID,
+			ToolCallID:      toolCallID,
+			Status:          status,
+			ResultJSON:      resultJSON,
+			Error:           errStr,
+			WorkerID:        workerID,
+			ClaimGeneration: claimGeneration,
+			FinishedAt:      &now,
+		}
+		return true, nil
+	}
+
+	existing.Status = status
+	existing.ResultJSON = resultJSON
+	existing.Error = errStr
+	existing.FinishedAt = &now
+	return true, nil
 }
 
 func (m *MemoryAgentRunRepository) GetExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error) {

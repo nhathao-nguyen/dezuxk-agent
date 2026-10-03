@@ -94,6 +94,7 @@ type AgentRunRepository interface {
 	AppendOwnedEvent(ctx context.Context, event *domain.AgentRunEvent, workerID string, claimGeneration int64) (bool, error)
 	UpdateOwned(ctx context.Context, run *domain.AgentRun, workerID string, claimGeneration int64) (bool, error)
 	FindByTenantAndIdempotencyKey(ctx context.Context, tenantID, key string) (*domain.AgentRun, error)
+	ValidateOwnership(ctx context.Context, runID, workerID string, claimGeneration int64) (bool, error)
 }
 
 // ToolExecutionLedger quản lý nhật ký thực thi công cụ durable để tránh side-effect replay sau crash
@@ -102,7 +103,14 @@ type ToolExecutionLedger interface {
 	RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error
 	GetExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error)
 	MarkUnknownAfterRestart(ctx context.Context, tenantID, runID, toolCallID string) error
+
+	// Owned methods áp dụng Fencing Token (worker_id + claim_generation) chống zombie worker
+	RecordPlannedOrRunningOwned(ctx context.Context, exec *domain.ToolExecutionRecord, workerID string, claimGeneration int64) (bool, error)
+	RecordFinishedOwned(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string, workerID string, claimGeneration int64) (bool, error)
 }
+
+// OwnedToolExecutionLedger định danh tường minh cho ledger hỗ trợ fencing token
+type OwnedToolExecutionLedger = ToolExecutionLedger
 
 // AgentJobService giao diện điều phối hàng đợi và thực thi tác vụ Agent chạy nền (Async Job Engine)
 type AgentJobService interface {

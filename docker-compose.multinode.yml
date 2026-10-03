@@ -98,6 +98,7 @@ services:
       - DEZUXK_S3_SECRET_KEY=minioadminpassword
       - DEZUXK_S3_USE_PATH_STYLE=true
       - DEZUXK_CHROME_BINARY=/usr/bin/chromium
+      - DEZUXK_TEST_MODE=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -141,6 +142,7 @@ services:
       - DEZUXK_S3_SECRET_KEY=minioadminpassword
       - DEZUXK_S3_USE_PATH_STYLE=true
       - DEZUXK_CHROME_BINARY=/usr/bin/chromium
+      - DEZUXK_TEST_MODE=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -184,6 +186,7 @@ services:
       - DEZUXK_S3_SECRET_KEY=minioadminpassword
       - DEZUXK_S3_USE_PATH_STYLE=true
       - DEZUXK_CHROME_BINARY=/usr/bin/chromium
+      - DEZUXK_TEST_MODE=true
     depends_on:
       postgres:
         condition: service_healthy
