@@ -258,7 +258,14 @@ func Run(configPath string, portOverride int) error {
 	if windowSecs <= 0 {
 		windowSecs = 60
 	}
-	rateLimiter := adaptersHTTP.NewIPRateLimiter(maxReqs, time.Duration(windowSecs)*time.Second, cfg.Server.TrustedProxies)
+	localPrefilterReqs := maxReqs
+	if infra.SharedLimiter != nil {
+		localPrefilterReqs = maxReqs * 20
+		if localPrefilterReqs < 600 {
+			localPrefilterReqs = 600
+		}
+	}
+	rateLimiter := adaptersHTTP.NewIPRateLimiter(localPrefilterReqs, time.Duration(windowSecs)*time.Second, cfg.Server.TrustedProxies)
 	if infra.SharedLimiter != nil {
 		rateLimiter.SetSharedRateLimiter(infra.SharedLimiter)
 	}

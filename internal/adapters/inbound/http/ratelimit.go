@@ -534,7 +534,7 @@ func (lim *IPRateLimiter) AcquireConcurrency(ctx context.Context, id ports.RateL
 
 // Middleware cung cấp tương thích ngược cho Chi router
 func (lim *IPRateLimiter) Middleware(metrics ...*domain.ContractMetrics) func(http.Handler) http.Handler {
-	return PreAuthIPRateLimitMiddleware(lim, lim.LocalRateLimiter.ExtractClientIP, metrics...)
+	return PreAuthIPRateLimitMiddleware(lim.LocalRateLimiter, lim.LocalRateLimiter.ExtractClientIP, metrics...)
 }
 
 // MaxBodySizeMiddleware giới hạn kích thước tối đa của request body để chống DoS

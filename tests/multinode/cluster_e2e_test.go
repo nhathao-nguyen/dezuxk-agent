@@ -342,6 +342,40 @@ func TestClusterProcess_06_SharedRateLimitClusterWide(t *testing.T) {
 	skipIfNotClusterRunning(t)
 
 	client := &http.Client{Timeout: 5 * time.Second}
+
+	// 1. Tạo Virtual Key riêng cho tenant-cluster-ratelimit để kiểm tra Redis Shared Rate Limiter
+	createKeyPayload := map[string]any{
+		"name":      "Rate Limit Cluster Key",
+		"tenant_id": "tenant-cluster-ratelimit",
+		"role":      "user",
+	}
+	pBytes, _ := json.Marshal(createKeyPayload)
+	reqKey, _ := http.NewRequest(http.MethodPost, nodeABaseURL+"/v1/admin/keys", bytes.NewReader(pBytes))
+	reqKey.Header.Set("Content-Type", "application/json")
+	reqKey.Header.Set("Authorization", "Bearer "+masterAPIKey)
+
+	respKey, err := client.Do(reqKey)
+	if err != nil {
+		t.Fatalf("Tạo virtual key cho rate limit test thất bại: %v", err)
+	}
+	defer respKey.Body.Close()
+	if respKey.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(respKey.Body)
+		t.Fatalf("Tạo virtual key cho rate limit test trả về status %d: %s", respKey.StatusCode, string(body))
+	}
+	var createdKey struct {
+		Key    string `json:"key"`
+		RawKey string `json:"raw_key"`
+	}
+	_ = json.NewDecoder(respKey.Body).Decode(&createdKey)
+	tokenRateLimit := createdKey.Key
+	if tokenRateLimit == "" {
+		tokenRateLimit = createdKey.RawKey
+	}
+	if tokenRateLimit == "" {
+		t.Fatalf("Không thể trích xuất token cho rate limit test")
+	}
+
 	const totalCalls = 100
 	var status429Count int64
 	var status200Count int64
@@ -361,7 +395,7 @@ func TestClusterProcess_06_SharedRateLimitClusterWide(t *testing.T) {
 		go func(url string) {
 			defer wg.Done()
 			req, _ := http.NewRequest(http.MethodGet, url, nil)
-			req.Header.Set("Authorization", "Bearer "+masterAPIKey)
+			req.Header.Set("Authorization", "Bearer "+tokenRateLimit)
 			resp, err := client.Do(req)
 			if err == nil {
 				if resp.StatusCode == http.StatusTooManyRequests {

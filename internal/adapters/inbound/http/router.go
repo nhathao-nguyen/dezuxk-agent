@@ -157,7 +157,14 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				windowSecs = deps.Config.Server.RateLimit.WindowSeconds
 			}
 		}
-		limiter = NewIPRateLimiter(maxReqs, time.Duration(windowSecs)*time.Second, trustedProxies)
+		localPrefilterReqs := maxReqs
+		if deps.Config != nil && deps.Config.Distributed.Enabled {
+			localPrefilterReqs = maxReqs * 20
+			if localPrefilterReqs < 600 {
+				localPrefilterReqs = 600
+			}
+		}
+		limiter = NewIPRateLimiter(localPrefilterReqs, time.Duration(windowSecs)*time.Second, trustedProxies)
 	}
 	r.Use(func(next http.Handler) http.Handler {
 		limiterHandler := limiter.Middleware(deps.Metrics)(next)
