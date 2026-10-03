@@ -271,13 +271,29 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		state.UpdatedAt = time.Now()
 
 		if os.Getenv("DEZUXK_TEST_MODE") == "true" && strings.Contains(strings.ToLower(goal), "sleep") {
-			if opts.OnProgress != nil {
-				opts.OnProgress(step, "running", "Executing controlled sleep test task")
+			if r.checkpointRepo != nil && step == 1 {
+				cp := &domain.AgentCheckpoint{
+					TenantID:      identity.TenantID,
+					TaskID:        state.TaskID,
+					NodeKind:      domain.NodeKindExecute,
+					StepIndex:     step,
+					StateSnapshot: *state,
+					PlanSnapshot: domain.TaskPlan{
+						Goal: state.Goal,
+					},
+					CreatedAt: time.Now(),
+				}
+				_ = r.checkpointRepo.SaveCheckpoint(execCtx, cp)
 			}
-			select {
-			case <-time.After(3 * time.Second):
-			case <-execCtx.Done():
-				return state, execCtx.Err()
+			if step == 1 {
+				if opts.OnProgress != nil {
+					opts.OnProgress(step, "running", "Executing controlled sleep test task")
+				}
+				select {
+				case <-time.After(3 * time.Second):
+				case <-execCtx.Done():
+					return state, execCtx.Err()
+				}
 			}
 		}
 

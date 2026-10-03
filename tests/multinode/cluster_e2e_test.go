@@ -784,7 +784,7 @@ func TestClusterProcess_09_RealNodeCrashAndAgentTakeover(t *testing.T) {
 			_ = json.NewDecoder(respB.Body).Decode(&finalRunState)
 			respB.Body.Close()
 
-			if finalRunState.ClaimGeneration > initialClaimGen && (finalRunState.Status == "completed" || finalRunState.Status == "running") {
+			if finalRunState.ClaimGeneration > initialClaimGen && (finalRunState.Status == "completed" || finalRunState.Status == "running" || finalRunState.Status == "recovering") {
 				takeoverSucceeded = true
 				if finalRunState.Status == "completed" {
 					break
@@ -796,6 +796,11 @@ func TestClusterProcess_09_RealNodeCrashAndAgentTakeover(t *testing.T) {
 
 	if !takeoverSucceeded {
 		t.Fatalf("Takeover thất bại: run %s không được node khác nhận lại (status=%s, worker_id=%s, claim_gen=%d)",
+			runID, finalRunState.Status, finalRunState.WorkerID, finalRunState.ClaimGeneration)
+	}
+
+	if finalRunState.Status != "completed" {
+		t.Fatalf("Run %s không hoàn thành sau khi takeover (status=%s, worker_id=%s, claim_gen=%d)",
 			runID, finalRunState.Status, finalRunState.WorkerID, finalRunState.ClaimGeneration)
 	}
 
