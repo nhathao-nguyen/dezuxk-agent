@@ -20,6 +20,12 @@ import (
 	"dezuxk-gateway/internal/core/ports"
 )
 
+// MaxRetryBodyBytes là kích thước tối đa của request body được đệm trong bộ nhớ để phục vụ retry an toàn (10MB)
+const MaxRetryBodyBytes = 10 * 1024 * 1024
+
+// ErrRequestBodyTooLarge báo lỗi khi kích thước request body vượt quá giới hạn bộ đệm retry
+var ErrRequestBodyTooLarge = errors.New("request_body_too_large: request body exceeds max retry buffer limit")
+
 // ResilientConfig cấu hình cho ResilientUpstreamClient
 type ResilientConfig struct {
 	MaxRetries        int           // Số lần retry tối đa (mặc định 3)
@@ -127,10 +133,13 @@ func (c *ResilientUpstreamClient) DoRequest(
 	var bodyBytes []byte
 	if body != nil {
 		var readErr error
-		const maxBuffer = 10 * 1024 * 1024 // 10MB
-		bodyBytes, readErr = io.ReadAll(io.LimitReader(body, maxBuffer))
+		// Đọc tối đa MaxRetryBodyBytes + 1 để phát hiện kích thước vượt quá giới hạn, tuyệt đối không truncate ngầm
+		bodyBytes, readErr = io.ReadAll(io.LimitReader(body, MaxRetryBodyBytes+1))
 		if readErr != nil {
 			return nil, fmt.Errorf("read request body error: %w", readErr)
+		}
+		if len(bodyBytes) > MaxRetryBodyBytes {
+			return nil, ErrRequestBodyTooLarge
 		}
 	}
 
@@ -156,6 +165,7 @@ func (c *ResilientUpstreamClient) DoRequest(
 		startCall := time.Now()
 		resp, err := c.underlying.DoRequest(ctx, account, service, method, path, attemptBody, contentType)
 		duration := time.Since(startCall)
+		_ = duration
 
 		// A. Trường hợp lỗi kết nối mạng (Network Error / Timeout)
 		if err != nil {
@@ -178,11 +188,6 @@ func (c *ResilientUpstreamClient) DoRequest(
 
 		// B. Nhận được phản hồi HTTP
 		if resp != nil {
-			// Ghi nhận độ trễ cho tài khoản nếu có
-			if account != nil && resp.StatusCode == http.StatusOK {
-				account.RecordSuccess(duration)
-			}
-
 			// Kiểm tra mã trạng thái HTTP có retry được không
 			if isRetryableStatusCode(resp.StatusCode) {
 				c.breaker.RecordFailure()

@@ -37,6 +37,11 @@ type JobService struct {
 	subsMu      sync.RWMutex
 	subscribers map[string][]chan domain.AgentRunEvent
 
+	recoveryInterval time.Duration
+	recoveryCancel   context.CancelFunc
+	recoveryStopCh   chan struct{}
+	recoveryWg       sync.WaitGroup
+
 	wg         sync.WaitGroup
 	rootCtx    context.Context
 	cancelRoot context.CancelFunc
@@ -46,14 +51,15 @@ type JobService struct {
 func NewJobService(repo ports.AgentRunRepository, runner ports.AgentRunner) *JobService {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	js := &JobService{
-		repo:        repo,
-		runner:      runner,
-		workerID:    fmt.Sprintf("worker-%s", generateRunID()[:10]),
-		cancels:     make(map[string]context.CancelFunc),
-		subscribers: make(map[string][]chan domain.AgentRunEvent),
-		rootCtx:     rootCtx,
-		cancelRoot:  cancel,
-		accepting:   true,
+		repo:             repo,
+		runner:           runner,
+		workerID:         fmt.Sprintf("worker-%s", generateRunID()[:10]),
+		cancels:          make(map[string]context.CancelFunc),
+		subscribers:      make(map[string][]chan domain.AgentRunEvent),
+		rootCtx:          rootCtx,
+		cancelRoot:       cancel,
+		accepting:        true,
+		recoveryInterval: 15 * time.Second,
 	}
 	return js
 }
@@ -63,9 +69,19 @@ func (s *JobService) SetCheckpointRepository(cp ports.CheckpointRepository) {
 	s.checkpointRepo = cp
 }
 
+// SetRecoveryInterval cấu hình chu kỳ quét phục hồi của Sweeper (phục vụ test hoặc cấu hình tùy biến)
+func (s *JobService) SetRecoveryInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recoveryInterval = d
+	if s.accepting && s.rootCtx != nil {
+		s.startRecoveryLoopLocked(s.rootCtx, d)
+	}
+}
+
 var _ ports.AgentJobService = (*JobService)(nil)
 
-// Start khởi chạy JobService với context gốc của máy chủ
+// Start khởi chạy JobService với context gốc của máy chủ và kích hoạt background recovery sweeper
 func (s *JobService) Start(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -75,14 +91,77 @@ func (s *JobService) Start(ctx context.Context) error {
 	}
 	s.rootCtx, s.cancelRoot = context.WithCancel(ctx)
 	s.accepting = true
+
+	interval := s.recoveryInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	s.startRecoveryLoopLocked(s.rootCtx, interval)
 	return nil
 }
 
-// Shutdown dừng tiếp nhận job mới, hủy/drain các worker đang chạy và đợi hoàn tất
+// StartRecoveryLoop khởi chạy vòng lặp Sweeper định kỳ quét và thu hồi các lease hết hạn
+func (s *JobService) StartRecoveryLoop(ctx context.Context, interval time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.startRecoveryLoopLocked(ctx, interval)
+}
+
+func (s *JobService) startRecoveryLoopLocked(ctx context.Context, interval time.Duration) {
+	if s.recoveryCancel != nil {
+		s.recoveryCancel()
+	}
+	if s.recoveryStopCh != nil {
+		select {
+		case <-s.recoveryStopCh:
+		default:
+			close(s.recoveryStopCh)
+		}
+	}
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	s.recoveryInterval = interval
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	s.recoveryCancel = cancel
+	stopCh := make(chan struct{})
+	s.recoveryStopCh = stopCh
+
+	s.recoveryWg.Add(1)
+	go func() {
+		defer s.recoveryWg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-loopCtx.Done():
+				return
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				_, _ = s.ScanRecoverableRuns(loopCtx)
+			}
+		}
+	}()
+}
+
+// Shutdown dừng tiếp nhận job mới, dừng recovery sweeper, hủy/drain các worker đang chạy và đợi hoàn tất
 func (s *JobService) Shutdown(ctx context.Context) error {
-	// 1. Dừng nhận job mới dưới lock và cancel các worker
+	// 1. Dừng nhận job mới và hủy các worker dưới lock
 	s.mu.Lock()
 	s.accepting = false
+	if s.recoveryCancel != nil {
+		s.recoveryCancel()
+	}
+	if s.recoveryStopCh != nil {
+		select {
+		case <-s.recoveryStopCh:
+		default:
+			close(s.recoveryStopCh)
+		}
+	}
 	for _, cancel := range s.cancels {
 		if cancel != nil {
 			cancel()
@@ -94,7 +173,10 @@ func (s *JobService) Shutdown(ctx context.Context) error {
 		s.cancelRoot()
 	}
 
-	// 2. Đợi các worker kết thúc có thời hạn bảo vệ
+	// 2. Chờ background recovery sweeper thoát an toàn
+	s.recoveryWg.Wait()
+
+	// 3. Đợi các worker kết thúc có thời hạn bảo vệ
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -107,7 +189,7 @@ func (s *JobService) Shutdown(ctx context.Context) error {
 		return fmt.Errorf("job service shutdown timeout hoặc bị hủy: %w", ctx.Err())
 	}
 
-	// 3. Đóng tất cả kênh SSE subscribers
+	// 4. Đóng tất cả kênh SSE subscribers
 	s.subsMu.Lock()
 	for _, subs := range s.subscribers {
 		for _, ch := range subs {
@@ -120,7 +202,51 @@ func (s *JobService) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// RecoverPendingRuns quét và khôi phục các tác vụ dở dang từ SQLite sau khi server khởi động lại
+func reconstructOptions(run *domain.AgentRun, initialCheckpoint *domain.AgentCheckpoint) domain.AgentRunOptions {
+	opts := domain.AgentRunOptions{
+		TaskID:    run.ID,
+		Model:     run.Model,
+		Workspace: run.Workspace,
+		MaxSteps:  run.MaxSteps,
+	}
+	if run.ExecutionConfig != nil {
+		if run.ExecutionConfig.Model != "" {
+			opts.Model = run.ExecutionConfig.Model
+		}
+		if run.ExecutionConfig.Workspace != "" {
+			opts.Workspace = run.ExecutionConfig.Workspace
+		}
+		if run.ExecutionConfig.MaxSteps > 0 {
+			opts.MaxSteps = run.ExecutionConfig.MaxSteps
+		}
+		opts.MaxToolCalls = run.ExecutionConfig.MaxToolCalls
+		opts.MaxRepeatedCalls = run.ExecutionConfig.MaxRepeatedCalls
+		opts.MaxExecutionDuration = run.ExecutionConfig.MaxExecutionDuration
+		opts.MaxConsecutiveFailures = run.ExecutionConfig.MaxConsecutiveFailures
+		opts.Supervised = run.ExecutionConfig.Supervised
+		opts.RequireAction = run.ExecutionConfig.RequireAction
+		opts.UseSandbox = run.ExecutionConfig.UseSandbox
+		opts.AutoMerge = run.ExecutionConfig.AutoMerge
+		opts.CustomPrompt = run.ExecutionConfig.CustomPrompt
+	}
+	if opts.Model == "" {
+		opts.Model = run.Model
+	}
+	if opts.Workspace == "" {
+		opts.Workspace = run.Workspace
+	}
+	if opts.MaxSteps <= 0 {
+		opts.MaxSteps = run.MaxSteps
+	}
+	if initialCheckpoint != nil {
+		resumedState := initialCheckpoint.StateSnapshot
+		resumedState.TaskID = run.ID
+		opts.InitialState = &resumedState
+	}
+	return opts
+}
+
+// RecoverPendingRuns quét và khôi phục các tác vụ dở dang từ SQLite sau khi server khởi động lại (Startup Recovery)
 func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun, error) {
 	if s.repo == nil {
 		return nil, nil
@@ -134,6 +260,29 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 	var processed []*domain.AgentRun
 
 	for _, run := range pending {
+		// ISSUE 5: Legacy run thiếu SecurityContext -> Bắt buộc FAIL CLOSED, không tự động phục hồi cấp quyền admin!
+		if run.SecurityContext == nil {
+			now := time.Now()
+			run.Status = domain.RunStatusInterrupted
+			run.StopReason = domain.StopReasonReauthorizationRequired
+			run.Error = "legacy_security_context_missing: Tác vụ thiếu SecurityContext hợp lệ từ phiên bản trước; yêu cầu người dùng xác thực và resume lại"
+			run.UpdatedAt = now
+			run.FinishedAt = &now
+			_ = s.repo.Update(ctx, run)
+
+			interEv := domain.AgentRunEvent{
+				TenantID:  run.TenantID,
+				RunID:     run.ID,
+				Step:      run.CurrentStep,
+				Kind:      "run_interrupted",
+				Message:   "Tác vụ bị gián đoạn do thiếu SecurityContext (Stop reason: reauthorization_required)",
+				Timestamp: now,
+			}
+			_ = s.repo.AppendEvent(ctx, &interEv)
+			processed = append(processed, run)
+			continue
+		}
+
 		restartEv := domain.AgentRunEvent{
 			TenantID:  run.TenantID,
 			RunID:     run.ID,
@@ -146,7 +295,6 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 
 		switch run.Status {
 		case domain.RunStatusQueued:
-			// Requeue tác vụ và chạy nền
 			recovEv := domain.AgentRunEvent{
 				TenantID:  run.TenantID,
 				RunID:     run.ID,
@@ -157,18 +305,13 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 			}
 			_ = s.repo.AppendEvent(ctx, &recovEv)
 
-			opts := domain.AgentRunOptions{
-				TaskID:    run.ID,
-				Model:     run.Model,
-				Workspace: run.Workspace,
-				MaxSteps:  run.MaxSteps,
-			}
+			opts := reconstructOptions(run, nil)
 			_ = s.launchBackgroundWorker(run, opts)
 			processed = append(processed, run)
 
-		case domain.RunStatusRunning, domain.RunStatusRecovering:
+		case domain.RunStatusRunning, domain.RunStatusRecovering, domain.RunStatusWaitingForTool:
 			now := time.Now()
-			// 1. Nếu worker khác đang giữ lease active -> bỏ qua (skip)
+			// 1. Nếu worker khác đang giữ lease active -> BỎ QUA (skip)
 			if run.WorkerID != "" && run.WorkerID != s.workerID && run.LeaseUntil != nil && run.LeaseUntil.After(now) {
 				continue
 			}
@@ -176,24 +319,27 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 			// 2. Lease đã hết hạn hoặc không có -> tra cứu checkpoint khả dụng
 			var cp *domain.AgentCheckpoint
 			if s.checkpointRepo != nil {
-				cpCtx := ctx
-				if run.SecurityContext != nil {
-					cpCtx = domain.ContextWithTenantIdentity(ctx, run.SecurityContext.ToTenantIdentity())
-				} else {
-					cpCtx = domain.ContextWithTenantIdentity(ctx, domain.TenantIdentity{TenantID: run.TenantID, Role: "admin"})
-				}
+				cpCtx := domain.ContextWithTenantIdentity(ctx, run.SecurityContext.ToTenantIdentity())
 				cp, _ = s.checkpointRepo.GetLatestCheckpoint(cpCtx, run.ID)
 			}
 
-			if cp != nil && len(cp.StateSnapshot.Messages) > 0 {
-				claimed, cErr := s.repo.ClaimRun(ctx, run.ID, s.workerID, 60*time.Second)
-				if cErr != nil || !claimed {
-					continue
-				}
+			claimed, cErr := s.repo.ClaimRun(ctx, run.ID, s.workerID, 60*time.Second)
+			if cErr != nil || !claimed {
+				continue
+			}
 
+			claimedRun, _ := s.repo.Get(ctx, run.ID)
+			claimGen := run.ClaimGeneration
+			if claimedRun != nil {
+				claimGen = claimedRun.ClaimGeneration
+				run.ClaimGeneration = claimGen
+				run.WorkerID = claimedRun.WorkerID
+			}
+
+			if cp != nil && len(cp.StateSnapshot.Messages) > 0 {
 				run.Status = domain.RunStatusRecovering
 				run.UpdatedAt = time.Now()
-				_ = s.repo.Update(ctx, run)
+				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
 
 				recovEv := domain.AgentRunEvent{
 					TenantID:  run.TenantID,
@@ -205,15 +351,7 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 				}
 				_ = s.repo.AppendEvent(ctx, &recovEv)
 
-				resumedState := cp.StateSnapshot
-				resumedState.TaskID = run.ID
-				opts := domain.AgentRunOptions{
-					TaskID:       run.ID,
-					Model:        run.Model,
-					Workspace:    run.Workspace,
-					MaxSteps:     run.MaxSteps,
-					InitialState: &resumedState,
-				}
+				opts := reconstructOptions(run, cp)
 				_ = s.launchBackgroundWorker(run, opts)
 				processed = append(processed, run)
 			} else {
@@ -224,7 +362,7 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 				run.Error = "Server khởi động lại và tác vụ chưa kịp lưu checkpoint an toàn để tiếp tục"
 				run.UpdatedAt = now
 				run.FinishedAt = &now
-				_ = s.repo.Update(ctx, run)
+				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
 
 				interEv := domain.AgentRunEvent{
 					TenantID:  run.TenantID,
@@ -241,60 +379,111 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 		case domain.RunStatusWaitingForApproval:
 			// Giữ nguyên trạng thái chờ người dùng phê duyệt
 			processed = append(processed, run)
+		}
+	}
 
-		case domain.RunStatusWaitingForTool:
-			now := time.Now()
+	return processed, nil
+}
+
+// ScanRecoverableRuns quét định kỳ (Recovery Sweeper) để reclaim các tác vụ bị treo do worker crash và lease đã hết hạn
+func (s *JobService) ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRun, error) {
+	if s.repo == nil {
+		return nil, nil
+	}
+
+	pending, err := s.repo.ListPendingRuns(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("không thể quét tác vụ để thu hồi lease hết hạn: %w", err)
+	}
+
+	var processed []*domain.AgentRun
+	now := time.Now()
+
+	for _, run := range pending {
+		// 1. Kiểm tra Fail Closed nếu thiếu SecurityContext
+		if run.SecurityContext == nil {
+			runNow := time.Now()
+			run.Status = domain.RunStatusInterrupted
+			run.StopReason = domain.StopReasonReauthorizationRequired
+			run.Error = "legacy_security_context_missing: Tác vụ thiếu SecurityContext hợp lệ; yêu cầu người dùng xác thực và resume lại"
+			run.UpdatedAt = runNow
+			run.FinishedAt = &runNow
+			_ = s.repo.Update(ctx, run)
+			processed = append(processed, run)
+			continue
+		}
+
+		// 2. Không can thiệp nếu tác vụ đang chạy trên node hiện tại
+		s.mu.RLock()
+		_, isRunningLocally := s.cancels[run.ID]
+		s.mu.RUnlock()
+		if isRunningLocally {
+			continue
+		}
+
+		// 3. Chỉ reclaim các trạng thái running / recovering / waiting_for_tool mà LEASE ĐÃ HẾT HẠN
+		if run.Status == domain.RunStatusRunning || run.Status == domain.RunStatusRecovering || run.Status == domain.RunStatusWaitingForTool {
+			// TUYỆT ĐỐI KHÔNG ĐỤNG JOB CÓ LEASE ACTIVE
 			if run.WorkerID != "" && run.WorkerID != s.workerID && run.LeaseUntil != nil && run.LeaseUntil.After(now) {
 				continue
 			}
 
+			// Atomic claim: cố gắng giành quyền sở hữu run
+			claimed, cErr := s.repo.ClaimRun(ctx, run.ID, s.workerID, 60*time.Second)
+			if cErr != nil || !claimed {
+				continue
+			}
+
+			// Đọc lại để lấy claim_generation mới nhất
+			claimedRun, _ := s.repo.Get(ctx, run.ID)
+			claimGen := run.ClaimGeneration
+			if claimedRun != nil {
+				claimGen = claimedRun.ClaimGeneration
+				run.ClaimGeneration = claimGen
+				run.WorkerID = claimedRun.WorkerID
+			}
+
+			// Tra cứu checkpoint khả dụng
 			var cp *domain.AgentCheckpoint
 			if s.checkpointRepo != nil {
-				cpCtx := ctx
-				if run.SecurityContext != nil {
-					cpCtx = domain.ContextWithTenantIdentity(ctx, run.SecurityContext.ToTenantIdentity())
-				} else {
-					cpCtx = domain.ContextWithTenantIdentity(ctx, domain.TenantIdentity{TenantID: run.TenantID, Role: "admin"})
-				}
+				cpCtx := domain.ContextWithTenantIdentity(ctx, run.SecurityContext.ToTenantIdentity())
 				cp, _ = s.checkpointRepo.GetLatestCheckpoint(cpCtx, run.ID)
 			}
-			if cp != nil {
-				claimed, cErr := s.repo.ClaimRun(ctx, run.ID, s.workerID, 60*time.Second)
-				if cErr != nil || !claimed {
-					continue
-				}
 
+			if cp != nil && len(cp.StateSnapshot.Messages) > 0 {
 				run.Status = domain.RunStatusRecovering
 				run.UpdatedAt = time.Now()
-				_ = s.repo.Update(ctx, run)
+				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
 
-				resumedState := cp.StateSnapshot
-				resumedState.TaskID = run.ID
-				opts := domain.AgentRunOptions{
-					TaskID:       run.ID,
-					Model:        run.Model,
-					Workspace:    run.Workspace,
-					MaxSteps:     run.MaxSteps,
-					InitialState: &resumedState,
+				recovEv := domain.AgentRunEvent{
+					TenantID:  run.TenantID,
+					RunID:     run.ID,
+					Step:      cp.StepIndex,
+					Kind:      "run_reclaimed",
+					Message:   fmt.Sprintf("Sweeper phát hiện lease hết hạn và đã phục hồi tác vụ thành công từ Checkpoint #%d", cp.StepIndex),
+					Timestamp: time.Now(),
 				}
+				_ = s.repo.AppendEvent(ctx, &recovEv)
+
+				opts := reconstructOptions(run, cp)
 				_ = s.launchBackgroundWorker(run, opts)
 				processed = append(processed, run)
 			} else {
-				now := time.Now()
+				staleNow := time.Now()
 				run.Status = domain.RunStatusInterrupted
 				run.StopReason = domain.StopReasonServerRestart
-				run.Error = "Tác vụ chờ công cụ bị gián đoạn do restart và thiếu checkpoint"
-				run.UpdatedAt = now
-				run.FinishedAt = &now
-				_ = s.repo.Update(ctx, run)
+				run.Error = "Worker cũ mất kết nối và tác vụ không có checkpoint hợp lệ để tiếp tục"
+				run.UpdatedAt = staleNow
+				run.FinishedAt = &staleNow
+				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
 
 				interEv := domain.AgentRunEvent{
 					TenantID:  run.TenantID,
 					RunID:     run.ID,
 					Step:      run.CurrentStep,
 					Kind:      "run_interrupted",
-					Message:   "Tác vụ chờ công cụ bị gián đoạn do server restart",
-					Timestamp: now,
+					Message:   "Sweeper thu hồi tác vụ lease hết hạn không có checkpoint (Stop reason: server_restart)",
+					Timestamp: staleNow,
 				}
 				_ = s.repo.AppendEvent(ctx, &interEv)
 				processed = append(processed, run)
@@ -338,6 +527,29 @@ func (s *JobService) SubmitRun(ctx context.Context, goal string, opts domain.Age
 	now := time.Now()
 	runID := generateRunID()
 
+	var billingKeyID string
+	if id, ok := domain.TenantIdentityFromContext(ctx); ok && id.KeyID != "" {
+		billingKeyID = id.KeyID
+	}
+	if bId, ok := domain.BillingIdentityFromContext(ctx); ok && bId.KeyID != "" {
+		billingKeyID = bId.KeyID
+	}
+
+	execConfig := &domain.AgentExecutionConfig{
+		Model:                  opts.Model,
+		Workspace:              opts.Workspace,
+		MaxSteps:               opts.MaxSteps,
+		MaxToolCalls:           opts.MaxToolCalls,
+		MaxRepeatedCalls:       opts.MaxRepeatedCalls,
+		MaxExecutionDuration:   opts.MaxExecutionDuration,
+		MaxConsecutiveFailures: opts.MaxConsecutiveFailures,
+		Supervised:             opts.Supervised,
+		RequireAction:          opts.RequireAction,
+		UseSandbox:             opts.UseSandbox,
+		AutoMerge:              opts.AutoMerge,
+		CustomPrompt:           opts.CustomPrompt,
+	}
+
 	run := &domain.AgentRun{
 		ID:              runID,
 		TenantID:        tenantID,
@@ -348,6 +560,8 @@ func (s *JobService) SubmitRun(ctx context.Context, goal string, opts domain.Age
 		Workspace:       opts.Workspace,
 		MaxSteps:        opts.MaxSteps,
 		SecurityContext: secCtx,
+		BillingKeyID:    billingKeyID,
+		ExecutionConfig: execConfig,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -400,6 +614,12 @@ func (s *JobService) launchBackgroundWorker(run *domain.AgentRun, opts domain.Ag
 		}
 	}
 	runCtx = domain.ContextWithTenantIdentity(runCtx, identity)
+	if run.BillingKeyID != "" {
+		runCtx = domain.ContextWithBillingIdentity(runCtx, domain.BillingIdentity{
+			TenantID: run.TenantID,
+			KeyID:    run.BillingKeyID,
+		})
+	}
 
 	s.cancels[run.ID] = cancel
 	s.wg.Add(1)
@@ -411,9 +631,10 @@ func (s *JobService) launchBackgroundWorker(run *domain.AgentRun, opts domain.Ag
 		opts.InitialState.TaskID = run.ID
 	}
 
+	runCopy := *run
 	go func() {
 		defer s.wg.Done()
-		s.executeBackground(runCtx, run, opts)
+		s.executeBackground(runCtx, &runCopy, opts)
 	}()
 
 	return nil
@@ -448,6 +669,15 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 	if !claimed {
 		// Worker khác đang sở hữu run hoặc run không thể claim -> STOP
 		return
+	}
+
+	// Đọc lại để lấy claim_generation mới nhất được sinh ra từ ClaimRun
+	claimedRun, gErr := s.repo.Get(context.Background(), run.ID)
+	workerClaimGen := run.ClaimGeneration
+	if gErr == nil && claimedRun != nil {
+		workerClaimGen = claimedRun.ClaimGeneration
+		run.ClaimGeneration = workerClaimGen
+		run.WorkerID = claimedRun.WorkerID
 	}
 
 	// Thiết lập context thực thi và goroutine heartbeat gia hạn lease
@@ -538,7 +768,12 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 		run.Status = domain.RunStatusCompleted
 	}
 
-	_ = s.repo.Update(context.Background(), run)
+	// ISSUE 2: Fencing - Chỉ cho phép ghi kết quả cuối nếu worker vẫn giữ quyền sở hữu (worker_id + claim_generation)
+	updated, uErr := s.repo.UpdateOwned(context.Background(), run, s.workerID, workerClaimGen)
+	if uErr != nil || !updated {
+		log.Printf("[JobService] executeBackground: worker %s mất quyền sở hữu run %s (claim_gen=%d), từ chối ghi đè kết quả", s.workerID, run.ID, workerClaimGen)
+		return
+	}
 
 	finalEv := domain.AgentRunEvent{
 		TenantID:  run.TenantID,
@@ -620,12 +855,55 @@ func (s *JobService) ResumeRunForTenant(ctx context.Context, tenantID, runID str
 		return nil, fmt.Errorf("không thể resume tác vụ ở trạng thái: %s", run.Status)
 	}
 
+	// Xác thực caller hiện tại từ context
+	callerIdentity, hasCaller := domain.TenantIdentityFromContext(ctx)
+	if !hasCaller || callerIdentity.TenantID == "" {
+		return nil, errors.New("resume_reauthorization_failed: thiếu thông tin xác thực của caller")
+	}
+	if callerIdentity.Role != "admin" && callerIdentity.TenantID != tenantID {
+		return nil, errors.New("resume_reauthorization_failed: không có quyền resume tác vụ của tenant khác")
+	}
+	if !callerIdentity.HasScope(domain.ScopeAgent) {
+		return nil, errors.New("resume_reauthorization_failed: caller thiếu scope 'agent'")
+	}
+
+	// ISSUE 3 & ISSUE 5: Re-authorization và intersection
+	var effectiveSecCtx *domain.AgentSecurityContext
+	if run.SecurityContext == nil {
+		// Legacy run missing SecurityContext -> Fail closed nếu không rõ chủ sở hữu
+		if callerIdentity.Role != "admin" && callerIdentity.TenantID != run.TenantID {
+			return nil, errors.New("resume_reauthorization_failed: legacy run không xác định được chủ sở hữu tenant an toàn")
+		}
+		effectiveSecCtx = domain.SecurityContextFromTenantIdentity(callerIdentity)
+	} else {
+		var reauthErr error
+		effectiveSecCtx, reauthErr = domain.IntersectSecurityContext(run.SecurityContext, callerIdentity)
+		if reauthErr != nil {
+			return nil, fmt.Errorf("resume_reauthorization_failed: %w", reauthErr)
+		}
+	}
+
+	// Kiểm tra workspace restrictions của caller
+	if len(callerIdentity.AllowedWorkspaceRoots) > 0 && run.Workspace != "" {
+		matched := false
+		for _, root := range callerIdentity.AllowedWorkspaceRoots {
+			if strings.HasPrefix(run.Workspace, root) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return nil, errors.New("resume_reauthorization_failed: caller không có quyền truy cập workspace của tác vụ")
+		}
+	}
+
 	// 1. Phục hồi từ Checkpoint thật
 	if s.checkpointRepo == nil {
 		return nil, fmt.Errorf("run_not_resumable: hệ thống CheckpointRepository chưa được khởi tạo")
 	}
 
-	latestCP, err := s.checkpointRepo.GetLatestCheckpoint(ctx, runID)
+	cpCtx := domain.ContextWithTenantIdentity(ctx, effectiveSecCtx.ToTenantIdentity())
+	latestCP, err := s.checkpointRepo.GetLatestCheckpoint(cpCtx, runID)
 	if err != nil || latestCP == nil {
 		return nil, fmt.Errorf("run_not_resumable: không tìm thấy checkpoint khả dụng cho run %s: %v", runID, err)
 	}
@@ -643,12 +921,41 @@ func (s *JobService) ResumeRunForTenant(ctx context.Context, tenantID, runID str
 		})
 	}
 
-	opts := domain.AgentRunOptions{
-		TaskID:       newRunID,
-		Model:        run.Model,
-		Workspace:    run.Workspace,
-		MaxSteps:     run.MaxSteps,
-		InitialState: &resumedState,
+	opts := reconstructOptions(run, latestCP)
+	opts.TaskID = newRunID
+	opts.InitialState = &resumedState
+
+	// Áp dụng các giới hạn an toàn từ effectiveSecCtx lên opts
+	if effectiveSecCtx.MaxAgentSteps > 0 && (opts.MaxSteps <= 0 || opts.MaxSteps > effectiveSecCtx.MaxAgentSteps) {
+		opts.MaxSteps = effectiveSecCtx.MaxAgentSteps
+	}
+	opts.RequireAction = opts.RequireAction || effectiveSecCtx.RequireApproval
+	opts.UseSandbox = opts.UseSandbox || effectiveSecCtx.EnforceSandbox
+	opts.AutoMerge = opts.AutoMerge && effectiveSecCtx.AutoMergeAllowed
+
+	newExecConfig := run.ExecutionConfig
+	if newExecConfig == nil {
+		newExecConfig = &domain.AgentExecutionConfig{
+			Model:                  opts.Model,
+			Workspace:              opts.Workspace,
+			MaxSteps:               opts.MaxSteps,
+			MaxToolCalls:           opts.MaxToolCalls,
+			MaxRepeatedCalls:       opts.MaxRepeatedCalls,
+			MaxExecutionDuration:   opts.MaxExecutionDuration,
+			MaxConsecutiveFailures: opts.MaxConsecutiveFailures,
+			Supervised:             opts.Supervised,
+			RequireAction:          opts.RequireAction,
+			UseSandbox:             opts.UseSandbox,
+			AutoMerge:              opts.AutoMerge,
+			CustomPrompt:           opts.CustomPrompt,
+		}
+	} else {
+		copied := *newExecConfig
+		copied.MaxSteps = opts.MaxSteps
+		copied.RequireAction = opts.RequireAction
+		copied.UseSandbox = opts.UseSandbox
+		copied.AutoMerge = opts.AutoMerge
+		newExecConfig = &copied
 	}
 
 	newRun := &domain.AgentRun{
@@ -656,13 +963,15 @@ func (s *JobService) ResumeRunForTenant(ctx context.Context, tenantID, runID str
 		TenantID:        tenantID,
 		Goal:            run.Goal,
 		Status:          domain.RunStatusQueued,
-		Model:           run.Model,
-		Workspace:       run.Workspace,
+		Model:           opts.Model,
+		Workspace:       opts.Workspace,
 		CurrentStep:     latestCP.StepIndex,
-		MaxSteps:        run.MaxSteps,
+		MaxSteps:        opts.MaxSteps,
 		ParentRunID:     run.ID,
 		ResumeFromRunID: run.ID,
-		SecurityContext: run.SecurityContext,
+		SecurityContext: effectiveSecCtx,
+		BillingKeyID:    callerIdentity.KeyID,
+		ExecutionConfig: newExecConfig,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -676,12 +985,12 @@ func (s *JobService) ResumeRunForTenant(ctx context.Context, tenantID, runID str
 		RunID:     newRun.ID,
 		Step:      newRun.CurrentStep,
 		Kind:      "run_resumed",
-		Message:   fmt.Sprintf("Tác vụ được phục hồi thành công từ checkpoint của tác vụ gốc %s", run.ID),
+		Message:   fmt.Sprintf("Tác vụ được phục hồi thành công từ checkpoint của tác vụ gốc %s với quyền hạn re-authorized", run.ID),
 		Timestamp: now,
 	}
 	_ = s.repo.AppendEvent(ctx, &resumeEv)
 
-	s.launchBackgroundWorker(newRun, opts)
+	_ = s.launchBackgroundWorker(newRun, opts)
 	return newRun, nil
 }
 

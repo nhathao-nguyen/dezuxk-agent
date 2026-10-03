@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -379,4 +380,269 @@ func MemoryNamespaceFromContext(ctx context.Context) MemoryNamespace {
 		ProjectID: "default",
 		AgentID:   "default",
 	}
+}
+
+// BillingIdentity đại diện cho thông tin tính cước và hạn ngạch của tác vụ Agent chạy nền
+type BillingIdentity struct {
+	TenantID string `json:"tenant_id"`
+	KeyID    string `json:"key_id"`
+}
+
+type billingIdentityContextKey struct{}
+
+// ContextWithBillingIdentity gắn BillingIdentity vào context
+func ContextWithBillingIdentity(ctx context.Context, b BillingIdentity) context.Context {
+	return context.WithValue(ctx, billingIdentityContextKey{}, b)
+}
+
+// BillingIdentityFromContext trích xuất BillingIdentity từ context
+func BillingIdentityFromContext(ctx context.Context) (BillingIdentity, bool) {
+	if ctx == nil {
+		return BillingIdentity{}, false
+	}
+	if b, ok := ctx.Value(billingIdentityContextKey{}).(BillingIdentity); ok {
+		return b, true
+	}
+	return BillingIdentity{}, false
+}
+
+// IntersectSecurityContext tính toán chính sách phân quyền an toàn khi resume một run.
+// Quy tắc bắt buộc: new permissions <= old permissions AND new permissions <= current caller permissions.
+// Tuyệt đối không bao giờ thực hiện phép UNION quyền (đặc quyền thừa kế).
+func IntersectSecurityContext(old *AgentSecurityContext, current TenantIdentity) (*AgentSecurityContext, error) {
+	if old == nil {
+		return nil, errors.New("legacy_security_context_missing: tác vụ cũ thiếu SecurityContext hợp lệ để đối soát an toàn")
+	}
+
+	// 1. Kiểm tra tính tương thích TenantID
+	tenantID := old.TenantID
+	if current.Role != "admin" && current.TenantID != "" && current.TenantID != old.TenantID {
+		return nil, errors.New("tenant_mismatch: người gọi không có quyền truy cập tenant của tác vụ gốc")
+	}
+
+	// 2. Vai trò hiệu lực: chỉ thành admin nếu cả cũ và hiện tại đều là admin
+	effectiveRole := "user"
+	if old.Role == "admin" && current.Role == "admin" {
+		effectiveRole = "admin"
+	}
+
+	// 3. Quyền Shell: chỉ cho phép nếu CẢ HAI bên cùng cho phép
+	allowShell := old.AllowShell && current.AllowShell
+
+	// 4. RequireApproval: chọn phương án an toàn/chặt chẽ hơn (chỉ cần 1 bên yêu cầu phê duyệt thì phải phê duyệt)
+	requireApproval := old.RequireApproval || current.RequireApproval
+
+	// 5. EnforceSandbox: chọn phương án chặt chẽ hơn (bắt buộc sandbox nếu 1 trong 2 yêu cầu)
+	enforceSandbox := old.EnforceSandbox || current.EnforceSandbox
+
+	// 6. AutoMergeAllowed: chỉ cho phép nếu CẢ HAI bên cùng đồng ý
+	autoMergeAllowed := old.AutoMergeAllowed && current.AutoMergeAllowed
+
+	// 7. MaxAgentSteps: min(old, current)
+	maxSteps := current.MaxAgentSteps
+	if maxSteps <= 0 {
+		maxSteps = 25
+	}
+	if old.MaxAgentSteps > 0 && old.MaxAgentSteps < maxSteps {
+		maxSteps = old.MaxAgentSteps
+	}
+
+	// 8. MaxConcurrentRuns: min(old, current)
+	maxConcurrent := current.MaxConcurrentRuns
+	if maxConcurrent <= 0 {
+		maxConcurrent = 3
+	}
+	if old.MaxConcurrentRuns > 0 && old.MaxConcurrentRuns < maxConcurrent {
+		maxConcurrent = old.MaxConcurrentRuns
+	}
+
+	// 9. MaxToolRuntime: min(old, current)
+	maxRuntime := current.MaxToolRuntime
+	if maxRuntime <= 0 {
+		maxRuntime = 60 * time.Second
+	}
+	if old.MaxToolRuntime > 0 && old.MaxToolRuntime < maxRuntime {
+		maxRuntime = old.MaxToolRuntime
+	}
+
+	// 10. Giao các Scopes (Intersection)
+	hasWildcardScope := func(scopes []string) bool {
+		for _, s := range scopes {
+			if strings.TrimSpace(s) == "*" {
+				return true
+			}
+		}
+		return false
+	}
+
+	var effectiveScopes []string
+	if hasWildcardScope(old.Scopes) && hasWildcardScope(current.Scopes) {
+		effectiveScopes = []string{"*"}
+	} else if hasWildcardScope(old.Scopes) {
+		effectiveScopes = append([]string(nil), current.Scopes...)
+	} else if hasWildcardScope(current.Scopes) {
+		effectiveScopes = append([]string(nil), old.Scopes...)
+	} else {
+		currScopeMap := make(map[string]bool)
+		for _, s := range current.Scopes {
+			currScopeMap[strings.ToLower(strings.TrimSpace(s))] = true
+		}
+		for _, s := range old.Scopes {
+			norm := strings.ToLower(strings.TrimSpace(s))
+			if currScopeMap[norm] {
+				effectiveScopes = append(effectiveScopes, norm)
+			}
+		}
+	}
+
+	// Kiểm tra bắt buộc phải còn quyền ScopeAgent sau khi intersect
+	hasAgentScope := false
+	for _, s := range effectiveScopes {
+		if s == "*" || s == ScopeAgent {
+			hasAgentScope = true
+			break
+		}
+	}
+	if !hasAgentScope && effectiveRole != "admin" {
+		return nil, errors.New("resume_reauthorization_failed: người gọi hiện tại không có scope 'agent'")
+	}
+
+	// 11. Giao các AllowedTools
+	hasWildcardTool := func(tools []string) bool {
+		if len(tools) == 0 {
+			return true
+		}
+		for _, t := range tools {
+			if strings.TrimSpace(t) == "*" {
+				return true
+			}
+		}
+		return false
+	}
+
+	var effectiveTools []string
+	if hasWildcardTool(old.AllowedTools) && hasWildcardTool(current.AllowedTools) {
+		effectiveTools = nil // Cho phép các tool mặc định theo allowShell
+	} else if hasWildcardTool(old.AllowedTools) {
+		effectiveTools = append([]string(nil), current.AllowedTools...)
+	} else if hasWildcardTool(current.AllowedTools) {
+		effectiveTools = append([]string(nil), old.AllowedTools...)
+	} else {
+		currToolMap := make(map[string]bool)
+		for _, t := range current.AllowedTools {
+			currToolMap[strings.TrimSpace(t)] = true
+		}
+		for _, t := range old.AllowedTools {
+			trim := strings.TrimSpace(t)
+			if currToolMap[trim] {
+				effectiveTools = append(effectiveTools, trim)
+			}
+		}
+	}
+
+	// Nếu không có quyền Shell, đảm bảo loại bỏ run_command
+	if !allowShell && effectiveRole != "admin" {
+		var filtered []string
+		for _, t := range effectiveTools {
+			if t != "run_command" && t != "*" {
+				filtered = append(filtered, t)
+			}
+		}
+		effectiveTools = filtered
+	}
+
+	// 12. Giao các AllowedModels
+	hasWildcardModel := func(models []string) bool {
+		if len(models) == 0 {
+			return true
+		}
+		for _, m := range models {
+			if strings.TrimSpace(m) == "*" {
+				return true
+			}
+		}
+		return false
+	}
+
+	var effectiveModels []string
+	if hasWildcardModel(old.AllowedModels) && hasWildcardModel(current.AllowedModels) {
+		effectiveModels = []string{"*"}
+	} else if hasWildcardModel(old.AllowedModels) {
+		effectiveModels = append([]string(nil), current.AllowedModels...)
+	} else if hasWildcardModel(current.AllowedModels) {
+		effectiveModels = append([]string(nil), old.AllowedModels...)
+	} else {
+		currModelMap := make(map[string]bool)
+		for _, m := range current.AllowedModels {
+			currModelMap[strings.ToLower(strings.TrimSpace(m))] = true
+		}
+		for _, m := range old.AllowedModels {
+			norm := strings.ToLower(strings.TrimSpace(m))
+			if currModelMap[norm] {
+				effectiveModels = append(effectiveModels, norm)
+			}
+		}
+	}
+
+	// 13. Giao NetworkPolicy (Restrictive Intersection)
+	allowOutbound := old.NetworkPolicy.AllowOutbound && current.NetworkPolicy.AllowOutbound
+
+	// Allowed domains: intersection
+	var allowedDomains []string
+	if len(old.NetworkPolicy.AllowedDomains) == 0 {
+		allowedDomains = append([]string(nil), current.NetworkPolicy.AllowedDomains...)
+	} else if len(current.NetworkPolicy.AllowedDomains) == 0 {
+		allowedDomains = append([]string(nil), old.NetworkPolicy.AllowedDomains...)
+	} else {
+		currDomainMap := make(map[string]bool)
+		for _, d := range current.NetworkPolicy.AllowedDomains {
+			currDomainMap[strings.ToLower(strings.TrimSpace(d))] = true
+		}
+		for _, d := range old.NetworkPolicy.AllowedDomains {
+			norm := strings.ToLower(strings.TrimSpace(d))
+			if currDomainMap[norm] {
+				allowedDomains = append(allowedDomains, norm)
+			}
+		}
+	}
+
+	// Blocked domains: union
+	blockedDomainMap := make(map[string]bool)
+	var blockedDomains []string
+	for _, d := range old.NetworkPolicy.BlockedDomains {
+		norm := strings.ToLower(strings.TrimSpace(d))
+		if norm != "" && !blockedDomainMap[norm] {
+			blockedDomainMap[norm] = true
+			blockedDomains = append(blockedDomains, norm)
+		}
+	}
+	for _, d := range current.NetworkPolicy.BlockedDomains {
+		norm := strings.ToLower(strings.TrimSpace(d))
+		if norm != "" && !blockedDomainMap[norm] {
+			blockedDomainMap[norm] = true
+			blockedDomains = append(blockedDomains, norm)
+		}
+	}
+
+	return &AgentSecurityContext{
+		TenantID:              tenantID,
+		KeyID:                 current.KeyID, // Gắn KeyID của người gọi hiện tại cho billing và attribution
+		Role:                  effectiveRole,
+		Scopes:                effectiveScopes,
+		AllowedModels:         effectiveModels,
+		AllowedTools:          effectiveTools,
+		AllowedWorkspaceRoots: append([]string(nil), current.AllowedWorkspaceRoots...),
+		MaxAgentSteps:         maxSteps,
+		MaxConcurrentRuns:     maxConcurrent,
+		MaxToolRuntime:        maxRuntime,
+		RequireApproval:       requireApproval,
+		AllowShell:            allowShell,
+		EnforceSandbox:        enforceSandbox,
+		AutoMergeAllowed:      autoMergeAllowed,
+		NetworkPolicy: NetworkPolicy{
+			AllowOutbound:  allowOutbound,
+			AllowedDomains: allowedDomains,
+			BlockedDomains: blockedDomains,
+		},
+	}, nil
 }

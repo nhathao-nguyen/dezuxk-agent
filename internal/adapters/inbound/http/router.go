@@ -168,18 +168,18 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		if deps.ModelRegistry != nil {
 			activeModels = deps.ModelRegistry.Count()
 		}
+		isReady := true
+		if deps.ReadinessManager != nil && !deps.ReadinessManager.IsReady() {
+			isReady = false
+		}
 		status := "ok"
-		var alerts []domain.SessionAlert
-		if deps.SessionRepo != nil {
-			alerts = deps.SessionRepo.GetAlerts()
-			if len(alerts) > 0 {
-				status = "warning"
-			}
+		if !isReady {
+			status = "degraded"
 		}
 		payload := map[string]any{
 			"status":        status,
+			"ready":         isReady,
 			"models_active": activeModels,
-			"alerts":        alerts,
 			"timestamp":     time.Now().Format(time.RFC3339),
 		}
 		if deps.Metrics != nil {
@@ -446,15 +446,15 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			})
 		}
 
-		// Alerts API
+		// Alerts API (Yêu cầu quyền Quản trị viên vì alerts chứa thông tin tài khoản / phiên hệ thống nhạy cảm)
 		if deps.SessionRepo != nil {
-			v1.Get("/alerts", func(w http.ResponseWriter, r *http.Request) {
+			v1.With(RequireAdmin).Get("/alerts", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"alerts": deps.SessionRepo.GetAlerts(),
 				})
 			})
-			v1.Post("/alerts/clear", func(w http.ResponseWriter, r *http.Request) {
+			v1.With(RequireAdmin).Post("/alerts/clear", func(w http.ResponseWriter, r *http.Request) {
 				accountID := r.URL.Query().Get("account_id")
 				deps.SessionRepo.ClearAlerts(accountID)
 				w.Header().Set("Content-Type", "application/json")

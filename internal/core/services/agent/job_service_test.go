@@ -268,27 +268,35 @@ func TestJobService_RecoverPendingRuns(t *testing.T) {
 
 	ctx := context.Background()
 
+	secCtx := domain.SecurityContextFromTenantIdentity(domain.TenantIdentity{
+		TenantID: "tenant-recov",
+		Role:     "user",
+		Scopes:   []string{domain.ScopeAgent},
+	})
+
 	// 1. Tác vụ queued -> mong đợi requeue
 	runQueued := &domain.AgentRun{
-		ID:        "run_queued_restart",
-		TenantID:  "tenant-recov",
-		Goal:      "Requeue Task",
-		Status:    domain.RunStatusQueued,
-		Model:     "gemini-3.8-flash",
-		Workspace: ".",
-		MaxSteps:  5,
+		ID:              "run_queued_restart",
+		TenantID:        "tenant-recov",
+		Goal:            "Requeue Task",
+		Status:          domain.RunStatusQueued,
+		Model:           "gemini-3.8-flash",
+		Workspace:       ".",
+		MaxSteps:        5,
+		SecurityContext: secCtx,
 	}
 	_ = runRepo.Create(ctx, runQueued)
 
 	// 2. Tác vụ running có checkpoint -> mong đợi recovering
 	runWithCP := &domain.AgentRun{
-		ID:        "run_running_checkpoint",
-		TenantID:  "tenant-recov",
-		Goal:      "Recoverable Task",
-		Status:    domain.RunStatusRunning,
-		Model:     "gemini-3.8-flash",
-		Workspace: ".",
-		MaxSteps:  5,
+		ID:              "run_running_checkpoint",
+		TenantID:        "tenant-recov",
+		Goal:            "Recoverable Task",
+		Status:          domain.RunStatusRunning,
+		Model:           "gemini-3.8-flash",
+		Workspace:       ".",
+		MaxSteps:        5,
+		SecurityContext: secCtx,
 	}
 	_ = runRepo.Create(ctx, runWithCP)
 	_ = cpRepo.SaveCheckpoint(ctx, &domain.AgentCheckpoint{
@@ -306,27 +314,41 @@ func TestJobService_RecoverPendingRuns(t *testing.T) {
 
 	// 3. Tác vụ running KHÔNG có checkpoint -> mong đợi interrupted (server_restart)
 	runNoCP := &domain.AgentRun{
-		ID:        "run_running_no_checkpoint",
-		TenantID:  "tenant-recov",
-		Goal:      "Unrecoverable Task",
-		Status:    domain.RunStatusRunning,
-		Model:     "gemini-3.8-flash",
-		Workspace: ".",
-		MaxSteps:  5,
+		ID:              "run_running_no_checkpoint",
+		TenantID:        "tenant-recov",
+		Goal:            "Unrecoverable Task",
+		Status:          domain.RunStatusRunning,
+		Model:           "gemini-3.8-flash",
+		Workspace:       ".",
+		MaxSteps:        5,
+		SecurityContext: secCtx,
 	}
 	_ = runRepo.Create(ctx, runNoCP)
 
 	// 4. Tác vụ waiting_for_approval -> giữ nguyên
 	runWaiting := &domain.AgentRun{
-		ID:        "run_waiting_approval",
+		ID:              "run_waiting_approval",
+		TenantID:        "tenant-recov",
+		Goal:            "Waiting Approval Task",
+		Status:          domain.RunStatusWaitingForApproval,
+		Model:           "gemini-3.8-flash",
+		Workspace:       ".",
+		MaxSteps:        5,
+		SecurityContext: secCtx,
+	}
+	_ = runRepo.Create(ctx, runWaiting)
+
+	// 5. Tác vụ Legacy KHÔNG CÓ SecurityContext -> Bắt buộc Fail Closed (reauthorization_required)
+	runLegacy := &domain.AgentRun{
+		ID:        "run_legacy_no_secctx",
 		TenantID:  "tenant-recov",
-		Goal:      "Waiting Approval Task",
-		Status:    domain.RunStatusWaitingForApproval,
+		Goal:      "Legacy Run without SecurityContext",
+		Status:    domain.RunStatusRunning,
 		Model:     "gemini-3.8-flash",
 		Workspace: ".",
 		MaxSteps:  5,
 	}
-	_ = runRepo.Create(ctx, runWaiting)
+	_ = runRepo.Create(ctx, runLegacy)
 
 	// Kích hoạt phục hồi
 	processed, err := svc.RecoverPendingRuns(ctx)
@@ -334,8 +356,8 @@ func TestJobService_RecoverPendingRuns(t *testing.T) {
 		t.Fatalf("RecoverPendingRuns failed: %v", err)
 	}
 
-	if len(processed) < 4 {
-		t.Fatalf("expected at least 4 processed runs, got: %d", len(processed))
+	if len(processed) < 5 {
+		t.Fatalf("expected at least 5 processed runs, got: %d", len(processed))
 	}
 
 	// Đợi các worker nền chạy
@@ -348,6 +370,15 @@ func TestJobService_RecoverPendingRuns(t *testing.T) {
 	}
 	if resNoCP.Status != domain.RunStatusInterrupted || resNoCP.StopReason != domain.StopReasonServerRestart {
 		t.Fatalf("expected interrupted with server_restart, got status=%s, reason=%s", resNoCP.Status, resNoCP.StopReason)
+	}
+
+	// Kiểm tra runLegacy phải là interrupted với StopReasonReauthorizationRequired (ISSUE 5)
+	resLegacy, err := runRepo.Get(ctx, runLegacy.ID)
+	if err != nil {
+		t.Fatalf("get runLegacy failed: %v", err)
+	}
+	if resLegacy.Status != domain.RunStatusInterrupted || resLegacy.StopReason != domain.StopReasonReauthorizationRequired {
+		t.Fatalf("expected legacy run to be interrupted with reauthorization_required, got status=%s, reason=%s", resLegacy.Status, resLegacy.StopReason)
 	}
 
 	// Kiểm tra runWaiting vẫn là waiting_for_approval

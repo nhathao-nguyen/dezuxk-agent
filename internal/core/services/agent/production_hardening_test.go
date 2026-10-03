@@ -303,6 +303,11 @@ func TestHardening_RealRunnerRecoveryAfterRestart(t *testing.T) {
 		Model:     "gemini-3.8-flash",
 		Workspace: tempDir,
 		MaxSteps:  5,
+		SecurityContext: domain.SecurityContextFromTenantIdentity(domain.TenantIdentity{
+			TenantID: "tenant-recov-restart",
+			Role:     "user",
+			Scopes:   []string{domain.ScopeAgent},
+		}),
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}

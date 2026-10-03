@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -28,6 +29,7 @@ func generateTaskID() string {
 // Runner triển khai ports.AgentRunner
 type Runner struct {
 	chatUseCase    ports.ChatUseCase
+	keyUseCase     ports.KeyUseCase
 	tools          ports.ToolRegistry
 	approval       ports.ApprovalProvider
 	policyEngine   ports.ToolExecutionService
@@ -42,6 +44,11 @@ func NewRunner(chatUseCase ports.ChatUseCase, tools ports.ToolRegistry, approval
 		tools:       tools,
 		approval:    approval,
 	}
+}
+
+// SetKeyUseCase thiết lập KeyUseCase phục vụ kiểm soát hạn ngạch và tính cước
+func (r *Runner) SetKeyUseCase(k ports.KeyUseCase) {
+	r.keyUseCase = k
 }
 
 // SetCheckpointRepository thiết lập repository lưu trữ checkpoint cho Runner
@@ -237,7 +244,10 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	}
 	defer finalizeSandbox()
 
-	openAITools := r.tools.ToOpenAITools()
+	var openAITools []domain.OpenAITool
+	if r.tools != nil {
+		openAITools = r.tools.ToOpenAITools()
+	}
 
 	var lastToolSig string
 	var repeatedToolCount int
@@ -260,6 +270,47 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 
 		if opts.OnProgress != nil {
 			opts.OnProgress(step, "thinking", fmt.Sprintf("Bước %d/%d: Đang phân tích và lập kế hoạch...", step, opts.MaxSteps))
+		}
+
+		// Kiểm tra phân quyền và hạn ngạch của khóa API trước mỗi lượt gọi mô hình (Issue 4)
+		if r.keyUseCase != nil {
+			keyID := ""
+			if bill, ok := domain.BillingIdentityFromContext(execCtx); ok && bill.KeyID != "" {
+				keyID = bill.KeyID
+			} else if id, ok := domain.TenantIdentityFromContext(execCtx); ok && id.KeyID != "" {
+				keyID = id.KeyID
+			}
+
+			if keyID != "" && keyID != "master" && keyID != "internal" {
+				vKey, valErr := r.keyUseCase.ValidateKeyByID(execCtx, keyID, opts.Model)
+				if valErr != nil {
+					switch {
+					case errors.Is(valErr, domain.ErrKeyRevoked), errors.Is(valErr, domain.ErrKeyExpired):
+						state.StopReason = domain.StopReasonAuthorizationRevoked
+						state.Error = fmt.Sprintf("Quyền thực thi bị thu hồi hoặc khóa đã hết hạn: %v", valErr)
+					case errors.Is(valErr, domain.ErrDailyQuotaExceeded), errors.Is(valErr, domain.ErrTokenQuotaExceeded):
+						state.StopReason = domain.StopReasonQuotaExceeded
+						state.Error = fmt.Sprintf("Hạn ngạch API đã cạn kiệt: %v", valErr)
+					case errors.Is(valErr, domain.ErrModelNotAllowed):
+						state.StopReason = domain.StopReasonAuthorizationRevoked
+						state.Error = fmt.Sprintf("Mô hình không được phép: %v", valErr)
+					default:
+						state.StopReason = domain.StopReasonAuthorizationRevoked
+						state.Error = fmt.Sprintf("Lỗi xác thực khóa API: %v", valErr)
+					}
+					return state, valErr
+				}
+				_ = vKey
+
+				// Enforce: 1 Agent LLM round = 1 billable request (tiêu thụ 1 lượt hạn ngạch ngày)
+				if _, consumeErr := r.keyUseCase.ConsumeQuota(execCtx, keyID); consumeErr != nil {
+					if errors.Is(consumeErr, domain.ErrDailyQuotaExceeded) {
+						state.StopReason = domain.StopReasonQuotaExceeded
+						state.Error = "Đã sử dụng hết hạn ngạch yêu cầu trong ngày của khóa API."
+						return state, consumeErr
+					}
+				}
+			}
 		}
 
 		// Tự động nén ngữ cảnh nếu vượt quá 12 tin nhắn (Tier 2 Recall Memory)

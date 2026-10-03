@@ -102,9 +102,12 @@ func (r *SqliteAgentRunRepository) migrate() error {
 		parent_run_id TEXT,
 		resume_from_run_id TEXT,
 		worker_id TEXT,
+		claim_generation INTEGER NOT NULL DEFAULT 0,
+		billing_key_id TEXT,
 		lease_until DATETIME,
 		heartbeat_at DATETIME,
 		security_context TEXT,
+		execution_config TEXT,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
 		finished_at DATETIME
@@ -137,9 +140,12 @@ func (r *SqliteAgentRunRepository) migrate() error {
 		{"parent_run_id", "TEXT"},
 		{"resume_from_run_id", "TEXT"},
 		{"worker_id", "TEXT"},
+		{"claim_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"billing_key_id", "TEXT"},
 		{"lease_until", "DATETIME"},
 		{"heartbeat_at", "DATETIME"},
 		{"security_context", "TEXT"},
+		{"execution_config", "TEXT"},
 	}
 	for _, col := range runColsToAdd {
 		if err := addColumnIfNotExists(r.db, "agent_runs", col.name, col.def); err != nil {
@@ -236,20 +242,28 @@ func (r *SqliteAgentRunRepository) Create(ctx context.Context, run *domain.Agent
 		}
 	}
 
+	var execCfgVal any = nil
+	if run.ExecutionConfig != nil {
+		if b, err := json.Marshal(run.ExecutionConfig); err == nil {
+			execCfgVal = string(b)
+		}
+	}
+
 	query := `
 	INSERT INTO agent_runs (
 		id, tenant_id, idempotency_key, goal, status, model, workspace,
 		current_step, max_steps, total_tool_calls, stop_reason, final_answer,
-		error, git_diff, parent_run_id, resume_from_run_id, worker_id, lease_until, heartbeat_at,
-		security_context, created_at, updated_at, finished_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		error, git_diff, parent_run_id, resume_from_run_id, worker_id, claim_generation, billing_key_id,
+		lease_until, heartbeat_at, security_context, execution_config, created_at, updated_at, finished_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		run.ID, run.TenantID, idempKeyVal, run.Goal, string(run.Status),
 		run.Model, run.Workspace, run.CurrentStep, run.MaxSteps, run.TotalToolCalls,
 		run.StopReason, run.FinalAnswer, run.Error, run.GitDiff,
-		run.ParentRunID, run.ResumeFromRunID, run.WorkerID, run.LeaseUntil, run.HeartbeatAt,
-		secCtxVal, run.CreatedAt, run.UpdatedAt, run.FinishedAt,
+		run.ParentRunID, run.ResumeFromRunID, run.WorkerID, run.ClaimGeneration, run.BillingKeyID,
+		run.LeaseUntil, run.HeartbeatAt,
+		secCtxVal, execCfgVal, run.CreatedAt, run.UpdatedAt, run.FinishedAt,
 	)
 	if err != nil {
 		errLower := strings.ToLower(err.Error())
@@ -352,15 +366,15 @@ func scanAgentRun(scanner interface{ Scan(dest ...any) error }) (*domain.AgentRu
 	var run domain.AgentRun
 	var statusStr string
 	var idempKey, stopReason, finalAns, errStr, gitDiff sql.NullString
-	var parentID, resumeID, workerID sql.NullString
+	var parentID, resumeID, workerID, billingKeyID sql.NullString
 	var leaseUntil, heartbeatAt, finAt sql.NullTime
-	var secCtxStr sql.NullString
+	var secCtxStr, execCfgStr sql.NullString
 
 	err := scanner.Scan(
 		&run.ID, &run.TenantID, &idempKey, &run.Goal, &statusStr, &run.Model, &run.Workspace,
 		&run.CurrentStep, &run.MaxSteps, &run.TotalToolCalls, &stopReason, &finalAns,
-		&errStr, &gitDiff, &parentID, &resumeID, &workerID, &leaseUntil, &heartbeatAt,
-		&secCtxStr, &run.CreatedAt, &run.UpdatedAt, &finAt,
+		&errStr, &gitDiff, &parentID, &resumeID, &workerID, &run.ClaimGeneration, &billingKeyID,
+		&leaseUntil, &heartbeatAt, &secCtxStr, &execCfgStr, &run.CreatedAt, &run.UpdatedAt, &finAt,
 	)
 	if err != nil {
 		return nil, err
@@ -391,6 +405,9 @@ func scanAgentRun(scanner interface{ Scan(dest ...any) error }) (*domain.AgentRu
 	if workerID.Valid {
 		run.WorkerID = workerID.String
 	}
+	if billingKeyID.Valid {
+		run.BillingKeyID = billingKeyID.String
+	}
 	if leaseUntil.Valid {
 		run.LeaseUntil = &leaseUntil.Time
 	}
@@ -406,14 +423,20 @@ func scanAgentRun(scanner interface{ Scan(dest ...any) error }) (*domain.AgentRu
 			run.SecurityContext = &sec
 		}
 	}
+	if execCfgStr.Valid && execCfgStr.String != "" {
+		var cfg domain.AgentExecutionConfig
+		if err := json.Unmarshal([]byte(execCfgStr.String), &cfg); err == nil {
+			run.ExecutionConfig = &cfg
+		}
+	}
 
 	return &run, nil
 }
 
 const selectRunCols = `id, tenant_id, idempotency_key, goal, status, model, workspace,
 	current_step, max_steps, total_tool_calls, stop_reason, final_answer,
-	error, git_diff, parent_run_id, resume_from_run_id, worker_id, lease_until, heartbeat_at,
-	security_context, created_at, updated_at, finished_at`
+	error, git_diff, parent_run_id, resume_from_run_id, worker_id, claim_generation, billing_key_id,
+	lease_until, heartbeat_at, security_context, execution_config, created_at, updated_at, finished_at`
 
 func (r *SqliteAgentRunRepository) Get(ctx context.Context, runID string) (*domain.AgentRun, error) {
 	query := fmt.Sprintf("SELECT %s FROM agent_runs WHERE id = ?;", selectRunCols)
@@ -662,14 +685,15 @@ func (r *SqliteAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 
 	query := `
 	UPDATE agent_runs
-	SET status = 'running', worker_id = ?, lease_until = ?, heartbeat_at = ?, updated_at = ?
+	SET status = 'running', worker_id = ?, claim_generation = claim_generation + 1, lease_until = ?, heartbeat_at = ?, updated_at = ?
 	WHERE id = ? AND (
 		status = 'queued' 
 		OR (status = 'recovering' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
 		OR (status = 'running' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
+		OR (status = 'waiting_for_tool' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
 	);
 	`
-	res, err := r.db.ExecContext(ctx, query, workerID, leaseUntil, now, now, runID, workerID, now, workerID, now)
+	res, err := r.db.ExecContext(ctx, query, workerID, leaseUntil, now, now, runID, workerID, now, workerID, now, workerID, now)
 	if err != nil {
 		return false, err
 	}
@@ -690,9 +714,42 @@ func (r *SqliteAgentRunRepository) RenewLease(ctx context.Context, runID, worker
 	query := `
 	UPDATE agent_runs
 	SET lease_until = ?, heartbeat_at = ?, updated_at = ?
-	WHERE id = ? AND worker_id = ? AND status = 'running';
+	WHERE id = ? AND worker_id = ? AND status IN ('running', 'recovering');
 	`
 	res, err := r.db.ExecContext(ctx, query, leaseUntil, now, now, runID, workerID)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+func (r *SqliteAgentRunRepository) UpdateOwned(ctx context.Context, run *domain.AgentRun, workerID string, claimGeneration int64) (bool, error) {
+	if run == nil || run.ID == "" {
+		return false, errors.New("run không hợp lệ hoặc thiếu ID")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	run.UpdatedAt = time.Now()
+
+	query := `
+	UPDATE agent_runs SET
+		status = ?, current_step = ?, total_tool_calls = ?, stop_reason = ?,
+		final_answer = ?, error = ?, git_diff = ?, updated_at = ?, finished_at = ?
+	WHERE id = ? AND worker_id = ? AND claim_generation = ? AND status != 'cancelled';
+	`
+	args := []any{
+		string(run.Status), run.CurrentStep, run.TotalToolCalls, run.StopReason,
+		run.FinalAnswer, run.Error, run.GitDiff, run.UpdatedAt, run.FinishedAt,
+		run.ID, workerID, claimGeneration,
+	}
+
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}

@@ -143,3 +143,73 @@ func TestResilientUpstreamClient_CircuitBreakerTrip(t *testing.T) {
 		t.Fatalf("circuit breaker open should not execute raw transport")
 	}
 }
+
+func TestResilientUpstreamClient_BodyExceedsMaxBuffer_ExplicitError(t *testing.T) {
+	mock := &mockRawTransport{
+		doRequestFn: func(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind, method string, path string, body io.Reader, contentType string) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	client := NewResilientUpstreamClient(mock, DefaultResilientConfig())
+
+	// 1. Body = MaxRetryBodyBytes + 1 -> Phải trả về ErrRequestBodyTooLarge rõ ràng, không được gửi xuống transport
+	largeBody := io.LimitReader(strings.NewReader(strings.Repeat("a", MaxRetryBodyBytes+1)), int64(MaxRetryBodyBytes+1))
+	_, err := client.DoRequest(context.Background(), nil, domain.ServiceGemini, http.MethodPost, "/test", largeBody, "application/json")
+	if !errors.Is(err, ErrRequestBodyTooLarge) {
+		t.Fatalf("expected ErrRequestBodyTooLarge, got: %v", err)
+	}
+	if atomic.LoadInt64(&mock.calls) != 0 {
+		t.Fatalf("expected 0 calls to raw transport when body exceeds MaxRetryBodyBytes, got: %d", mock.calls)
+	}
+
+	// 2. Body hợp lệ nhỏ hơn MaxRetryBodyBytes -> Thành công và gọi tới raw transport
+	smallBody := strings.NewReader("hello world")
+	resp, err := client.DoRequest(context.Background(), nil, domain.ServiceGemini, http.MethodPost, "/test", smallBody, "application/json")
+	if err != nil {
+		t.Fatalf("unexpected error for small body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got: %d", resp.StatusCode)
+	}
+	if atomic.LoadInt64(&mock.calls) != 1 {
+		t.Fatalf("expected exactly 1 call to raw transport, got: %d", mock.calls)
+	}
+}
+
+func TestResilientUpstreamClient_AccountHealthNotDoubleCounted(t *testing.T) {
+	mock := &mockRawTransport{
+		doRequestFn: func(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind, method string, path string, body io.Reader, contentType string) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader("ok")),
+				Header:     make(http.Header),
+			}, nil
+		},
+	}
+
+	client := NewResilientUpstreamClient(mock, DefaultResilientConfig())
+	acc := &domain.ManagedAccount{
+		ID:        "test-acc",
+		Email:     "email@example.com",
+		ProxyURL:  "proxy",
+		IsHealthy: true,
+	}
+
+	// Upstream call thành công
+	_, err := client.DoRequest(context.Background(), acc, domain.ServiceGemini, http.MethodPost, "/test", strings.NewReader("test"), "application/json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// ResilientUpstreamClient KHÔNG ĐƯỢC ghi nhận thành công/thất bại trực tiếp lên ManagedAccount
+	// (SessionRepository.Release là Single Source of Truth duy nhất)
+	success, failure, _, _ := acc.GetStats()
+	if success != 0 || failure != 0 {
+		t.Fatalf("expected 0 requests recorded by transport layer on account, got success=%d, failure=%d", success, failure)
+	}
+}

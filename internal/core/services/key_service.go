@@ -340,6 +340,59 @@ func (s *KeyService) ValidateKey(ctx context.Context, rawKey string, targetModel
 	return vKey, nil
 }
 
+// GetKeyByID tra cứu VirtualKey theo keyID
+func (s *KeyService) GetKeyByID(ctx context.Context, keyID string) (*domain.VirtualKey, error) {
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return nil, domain.ErrInvalidAPIKey
+	}
+	if keyID == "master" || keyID == "internal" {
+		return &domain.VirtualKey{
+			ID:                 keyID,
+			TenantID:           "admin_system",
+			KeyPrefix:          "master",
+			Name:               "Master Super Admin",
+			Role:               "admin",
+			RateLimitRPM:       -1,
+			DailyQuotaRequests: -1,
+			AllowedModels:      []string{"*"},
+			Scopes:             []string{domain.ScopeChat, domain.ScopeResponses, domain.ScopeAgent, domain.ScopeMemory, domain.ScopeBrowser, domain.ScopeShell, domain.ScopeAdmin},
+			AllowShell:         true,
+			RequireApproval:    false,
+			EnforceSandbox:     false,
+			AutoMergeAllowed:   true,
+			IsActive:           true,
+			CreatedAt:          time.Now().UTC(),
+		}, nil
+	}
+	return s.repo.FindByID(ctx, keyID)
+}
+
+// ValidateKeyByID xác thực trạng thái hoạt động, hạn ngạch và quyền truy cập mô hình theo keyID
+func (s *KeyService) ValidateKeyByID(ctx context.Context, keyID string, targetModel string) (*domain.VirtualKey, error) {
+	vKey, err := s.GetKeyByID(ctx, keyID)
+	if err != nil {
+		return nil, domain.ErrInvalidAPIKey
+	}
+	if !vKey.IsActive {
+		return nil, domain.ErrKeyRevoked
+	}
+	if vKey.IsExpired() {
+		return nil, domain.ErrKeyExpired
+	}
+	if targetModel != "" && !vKey.IsModelAllowed(targetModel) {
+		return nil, domain.ErrModelNotAllowed
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	if vKey.DailyQuotaRequests > 0 && vKey.LastUsedDate == today && vKey.UsedToday >= vKey.DailyQuotaRequests {
+		return nil, domain.ErrDailyQuotaExceeded
+	}
+	if vKey.MaxTokenQuota > 0 && vKey.TotalTokens >= vKey.MaxTokenQuota {
+		return nil, domain.ErrTokenQuotaExceeded
+	}
+	return vKey, nil
+}
+
 // ConsumeQuota tiêu thụ 1 lượt hạn ngạch trong ngày (Quota Decrementor)
 func (s *KeyService) ConsumeQuota(ctx context.Context, keyID string) (int, error) {
 	if keyID == "master" {

@@ -285,9 +285,11 @@ func (m *MemoryAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 	isOwner := run.WorkerID == workerID
 	if run.Status == domain.RunStatusQueued ||
 		(run.Status == domain.RunStatusRunning && (isOwner || isExpired)) ||
-		(run.Status == domain.RunStatusRecovering && (isOwner || isExpired)) {
+		(run.Status == domain.RunStatusRecovering && (isOwner || isExpired)) ||
+		(run.Status == domain.RunStatusWaitingForTool && (isOwner || isExpired)) {
 		run.Status = domain.RunStatusRunning
 		run.WorkerID = workerID
+		run.ClaimGeneration++
 		lease := now.Add(leaseDuration)
 		run.LeaseUntil = &lease
 		run.HeartbeatAt = &now
@@ -306,7 +308,7 @@ func (m *MemoryAgentRunRepository) RenewLease(ctx context.Context, runID, worker
 		return false, fmt.Errorf("%w: %s", ErrRunNotFound, runID)
 	}
 
-	if run.Status == domain.RunStatusRunning && run.WorkerID == workerID {
+	if (run.Status == domain.RunStatusRunning || run.Status == domain.RunStatusRecovering) && run.WorkerID == workerID {
 		now := time.Now()
 		lease := now.Add(leaseDuration)
 		run.LeaseUntil = &lease
@@ -315,6 +317,35 @@ func (m *MemoryAgentRunRepository) RenewLease(ctx context.Context, runID, worker
 		return true, nil
 	}
 	return false, nil
+}
+
+func (m *MemoryAgentRunRepository) UpdateOwned(ctx context.Context, run *domain.AgentRun, workerID string, claimGeneration int64) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if run == nil || run.ID == "" {
+		return false, fmt.Errorf("run không hợp lệ")
+	}
+
+	existing, ok := m.runs[run.ID]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrRunNotFound, run.ID)
+	}
+
+	if existing.Status == domain.RunStatusCancelled {
+		return false, nil
+	}
+
+	if existing.WorkerID != workerID || existing.ClaimGeneration != claimGeneration {
+		return false, nil // Ownership lost!
+	}
+
+	run.UpdatedAt = time.Now()
+	run.WorkerID = existing.WorkerID
+	run.ClaimGeneration = existing.ClaimGeneration
+	copied := *run
+	m.runs[run.ID] = &copied
+	return true, nil
 }
 
 func (m *MemoryAgentRunRepository) FindByTenantAndIdempotencyKey(ctx context.Context, tenantID, key string) (*domain.AgentRun, error) {

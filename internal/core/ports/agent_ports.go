@@ -91,6 +91,7 @@ type AgentRunRepository interface {
 	CancelForTenant(ctx context.Context, tenantID, runID string) error
 	ClaimRun(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error)
 	RenewLease(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error)
+	UpdateOwned(ctx context.Context, run *domain.AgentRun, workerID string, claimGeneration int64) (bool, error)
 	FindByTenantAndIdempotencyKey(ctx context.Context, tenantID, key string) (*domain.AgentRun, error)
 }
 
@@ -99,6 +100,8 @@ type AgentJobService interface {
 	Start(ctx context.Context) error
 	Shutdown(ctx context.Context) error
 	RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun, error)
+	StartRecoveryLoop(ctx context.Context, interval time.Duration)
+	ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRun, error)
 	SubmitRun(ctx context.Context, goal string, opts domain.AgentRunOptions, idempotencyKey string) (*domain.AgentRun, error)
 	GetRun(ctx context.Context, runID string) (*domain.AgentRun, error)
 	GetRunForTenant(ctx context.Context, tenantID, runID string) (*domain.AgentRun, error)

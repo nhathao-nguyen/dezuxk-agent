@@ -61,6 +61,13 @@ func VirtualKeyAuthMiddleware(keyUseCase ports.KeyUseCase) func(http.Handler) ht
 				return
 			}
 
+			// Nếu endpoint yêu cầu model (/v1/chat/completions, /v1/responses) nhưng khóa bị giới hạn model và không xác định được model:
+			isModelEndpoint := (r.Method == http.MethodPost) && (strings.HasPrefix(r.URL.Path, "/v1/chat/completions") || strings.HasPrefix(r.URL.Path, "/v1/responses"))
+			if isModelEndpoint && targetModel == "" && !vKey.IsModelAllowed("") {
+				writeAuthError(w, http.StatusForbidden, "model_not_allowed", "Khóa API bị giới hạn danh sách mô hình và không thể xác định mô hình đích trong yêu cầu.")
+				return
+			}
+
 			// 4. Tiêu thụ 1 lượt hạn ngạch ngày (Quota Decrementor) chỉ đối với các tác vụ tính phí (/v1/chat/completions)
 			if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/chat/completions") {
 				if _, err := keyUseCase.ConsumeQuota(r.Context(), vKey.ID); err != nil {
@@ -136,24 +143,81 @@ func RequireAdmin(next http.Handler) http.Handler {
 func extractTargetModel(r *http.Request) string {
 	// Kiểm tra query parameter
 	if m := r.URL.Query().Get("model"); m != "" {
-		return m
+		return strings.TrimSpace(m)
 	}
 
-	// Đọc thân JSON (tối đa 16MB) và phục hồi hoàn chỉnh r.Body bằng io.MultiReader
+	// Đọc thân JSON (hỗ trợ payload lớn tới 50MB) bằng streaming token scanner không làm cạn kiệt bộ nhớ
 	if r.Method == http.MethodPost && strings.Contains(r.Header.Get("Content-Type"), "application/json") && r.Body != nil {
-		const maxPeek = 16 * 1024 * 1024
-		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxPeek))
-		if err == nil {
-			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), r.Body))
-			var peek struct {
-				Model string `json:"model"`
+		const maxScan = 50 * 1024 * 1024
+		buf := new(bytes.Buffer)
+		tee := io.TeeReader(io.LimitReader(r.Body, maxScan), buf)
+		model := parseModelFromJSONReader(tee)
+		r.Body = io.NopCloser(io.MultiReader(buf, r.Body))
+		return model
+	}
+	return ""
+}
+
+func parseModelFromJSONReader(reader io.Reader) string {
+	dec := json.NewDecoder(reader)
+	t, err := dec.Token()
+	if err != nil {
+		return ""
+	}
+	if delim, ok := t.(json.Delim); !ok || delim != '{' {
+		return ""
+	}
+
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return ""
+		}
+		key, ok := t.(string)
+		if !ok {
+			return ""
+		}
+		if key == "model" {
+			tVal, err := dec.Token()
+			if err != nil {
+				return ""
 			}
-			if err := json.Unmarshal(bodyBytes, &peek); err == nil && peek.Model != "" {
-				return peek.Model
+			if strVal, ok := tVal.(string); ok {
+				return strings.TrimSpace(strVal)
 			}
+			return ""
+		}
+		// Bỏ qua giá trị của key (hỗ trợ object lồng nhau / array lớn tùy ý mà không tốn bộ nhớ)
+		if err := skipJSONValue(dec); err != nil {
+			return ""
 		}
 	}
 	return ""
+}
+
+func skipJSONValue(dec *json.Decoder) error {
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if _, ok := t.(json.Delim); !ok {
+		return nil
+	}
+	depth := 1
+	for depth > 0 {
+		t, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := t.(json.Delim); ok {
+			if d == '{' || d == '[' {
+				depth++
+			} else if d == '}' || d == ']' {
+				depth--
+			}
+		}
+	}
+	return nil
 }
 
 func writeAuthError(w http.ResponseWriter, status int, code, message string) {

@@ -246,7 +246,6 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 
 		// 2. Thành công
 		if callErr == nil {
-			account.RecordSuccess(0)
 			s.sessionRepo.ReleaseWriteLease(account, domain.ServiceGemini)
 			s.sessionRepo.Release(account, nil)
 			return nil
@@ -261,7 +260,6 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 			coolingDuration = 60 * time.Second
 		}
 
-		account.RecordFailure(class, 0)
 		if class == domain.ClassRateLimited {
 			_ = account.MoveService(domain.ServiceGemini, domain.StateCooling)
 			account.CoolService(domain.ServiceGemini, time.Now().Add(coolingDuration), class)
@@ -457,8 +455,14 @@ func (s *ChatService) streamRound(
 	}
 
 	if s.keyUseCase != nil && usage != nil {
+		keyID := ""
 		if vKey := domain.VirtualKeyFromContext(ctx); vKey != nil {
-			_ = s.keyUseCase.RecordTokenUsage(ctx, vKey.ID, usage.PromptTokens, usage.CompletionTokens)
+			keyID = vKey.ID
+		} else if bill, ok := domain.BillingIdentityFromContext(ctx); ok && bill.KeyID != "" {
+			keyID = bill.KeyID
+		}
+		if keyID != "" {
+			_ = s.keyUseCase.RecordTokenUsage(ctx, keyID, usage.PromptTokens, usage.CompletionTokens)
 		}
 	}
 
@@ -634,8 +638,14 @@ func (s *ChatService) syncRound(
 	}
 
 	if s.keyUseCase != nil && usage != nil {
+		keyID := ""
 		if vKey := domain.VirtualKeyFromContext(ctx); vKey != nil {
-			_ = s.keyUseCase.RecordTokenUsage(ctx, vKey.ID, usage.PromptTokens, usage.CompletionTokens)
+			keyID = vKey.ID
+		} else if bill, ok := domain.BillingIdentityFromContext(ctx); ok && bill.KeyID != "" {
+			keyID = bill.KeyID
+		}
+		if keyID != "" {
+			_ = s.keyUseCase.RecordTokenUsage(ctx, keyID, usage.PromptTokens, usage.CompletionTokens)
 		}
 	}
 

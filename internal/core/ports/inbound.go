@@ -89,6 +89,8 @@ type KeyUseCase interface {
 	ListActiveKeys(ctx context.Context) ([]*domain.VirtualKey, error)
 	RevokeKey(ctx context.Context, id string) error
 	ValidateKey(ctx context.Context, rawKey string, targetModel string) (*domain.VirtualKey, error)
+	ValidateKeyByID(ctx context.Context, keyID string, targetModel string) (*domain.VirtualKey, error)
+	GetKeyByID(ctx context.Context, keyID string) (*domain.VirtualKey, error)
 	ConsumeQuota(ctx context.Context, keyID string) (int, error)
 	RecordTokenUsage(ctx context.Context, keyID string, promptTokens, completionTokens int) error
 	GetTokenUsageHistory(ctx context.Context, keyID string, days int) ([]domain.KeyTokenUsage, error)

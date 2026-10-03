@@ -211,6 +211,7 @@ func Run(configPath string, portOverride int) error {
 	policyEngine := policy.NewPolicyEngine(toolRegistry, nil)
 	agentRunner := agent.NewRunner(chatService, toolRegistry, nil)
 	agentRunner.SetPolicyEngine(policyEngine)
+	agentRunner.SetKeyUseCase(keyService)
 
 	var checkpointRepo ports.CheckpointRepository
 	var memoryRepo ports.MemoryRepository
