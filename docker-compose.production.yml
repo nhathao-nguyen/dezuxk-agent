@@ -62,18 +62,47 @@ services:
     networks:
       - dezuxk-backend
 
+  # 3b. MinIO Init - Tự động tạo và bảo vệ bucket S3 cho self-hosted mode (Idempotent & Private)
+  minio-init:
+    profiles:
+      - self-hosted
+    image: minio/mc:latest
+    container_name: dezuxk-prod-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_started
+    env_file:
+      - .env.production
+    entrypoint: >
+      /bin/sh -c "
+      echo 'Đang chờ MinIO server sẵn sàng...'
+      until /usr/bin/mc alias set local http://minio:9000 \"$$DEZUXK_S3_ACCESS_KEY\" \"$$DEZUXK_S3_SECRET_KEY\"; do
+        sleep 2
+      done
+      echo 'Khởi tạo bucket lưu trữ media: '\"$$DEZUXK_S3_BUCKET\"
+      /usr/bin/mc mb --ignore-existing local/\"$$DEZUXK_S3_BUCKET\"
+      /usr/bin/mc anonymous set none local/\"$$DEZUXK_S3_BUCKET\"
+      echo 'Bucket '\"$$DEZUXK_S3_BUCKET\"' đã được khởi tạo an toàn (Private).'
+      "
+    networks:
+      - dezuxk-backend
+
   # ----------------------------------------------------------------------------
   # TẦNG CỤM GATEWAY APPLICATION (Node A / Node B / Node C)
   # Cả 3 node đều dùng chung Master Key, PostgreSQL, Redis và S3 Media Storage
   # ----------------------------------------------------------------------------
 
-  # 4. Gateway Node A
+  # 4. Gateway Node A (Đảm nhiệm Profile/CDP control plane & Agent/Chat data plane)
   gateway-a:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: dezuxk-prod-gateway-a
     restart: unless-stopped
+    command:
+      - "-config"
+      - "/app/configs/config.production.yaml"
     env_file:
       - .env.production
     environment:
@@ -85,11 +114,12 @@ services:
       redis:
         condition: service_healthy
         required: false
-      minio:
-        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
         required: false
     volumes:
-      - ./profiles:/app/profiles
+      - ./configs/config.production.yaml:/app/configs/config.production.yaml:ro
+      - ./profiles/gateway-a:/app/profiles
     security_opt:
       - seccomp=unconfined
     shm_size: '1gb'
@@ -102,13 +132,16 @@ services:
     networks:
       - dezuxk-backend
 
-  # 5. Gateway Node B
+  # 5. Gateway Node B (Agent/Chat data plane load-balanced)
   gateway-b:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: dezuxk-prod-gateway-b
     restart: unless-stopped
+    command:
+      - "-config"
+      - "/app/configs/config.production.yaml"
     env_file:
       - .env.production
     environment:
@@ -120,11 +153,12 @@ services:
       redis:
         condition: service_healthy
         required: false
-      minio:
-        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
         required: false
     volumes:
-      - ./profiles:/app/profiles
+      - ./configs/config.production.yaml:/app/configs/config.production.yaml:ro
+      - ./profiles/gateway-b:/app/profiles
     security_opt:
       - seccomp=unconfined
     shm_size: '1gb'
@@ -137,13 +171,16 @@ services:
     networks:
       - dezuxk-backend
 
-  # 6. Gateway Node C
+  # 6. Gateway Node C (Agent/Chat data plane load-balanced)
   gateway-c:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: dezuxk-prod-gateway-c
     restart: unless-stopped
+    command:
+      - "-config"
+      - "/app/configs/config.production.yaml"
     env_file:
       - .env.production
     environment:
@@ -155,11 +192,12 @@ services:
       redis:
         condition: service_healthy
         required: false
-      minio:
-        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
         required: false
     volumes:
-      - ./profiles:/app/profiles
+      - ./configs/config.production.yaml:/app/configs/config.production.yaml:ro
+      - ./profiles/gateway-c:/app/profiles
     security_opt:
       - seccomp=unconfined
     shm_size: '1gb'

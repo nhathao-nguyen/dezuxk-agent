@@ -67,9 +67,15 @@ func loadEnvFile(path string) error {
 
 func main() {
 	envFile := flag.String("env", ".env.production", "Đường dẫn file .env.production")
-	configFile := flag.String("config", "configs/config.production.example.yaml", "Đường dẫn file cấu hình YAML")
+	configFile := flag.String("config", "configs/config.production.yaml", "Đường dẫn file cấu hình YAML")
 	skipInfra := flag.Bool("skip-infra", false, "Chỉ kiểm tra biến môi trường và config (bỏ qua ping mạng)")
 	flag.Parse()
+
+	// Kiểm tra bắt buộc file cấu hình production phải tồn tại thực sự (không fallback example)
+	if _, err := os.Stat(*configFile); os.IsNotExist(err) {
+		fmt.Printf("%s not found.\n\nCreate it with:\n\ncp configs/config.production.example.yaml %s\n\n", *configFile, *configFile)
+		os.Exit(1)
+	}
 
 	// Load env file if present
 	if *envFile != "" {

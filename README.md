@@ -232,23 +232,37 @@ Dezuxk AI Gateway phân tách rõ ràng giữa môi trường kiểm thử và m
 - **Kiến trúc**: 3 Gateway Nodes (A/B/C) cân bằng tải qua Nginx Load Balancer, dùng chung PostgreSQL (source-of-truth), Redis (distributed coordination) và S3/MinIO (shared media).
 - **Bảo mật**:
   - Không hardcode secret vào compose hay git repository.
-  - Sử dụng file cấu hình môi trường `.env.production` (được gitignore).
-  - Khóa `DEZUXK_MASTER_KEY` đồng nhất giữa các node để mã hóa AES-256-GCM toàn bộ Google session/cookie vào PostgreSQL.
-  - Ngăn chặn tuyệt đối cờ `DEZUXK_TEST_MODE=true` trong production (fail-fast startup validation).
-- **Quy trình Khởi động Production**:
-  ```bash
+  - Sử dụng file .env.production và configs/config.production.yaml (cả 2 đều được gitignore).
+  - Khóa DEZUXK_MASTER_KEY đồng nhất giữa các node để mã hóa AES-256-GCM toàn bộ Google session/cookie vào PostgreSQL.
+  - Ngăn chặn tuyệt đối cờ DEZUXK_TEST_MODE=true trong production (fail-fast startup validation).
+- **Phân định Quyền sở hữu Profile**: Gateway Node A đảm nhiệm độc quyền Profile/CDP Control Plane (Nginx route ^~ /v1/profiles về Node A; thư mục mount riêng biệt profiles/gateway-a, profiles/gateway-b, profiles/gateway-c). AI/Chat data-plane vẫn HA round-robin trên toàn cụm.
+- **Quy trình Khởi động Production (First-Boot)**:
+  `ash
   # Bước 1: Sao chép file cấu hình mẫu và điền secret thực tế
   cp configs/production.env.example .env.production
+  cp configs/config.production.example.yaml configs/config.production.yaml
+  mkdir -p profiles/gateway-a profiles/gateway-b profiles/gateway-c
 
-  # Bước 2: Chạy kiểm tra tiền trạm bảo đảm tính hợp lệ của toàn bộ hạ tầng
-  ./scripts/production-preflight.sh
+  # Bước 2: Chạy kiểm tra tiền trạm cấu hình (config-only)
+  ./scripts/production-preflight.sh --skip-infra
 
-  # Bước 3: Khởi động cụm production
+  # Bước 3: Khởi động tầng dữ liệu (Postgres, Redis, MinIO và minio-init tạo bucket tự động)
   docker compose \
     --env-file .env.production \
     -f docker-compose.production.yml \
+    --profile self-hosted \
+    up -d postgres redis minio minio-init
+
+  # Bước 4: Chạy kiểm tra tiền trạm toàn diện hạ tầng
+  ./scripts/production-preflight.sh
+
+  # Bước 5: Khởi động toàn bộ cụm Gateways và Nginx Load Balancer
+  docker compose \
+    --env-file .env.production \
+    -f docker-compose.production.yml \
+    --profile self-hosted \
     up -d --build
-  ```
+  `
 - **Tài liệu Chi tiết**:
   - [Hướng Dẫn Triển Khai Production Real Data](file:///d:/nhathao/Vibe/dezuxk-agent/docs/PRODUCTION_REAL_DATA_SETUP.md)
   - [Kiến trúc Phân tán Multi-Node](file:///d:/nhathao/Vibe/dezuxk-agent/docs/MULTI_NODE_ARCHITECTURE.md)

@@ -27,6 +27,7 @@ test_project/
 
 # Local Secrets & Configurations
 configs/config.yaml
+configs/config.production.yaml
 .env
 *.env
 .env.*

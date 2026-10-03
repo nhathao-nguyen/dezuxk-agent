@@ -274,11 +274,18 @@ func BuildInfrastructure(ctx context.Context, cfg *config.Config, tokenExtractor
 			_ = infra.Close()
 			return nil, fmt.Errorf("khởi tạo S3StorageAdapter thất bại: %w", err)
 		}
-		for i := 0; i < 5; i++ {
-			if err := s3Adapter.EnsureBucketExists(ctx); err == nil {
-				break
+		if cfg.IsProduction() {
+			if err := s3Adapter.Ping(ctx); err != nil {
+				_ = infra.Close()
+				return nil, fmt.Errorf("không thể kết nối S3/MinIO bucket (%s): %w", cfg.Media.S3.Bucket, err)
 			}
-			time.Sleep(500 * time.Millisecond)
+		} else {
+			for i := 0; i < 5; i++ {
+				if err := s3Adapter.EnsureBucketExists(ctx); err == nil {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
 		infra.Media = s3Adapter
 		log.Println("[Media] Đã kích hoạt S3/MinIO Shared Media Adapter.")

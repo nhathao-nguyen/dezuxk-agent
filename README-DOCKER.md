@@ -167,27 +167,55 @@ Payload chấp nhận các trường:
 
 ---
 
-## 🛠️ 6. Các Lệnh Vận Hành Thường Dùng
+## 🛠️ 6. Quy Trình Khởi Động Multi-Node Production Dữ Liệu Thật (First-Boot)
 
-### Khởi động Cụm Multi-Node Production:
-```bash
-# 1. Kiểm tra tiền trạm cấu hình trước khi chạy
+### Bước 1: Khởi tạo file cấu hình và thư mục profile riêng biệt
+`ash
+# Copy template môi trường và cấu hình production
+cp configs/production.env.example .env.production
+cp configs/config.production.example.yaml configs/config.production.yaml
+
+# Tạo thư mục Chrome profile riêng cho từng Gateway Node (ngăn chặn xung đột Chromium user-data-dir)
+mkdir -p profiles/gateway-a profiles/gateway-b profiles/gateway-c
+`
+
+### Bước 2: Kiểm tra tiền trạm cấu hình (Config-only pre-flight)
+`ash
+./scripts/production-preflight.sh --skip-infra
+`
+
+### Bước 3: Khởi động tầng dữ liệu (Postgres, Redis, MinIO và minio-init)
+`ash
+# Service minio-init tự động tạo bucket DEZUXK_S3_BUCKET an toàn (idempotent, private)
+docker compose \
+  --env-file .env.production \
+  -f docker-compose.production.yml \
+  --profile self-hosted \
+  up -d postgres redis minio minio-init
+`
+
+### Bước 4: Kiểm tra tiền trạm toàn diện hạ tầng
+`ash
 ./scripts/production-preflight.sh
+`
 
-# 2. Khởi động cụm 3 Gateway + Nginx Load Balancer
-docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
+### Bước 5: Khởi động toàn bộ cụm Gateways và Nginx Load Balancer
+`ash
+docker compose \
+  --env-file .env.production \
+  -f docker-compose.production.yml \
+  --profile self-hosted \
+  up -d --build
+`
 
-# 3. Theo dõi trạng thái cụm
+### Bước 6: Theo dõi và Quản trị Cụm
+`ash
+# Kiểm tra trạng thái các service trong cụm
 docker compose -f docker-compose.production.yml ps
+
+# Xem logs thời gian thực
 docker compose -f docker-compose.production.yml logs -f loadbalancer gateway-a
-```
 
-### Dừng hoặc Cập Nhật Cụm:
-```bash
-# Dừng cụm mà không mất dữ liệu bền vững
+# Dừng cụm mà không mất dữ liệu bền vững (PostgreSQL, Redis data, MinIO media data)
 docker compose -f docker-compose.production.yml down
-
-# Cập nhật code mới nhất và build lại
-git pull
-docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
-```
+`

@@ -10,35 +10,39 @@ Tài liệu này là hướng dẫn toàn diện dành cho DevOps, SRE và Produ
                                 DNS: ai.yourdomain.com
                                           │
                                           ▼
-                                TLS Termination / ALB / Nginx
+                                TLS / Reverse Proxy / Nginx
                                      (Port 80 / 443)
                                           │
-                     ┌────────────────────┼────────────────────┐
-                     │ (Round-Robin, SSE, Keepalive, Failover) │
-                     ▼                    ▼                    ▼
-             Gateway Node A       Gateway Node B       Gateway Node C
-             (gateway-node-a)     (gateway-node-b)     (gateway-node-c)
-                     │                    │                    │
-                     └────────────────────┼────────────────────┘
+                   ┌──────────────────────┴──────────────────────┐
+                   │                                             │
+                   ▼ (Độc quyền: /v1/profiles)                   ▼ (Cân bằng tải Round-Robin: /v1/chat/completions, /v1/agent/runs, /)
+            Gateway Node A                                dezuxk_cluster (HA Upstream)
+     [Profile/CDP Control Plane]                          ┌──────────────┴──────────────┐
+     [+ AI/Chat Data Plane]                               ▼                             ▼
+   (./profiles/gateway-a volume)                    Gateway Node B                Gateway Node C
+            │                                     (./profiles/gateway-b)        (./profiles/gateway-c)
+            │                                             │                             │
+            └─────────────────────────────┬───────────────┴─────────────────────────────┘
                                           │
-                     ┌────────────────────┼────────────────────┐
-                     ▼                    ▼                    ▼
-           PostgreSQL 16 (Pool)        Redis 7           AWS S3 / MinIO
-         [Single Source of Truth]   [Coordination]      [Shared Media]
-                     │                    │
-                     ▼                    ▼
-          • Sessions (AES-256-GCM) • Distributed Locks
-          • Virtual API Keys       • Rate Limiter (Lua)
-          • Agent Runs & Events    • Event Bus SSE Fanout
-          • Fencing Token Leases   • Leader Coordinator
-          • Checkpoints & Memory
+                   ┌──────────────────────┼──────────────────────┐
+                   ▼                      ▼                      ▼
+         PostgreSQL 16 (Pool)          Redis 7             AWS S3 / MinIO
+       [Single Source of Truth]     [Coordination]        [Shared Media]
+                   │                      │                      │
+                   ▼                      ▼                      ▼
+        • Sessions (AES-256-GCM)   • Distributed Locks    • Multimodal Images
+        • Virtual API Keys         • Rate Limiter (Lua)   • Uploaded Documents
+        • Agent Runs & Events      • Event Bus SSE Fanout • Vision Assets
+        • Fencing Token Leases     • Leader Coordinator
+        • Checkpoints & Memory
 ```
 
 ### Nguyên tắc thiết kế cốt lõi:
 1. **Zero Secret Hardcoding**: Không commit bất kỳ mật khẩu, API key hay session cookie nào lên Git.
 2. **Không Lưu Cookie Vào File Phẳng**: Sau khi ingest, cookie Google được mã hóa đối xứng AES-256-GCM và lưu trữ vào PostgreSQL. Không có file `cookies.json` hay `gemini_cookie.txt`.
 3. **Phân tách Rạch ròi Test và Production**: File `docker-compose.multinode.yml` giữ nguyên cho CI/test. File `docker-compose.production.yml` là deployment riêng biệt cho production.
-4. **Fail-Fast Safety**: Cụm production từ chối khởi động nếu phát hiện cờ `DEZUXK_TEST_MODE=true`, thiếu khóa bảo mật, mật khẩu mặc định, hoặc cấu hình lưu trữ media cục bộ.
+4. **Cấu hình Production Rõ ràng**: Cụm production sử dụng rõ ràng `configs/config.production.yaml` và `.env.production`. Cả 2 file này đều được gitignore an toàn.
+5. **Fail-Fast Safety**: Cụm production từ chối khởi động nếu phát hiện cờ `DEZUXK_TEST_MODE=true`, thiếu khóa bảo mật, mật khẩu mặc định, hoặc cấu hình lưu trữ media cục bộ.
 
 ---
 
@@ -50,7 +54,7 @@ Tài liệu này là hướng dẫn toàn diện dành cho DevOps, SRE và Produ
 Thích hợp cho VPS riêng biệt (Hetzner, OVH, DigitalOcean, Linode) muốn chạy toàn bộ cụm trên Docker:
 - PostgreSQL 16 container (nội bộ, không mở port công khai)
 - Redis 7 container (nội bộ, bảo vệ bằng password)
-- MinIO S3-compatible container (nội bộ)
+- MinIO S3-compatible container + service tự động tạo bucket `minio-init` (nội bộ)
 - Gateway A, B, C (chạy ngầm trong Docker network `dezuxk-backend`)
 - Nginx Load Balancer (chỉ mở port 80/443 ra ngoài host)
 
@@ -60,18 +64,21 @@ Thích hợp cho VPS riêng biệt (Hetzner, OVH, DigitalOcean, Linode) muốn c
 Thích hợp cho kiến trúc Cloud quy mô lớn (AWS, GCP, Supabase, Neon, Upstash, Cloudflare):
 - **Database**: AWS Aurora PostgreSQL / RDS, Supabase, Neon
 - **Distributed Cache**: AWS ElastiCache Redis, Upstash Redis, Redis Cloud
-- **Object Storage**: AWS S3, Cloudflare R2, MinIO Cluster
+- **Object Storage**: AWS S3, Cloudflare R2, MinIO Cluster ngoài
 - **Gateways**: Docker Compose chỉ khởi chạy Gateway A, B, C và Nginx (không khởi chạy postgres/redis/minio local).
+- **Lưu ý S3**: Hệ thống KHÔNG tự động tạo bucket trên AWS S3 / Cloudflare R2; DevOps chịu trách nhiệm tạo bucket trước theo chính sách đám mây.
 
 *Cách bật*: Đặt `COMPOSE_PROFILES=external` trong `.env.production` và điền endpoint của các dịch vụ cloud.
 
 ---
 
-## 📋 3. Bảng Kiểm Tra Biến Môi Trường (User-Fill Checklist)
+## 📋 3. Bảng Kiểm Tra Biến Môi Trường & Cấu Hình
 
 Sao chép template cấu hình:
 ```bash
 cp configs/production.env.example .env.production
+cp configs/config.production.example.yaml configs/config.production.yaml
+mkdir -p profiles/gateway-a profiles/gateway-b profiles/gateway-c
 ```
 
 | Biến Môi Trường | Bắt Buộc? | Lấy Ở Đâu? | Giá Trị Mẫu | Là Secret? | Giống Nhau Trên Mọi Node? |
@@ -98,76 +105,124 @@ cp configs/production.env.example .env.production
 | `DEZUXK_POSTGRES_SSLMODE`| **Có** | SSL Mode (`disable` nếu docker local, `require` nếu cloud) | `disable` hoặc `require` | Không | **CÓ** |
 | `DEZUXK_DISTRIBUTED_ENABLED` | **Có** | Bật cơ chế điều phối phân tán | `true` | Không | **CÓ** |
 | `DEZUXK_REDIS_ADDR` | **Có** | Địa chỉ Redis (`redis:6379` nếu Mode A) | `redis:6379` hoặc `elasticache.internal:6379` | Không | **CÓ** |
-| `DEZUXK_REDIS_PASSWORD`| Tùy chọn | Mật khẩu xác thực Redis | `redis-prod-secure-password-2026` | **CÓ** | **CÓ** |
-| `DEZUXK_MEDIA_DRIVER` | **Có** | Bắt buộc `s3` cho multi-node cluster | `s3` | Không | **CÓ** |
-| `DEZUXK_S3_ENDPOINT` | Tùy chọn | Endpoint MinIO / R2 (để trống nếu dùng AWS S3) | `http://minio:9000` hoặc `https://r2.cloudflarestorage.com` | Không | **CÓ** |
-| `DEZUXK_S3_BUCKET` | **Có** | Tên bucket S3 lưu trữ media | `dezuxk-prod-media` | Không | **CÓ** |
-| `DEZUXK_S3_ACCESS_KEY` | **Có** | S3 Access Key / MinIO Root User | `prod-s3-access-key-id` | **CÓ** | **CÓ** |
-| `DEZUXK_S3_SECRET_KEY` | **Có** | S3 Secret Access Key / MinIO Root Pass | `prod-s3-secret-access-key` | **CÓ** | **CÓ** |
-| `DEZUXK_S3_USE_PATH_STYLE` | **Có** | Bật cho MinIO/Ceph, tắt cho AWS S3 | `true` | Không | **CÓ** |
-| `DEZUXK_ALLOWED_ORIGINS` | **Có** | Tên miền frontend cụ thể (CẤM `*`) | `https://ai.yourdomain.com` | Không | **CÓ** |
-| `DEZUXK_TRUSTED_PROXIES` | **Có** | Subnet tin cậy chuyển tiếp IP client | `127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` | Không | **CÓ** |
-| `COMPOSE_PROFILES` | **Có** | `self-hosted` hoặc `external` | `self-hosted` | Không | N/A |
-| `DEZUXK_LB_PORT` | Tùy chọn | Port public host của Load Balancer | `8080` (hoặc `80`) | Không | N/A |
-
-*Ghi chú (*):* Nếu đã cung cấp `DEZUXK_POSTGRES_DSN`, hệ thống sẽ ưu tiên dùng DSN.
+| `DEZUXK_REDIS_PASSWORD`| **Có** | Mật khẩu xác thực Redis | `redis-strong-prod-password-2026` | **CÓ** | **CÓ** |
+| `DEZUXK_MEDIA_DRIVER` | **Có** | Cố định `s3` cho cụm phân tán | `s3` | Không | **CÓ** |
+| `DEZUXK_S3_BUCKET` | **Có** | Tên bucket lưu trữ media | `dezuxk-prod-media` | Không | **CÓ** |
+| `DEZUXK_S3_ACCESS_KEY`| **Có** | Access Key của S3/MinIO | `s3-access-key-here` | **CÓ** | **CÓ** |
+| `DEZUXK_S3_SECRET_KEY`| **Có** | Secret Key của S3/MinIO | `s3-secret-key-here` | **CÓ** | **CÓ** |
 
 ---
 
-## 🔐 4. An Toàn Master Key (Critical Master Key Safety)
+## 🔐 4. Đồng Nhất Bảo Mật Session Qua Secret Vault
 
-`DEZUXK_MASTER_KEY` là khóa bí mật sống còn của hệ thống:
-1. **Quy tắc Tính nhất quán**: Cả 3 node `gateway-a`, `gateway-b`, `gateway-c` **bắt buộc** phải dùng chung một `DEZUXK_MASTER_KEY`.
-2. **Hậu quả Mất Master Key**:
-   > **CẢNH BÁO QUAN TRỌNG:** Nếu mất `DEZUXK_MASTER_KEY`, toàn bộ session cookies Google/Gemini đã mã hóa trong PostgreSQL **hoàn toàn không thể khôi phục hay giải mã**! Dữ liệu backup database mà không có Master Key tương ứng là vô giá trị.
-3. **Không Random Key Trong Production**: Gateway từ chối khởi động nếu thiếu Master Key trong production. Không tự sinh khóa RAM ngẫu nhiên.
-4. **Kiểm tra Fingerprint**: Khi khởi động, Gateway ghi nhận log:
+Toàn bộ phiên làm việc của Google (Cookies, CSRF Token `SNlM0e`) đều được mã hóa bằng AES-256-GCM trước khi ghi vào PostgreSQL:
+1. `DEZUXK_MASTER_KEY` **BẮT BUỘC PHẢI GIỐNG NHAU** trên cả Gateway Node A, B, C.
+2. Khi khởi động, Gateway in ra mã kiểm tra dấu vân tay khóa (key fingerprint):
    ```text
    [Security Vault] Đã khởi tạo AES-256-GCM Vault (vault_key_fingerprint=a1b2c3d4e5f67890)
    ```
-   Đây là mã băm SHA-256 rút gọn (non-reversible). Bạn có thể kiểm tra log của Node A, B, C: nếu `vault_key_fingerprint` trùng nhau thì cụm đã đồng nhất khóa an toàn.
+   Nếu `vault_key_fingerprint` giữa các node trùng khớp, cụm đã đồng nhất khóa an toàn.
 
 ---
 
-## 🚀 5. Quy Trình Khởi Động Lần Đầu (First-Boot Flow)
+## 🔄 5. Vòng Đời Khởi Động Lần Đầu (Production First-Boot Lifecycle)
+
+### Sơ đồ quy trình chuẩn (Deterministic First-Boot Pipeline):
 
 ```text
-[1. Copy env template] ──> [2. Điền secrets thật] ──> [3. Chạy pre-flight check]
-                                                                │
-                                                                ▼ (PASS)
-[5. /health = 200] <── [Postgres Migrations tự chạy] <── [4. docker compose up]
+[Step 1-3. Tạo .env.production & configs/config.production.yaml, điền secrets]
          │
          ▼
-[6. /ready = 503] (Bình thường vì chưa có tài khoản Google)
+[Step 4. Preflight chỉ kiểm tra cấu hình: ./scripts/production-preflight.sh --skip-infra]
          │
          ▼
-[7. Nạp Google Profile qua CDP hoặc API /ingest]
+[Step 5. Khởi động tầng dữ liệu: Postgres + Redis + MinIO + MinIO-init]
+         │  (minio-init tự động tạo bucket DEZUXK_S3_BUCKET và set private)
+         ▼
+[Step 6. Preflight toàn diện hạ tầng: ./scripts/production-preflight.sh]
+         │  (Postgres pool ping + Redis ping + MinIO S3 HeadBucket -> PASS)
+         ▼
+[Step 7. Khởi động toàn cụm: Gateway A/B/C + Nginx Load Balancer]
          │
          ▼
-[8. Gateway mã hóa AES-256-GCM & lưu PostgreSQL]
+[Step 8. Kiểm tra ban đầu: /health = 200, /ready = 503]
+         │  (503 là bình thường vì chưa có tài khoản Google nào trong database)
+         ▼
+[Step 9. Nạp tài khoản Google qua /v1/profiles (Định tuyến cố định về Gateway Node A)]
+         │  (Session mã hóa AES-256-GCM lưu vào PostgreSQL làm Single Source of Truth)
+         ▼
+[Step 10. Model Discovery thành công tự động trên toàn cụm A/B/C]
          │
          ▼
-[9. Model discovery thành công] ──> [10. /ready = 200]
-                                           │
-                                           ▼
-                    [11. Sẵn sàng nhận traffic /v1/chat/completions]
+[Step 11. /ready = 200 OK — Sẵn sàng nhận traffic /v1/chat/completions]
 ```
 
 ### Các bước thực hiện chi tiết:
 
-#### Bước 1: Chuẩn bị file môi trường
+#### Bước 1: Chuẩn bị file môi trường và file cấu hình production
 ```bash
+# 1. Sao chép và phân quyền file biến môi trường
 cp configs/production.env.example .env.production
 chmod 600 .env.production
-nano .env.production
+
+# 2. Sao chép file cấu hình production chuyên biệt
+cp configs/config.production.example.yaml configs/config.production.yaml
+chmod 600 configs/config.production.yaml
+
+# 3. Tạo thư mục lưu trữ profile trình duyệt riêng biệt cho từng Gateway Node
+mkdir -p profiles/gateway-a profiles/gateway-b profiles/gateway-c
+```
+> **BẢO MẬT:** Cả `.env.production` và `configs/config.production.yaml` đều đã được đưa vào `.gitignore`. Tuyệt đối không commit các file cấu hình thật lên Git repository.
+
+#### Bước 2: Điền secret và cấu hình thực tế
+Mở `.env.production` và `configs/config.production.yaml` để điền:
+- `DEZUXK_API_KEY`: Khóa API bảo mật cho client
+- `DEZUXK_MASTER_KEY`: Khóa đối xứng AES-256-GCM 32 bytes bảo vệ session Google
+- `DEZUXK_ADMIN_PASSWORD` & `DEZUXK_ADMIN_SESSION_TOKEN`: Thông tin bảo vệ Web Admin
+- `DEZUXK_POSTGRES_PASSWORD`, `DEZUXK_REDIS_PASSWORD`, `DEZUXK_S3_SECRET_KEY`: Thông tin tầng dữ liệu
+
+#### Bước 3: Chạy Pre-flight kiểm tra cấu hình ban đầu (Config-only)
+Trước khi hạ tầng cơ sở dữ liệu khởi động, chạy pre-flight với cờ `--skip-infra` để kiểm tra biến môi trường và cú pháp config:
+```bash
+./scripts/production-preflight.sh --skip-infra
+```
+Kết quả mong muốn:
+```text
+=== DEZUXK PRODUCTION PRE-FLIGHT VERIFICATION ===
+
+Environment             PASS
+Test mode disabled      PASS
+API Security            PASS
+Vault                   PASS
+Admin Security          PASS
+Cluster                 PASS
+Config Validation       PASS
+PostgreSQL              PASS  (skipped network ping)
+Redis                   PASS  (skipped network ping)
+S3                      PASS  (skipped network ping)
+
+Pre-flight verification PASSED! Hệ thống đã sẵn sàng khởi động trong môi trường Production.
 ```
 
-#### Bước 2: Chạy kiểm tra tiền trạm (Production Pre-flight)
-Chạy script kiểm tra để xác thực cấu hình trước khi khởi động:
+#### Bước 4: Khởi động tầng dữ liệu và khởi tạo MinIO Bucket (Mode A: Self-Hosted)
+Khởi động trước Postgres, Redis, MinIO và service khởi tạo bucket `minio-init`:
+```bash
+docker compose \
+  --env-file .env.production \
+  -f docker-compose.production.yml \
+  --profile self-hosted \
+  up -d postgres redis minio minio-init
+```
+> **Cơ chế tự động hóa MinIO**: Service `minio-init` sử dụng client `minio/mc`, chờ MinIO server sẵn sàng, tự động tạo bucket `$DEZUXK_S3_BUCKET` (nếu chưa có) và thiết lập chính sách truy cập `private` mặc định (`mc anonymous set none`). Quá trình này mang tính lũy thừa (idempotent), an toàn khi chạy lại nhiều lần.
+>
+> **Lưu ý External S3**: Đối với `COMPOSE_PROFILES=external`, hệ thống KHÔNG tự động tạo bucket trên AWS S3 / Cloudflare R2. DevOps chịu trách nhiệm tạo bucket trước theo chính sách bảo mật đám mây của doanh nghiệp.
+
+#### Bước 5: Chạy Pre-flight toàn diện hạ tầng (Full Pre-flight)
+Sau khi hạ tầng dữ liệu đã online, chạy kiểm tra kết nối mạng và quyền truy cập thực tế:
 ```bash
 ./scripts/production-preflight.sh
 ```
-Kết quả mong muốn:
+Lúc này script sẽ ping thực tế tới PostgreSQL, Redis và thực hiện `HeadBucket` tới S3/MinIO:
 ```text
 === DEZUXK PRODUCTION PRE-FLIGHT VERIFICATION ===
 
@@ -185,12 +240,23 @@ S3                      PASS
 Pre-flight verification PASSED! Hệ thống đã sẵn sàng khởi động trong môi trường Production.
 ```
 
-#### Bước 3: Khởi động cụm Production
+#### Bước 6: Khởi động toàn bộ Cụm Gateway và Nginx Load Balancer
 ```bash
-docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
+# Đối với Self-Hosted Mode:
+docker compose \
+  --env-file .env.production \
+  -f docker-compose.production.yml \
+  --profile self-hosted \
+  up -d --build
+
+# Đối với External Cloud Mode (RDS, ElastiCache, AWS S3/R2):
+COMPOSE_PROFILES=external docker compose \
+  --env-file .env.production \
+  -f docker-compose.production.yml \
+  up -d --build
 ```
 
-#### Bước 4: Kiểm tra Liveness và Readiness ban đầu
+#### Bước 7: Kiểm tra Liveness và Readiness ban đầu
 ```bash
 # 1. Kiểm tra Liveness (tiến trình đang chạy tốt)
 curl -i http://localhost:8080/health
@@ -199,16 +265,35 @@ curl -i http://localhost:8080/health
 # 2. Kiểm tra Readiness
 curl -i http://localhost:8080/ready
 # Trả về: HTTP/1.1 503 Service Unavailable
-# Lý do: Cụm mới khởi động, chưa có tài khoản Google nào được nạp!
+# Lý do: Cụm mới khởi động, chưa có tài khoản Google nào được nạp vào cơ sở dữ liệu!
 ```
 
 ---
 
-## 🔑 6. Quy Trình Nạp Tài Khoản Google Thật (Real Account Ingest)
+## 🔑 6. Quản Lý Chrome Profile & Nạp Tài Khoản Google Thật
 
-Tuyệt đối không lưu cookie vào file `.env`. Sử dụng 1 trong 2 luồng chuẩn sau:
+### 🌐 Kiến Trúc Phân Định Quyền Sở Hữu Profile (Chrome Profile Ownership)
 
-### Flow A — Chrome Remote Debugging (CDP)
+Trong mô hình đa node phía sau Load Balancer, các thao tác Chrome CDP (`/launch`, `/sync`) có ngữ nghĩa gắn liền với máy chủ cục bộ (local node semantics):
+1. **Cô lập thư mục Chrome**: Mỗi Gateway Node sử dụng volume riêng biệt:
+   - `gateway-a` $\rightarrow$ `./profiles/gateway-a:/app/profiles`
+   - `gateway-b` $\rightarrow$ `./profiles/gateway-b:/app/profiles`
+   - `gateway-c` $\rightarrow$ `./profiles/gateway-c:/app/profiles`
+2. **Định tuyến điều khiển tập trung (Dedicated Profile Node)**:
+   - Nginx cấu hình: mọi request `^~ /v1/profiles` được chuyển tiếp độc quyền về `gateway-a:8080`.
+   - Đảm bảo lệnh `launch` và `sync` không bao giờ bị phân mảnh sang 2 node khác nhau.
+3. **Phân tách Mặt phẳng Điều khiển vs Mặt phẳng Dữ liệu**:
+   - **Profile/CDP Control Plane**: Single-owner trên Node A. Nếu Node A gặp sự cố, tính năng quản lý profile tạm thời gián đoạn.
+   - **AI/Chat Data Plane**: Multi-node HA cân bằng tải qua toàn bộ Node A, B, C. Nếu Node A chết, traffic chat và agent run vẫn hoạt động 100% bình thường trên Node B và Node C.
+4. **Cảnh báo Network Share**:
+   > ⚠️ **CẢNH BÁO:** TUYỆT ĐỐI KHÔNG chia sẻ cùng một thư mục Chrome `user-data-dir` qua **NFS**, **SMB** hoặc **Shared Docker Volume** cho nhiều tiến trình Chromium chạy đồng thời. Khóa profile lockfile của Chrome sẽ gây crash hoặc corrupt dữ liệu.
+   >
+   > **Quy tắc:** Một Chrome profile chỉ được launch bởi một Gateway node tại một thời điểm.
+5. **Nguồn Chân Lý Duy Nhất (Single Source of Truth)**: Thư mục profile Chrome cục bộ chỉ là trạng thái tạm thời của trình duyệt. Ngay sau khi đồng bộ hoặc nạp, session thật được mã hóa AES-256-GCM và lưu vào PostgreSQL. Cả 3 node lập tức truy xuất được session từ PostgreSQL mà không cần chia sẻ filesystem!
+
+### Quy trình nạp tài khoản:
+
+#### Flow A — Chrome Remote Debugging (CDP)
 1. Tạo profile mới:
    ```bash
    curl -X POST http://localhost:8080/v1/profiles \
@@ -229,7 +314,7 @@ Tuyệt đối không lưu cookie vào file `.env`. Sử dụng 1 trong 2 luồn
    ```
    Gateway tự động trích xuất cookies, CSRF token `SNlM0e`, mã hóa AES-256-GCM và ghi vào PostgreSQL. Cả 3 Node A/B/C lập tức dùng được tài khoản này.
 
-### Flow B — Headless Ingest (API Trực Tiếp từ Máy Chủ)
+#### Flow B — Headless Ingest (API Trực Tiếp từ Máy Chủ)
 Nếu chạy trên Cloud/VPS không có giao diện đồ họa, trích xuất cookie từ trình duyệt cá nhân và gọi API:
 
 ```bash
@@ -315,7 +400,7 @@ docker exec -t dezuxk-prod-postgres pg_dump -U dezuxk -d dezuxk | gzip > "backup
 
 ## 🔒 9. Tích Hợp Quản Lý Bí Mật Ngoài (Future Secrets Providers)
 
-Hiện tại, việc nạp secret qua `.env.production` là phương án nhanh nhất. Mã nguồn của Gateway đã được thiết kế sẵn sàng tích hợp với:
+Hiện tại, việc nạp secret qua `.env.production` và `configs/config.production.yaml` là phương án nhanh và an toàn nhất. Mã nguồn của Gateway đã được thiết kế sẵn sàng tích hợp với:
 - **Docker Secrets**: Nạp secret file mount tại `/run/secrets/*`
 - **Kubernetes Secrets**: Inject biến môi trường qua `SecretKeyRef`
 - **AWS Secrets Manager**: Nạp secret lúc bootstrap pod qua IAM Role / IRSA

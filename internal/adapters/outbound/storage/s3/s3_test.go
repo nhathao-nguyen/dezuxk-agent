@@ -109,6 +109,11 @@ func TestS3_LiveIntegration(t *testing.T) {
 		t.Fatalf("EnsureBucketExists MinIO bucket (%s) thất bại: %v", bucket, err)
 	}
 
+	// Xác thực tính idempotent: gọi lại lần 2 không bị lỗi BucketAlreadyOwnedByYou / BucketAlreadyExists
+	if err := adapter.EnsureBucketExists(ctx); err != nil {
+		t.Fatalf("EnsureBucketExists lần 2 (idempotent) thất bại: %v", err)
+	}
+
 	if err := adapter.Ping(ctx); err != nil {
 		t.Fatalf("Ping MinIO bucket (%s) thất bại: %v", bucket, err)
 	}

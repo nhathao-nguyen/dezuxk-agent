@@ -112,20 +112,13 @@ func (s *S3StorageAdapter) EnsureBucketExists(ctx context.Context) error {
 	return nil
 }
 
-// Ping kiểm tra kết nối với S3/MinIO bucket
+// Ping kiểm tra kết nối và sự tồn tại của S3/MinIO bucket qua HeadBucket
 func (s *S3StorageAdapter) Ping(ctx context.Context) error {
 	_, err := s.s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(s.bucket),
 	})
 	if err != nil {
-		// Thử tự động tạo bucket nếu chưa có (lazy creation phục vụ môi trường cluster boot)
-		_ = s.EnsureBucketExists(ctx)
-		_, err = s.s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
-			Bucket: aws.String(s.bucket),
-		})
-		if err != nil {
-			return fmt.Errorf("không thể kết nối tới S3/MinIO bucket (%s): %w", s.bucket, err)
-		}
+		return fmt.Errorf("không thể kết nối tới S3/MinIO bucket (%s): %w", s.bucket, err)
 	}
 	return nil
 }
