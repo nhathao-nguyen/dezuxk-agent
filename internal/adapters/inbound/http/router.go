@@ -17,6 +17,7 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/core/services"
+	"dezuxk-gateway/internal/version"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -100,6 +101,12 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 					!strings.HasPrefix(path, "/v1/profiles") &&
 					path != "/v1/alerts" {
 					deps.Metrics.RecordRequest()
+					deps.Metrics.IncActiveRequests()
+					start := time.Now()
+					defer func() {
+						deps.Metrics.DecActiveRequests()
+						deps.Metrics.RecordRequestDuration(time.Since(start), r.Method, path, "2xx")
+					}()
 				}
 				next.ServeHTTP(w, r)
 			})
@@ -126,10 +133,10 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		limiter = NewIPRateLimiter(maxReqs, time.Duration(windowSecs)*time.Second, trustedProxies)
 	}
 	r.Use(func(next http.Handler) http.Handler {
-		limiterHandler := limiter.Middleware()(next)
+		limiterHandler := limiter.Middleware(deps.Metrics)(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
-			if path == "/health" || path == "/ready" || path == "/metrics" {
+			if path == "/health" || path == "/ready" || path == "/metrics" || path == "/version" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -284,6 +291,13 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		})
 	})
 
+	// 7. Version Endpoint (SemVer & Release Metadata - zero secrets)
+	r.Get("/version", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(version.GetInfo())
+	})
+
 	// Web Admin UI Dashboard (Embedded SPA)
 	webHandler := http.StripPrefix("/admin", web.Handler())
 	r.Get("/admin", func(w http.ResponseWriter, r *http.Request) {
@@ -392,7 +406,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 
 		// Layer B — Post-auth limiter: rate-limit và concurrency limit theo tenant, key, endpoint, model
 		if limiter != nil && limiter.LocalRateLimiter != nil {
-			v1.Use(AuthenticatedRateLimitMiddleware(limiter.LocalRateLimiter, limiter.LocalRateLimiter.ExtractClientIP))
+			v1.Use(AuthenticatedRateLimitMiddleware(limiter.LocalRateLimiter, limiter.LocalRateLimiter.ExtractClientIP, deps.Metrics))
 		}
 
 		// Phục vụ tệp Media qua API chuẩn /v1/media/{id}

@@ -1,0 +1,49 @@
+name: Performance & Load Testing Gate (Tier B)
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_concurrency:
+        description: 'Số lượng yêu cầu Chat Completions đồng thời'
+        required: true
+        default: '500'
+      stream_concurrency:
+        description: 'Số lượng luồng SSE Streaming đồng thời'
+        required: true
+        default: '50'
+      agent_burst:
+        description: 'Số lượng tác vụ Agent chạy nền đồng thời'
+        required: true
+        default: '50'
+  schedule:
+    # Chạy tự động hàng tuần (Chủ nhật lúc 02:00 UTC) để phát hiện regression và leak
+    - cron: '0 2 * * 0'
+
+jobs:
+  load-test:
+    name: High Concurrency, Chaos & Leak Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run Tier B Load, Chaos & Resource Leak Verification (with Race Detector)
+        run: |
+          CHAT_CONC="${{ github.event.inputs.chat_concurrency || '500' }}"
+          STREAM_CONC="${{ github.event.inputs.stream_concurrency || '50' }}"
+          AGENT_BURST="${{ github.event.inputs.agent_burst || '50' }}"
+          echo "Starting Tier B Load Test with Race Detector..."
+          echo "Chat Concurrency:   $CHAT_CONC"
+          echo "Stream Concurrency: $STREAM_CONC"
+          echo "Agent Burst:        $AGENT_BURST"
+          go run -race ./cmd/loadtest \
+            -chat-concurrency "$CHAT_CONC" \
+            -stream-concurrency "$STREAM_CONC" \
+            -agent-burst "$AGENT_BURST" \
+            -max-error-rate 0.05

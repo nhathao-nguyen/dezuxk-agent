@@ -148,6 +148,10 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	}
 
 	if req.Stream {
+		if h.metrics != nil {
+			h.metrics.IncActiveStreams()
+			defer h.metrics.DecActiveStreams()
+		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			if u, hasUnwrap := w.(interface{ Unwrap() http.ResponseWriter }); hasUnwrap {

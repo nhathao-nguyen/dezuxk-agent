@@ -337,7 +337,11 @@ func (l *LocalRateLimiter) SetMaxAgentRuns(max int) {
 
 // PreAuthIPRateLimitMiddleware tạo middleware Rate Limiting chạy TRƯỚC authentication (Layer A)
 // Chỉ sử dụng client IP để chống brute force, flood, abuse. Tuyệt đối không dùng API key hoặc tenant ở layer này.
-func PreAuthIPRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*http.Request) string) func(http.Handler) http.Handler {
+func PreAuthIPRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*http.Request) string, metrics ...*domain.ContractMetrics) func(http.Handler) http.Handler {
+	var m *domain.ContractMetrics
+	if len(metrics) > 0 {
+		m = metrics[0]
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if limiter == nil {
@@ -363,6 +367,9 @@ func PreAuthIPRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*htt
 
 			decision, err := limiter.Allow(r.Context(), identity)
 			if err == nil && !decision.Allowed {
+				if m != nil {
+					m.RecordRateLimitRejection("ip_limit")
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", fmt.Sprintf("%d", decision.RetryAfterSec))
 				w.WriteHeader(http.StatusTooManyRequests)
@@ -382,7 +389,11 @@ func PreAuthIPRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*htt
 }
 
 // AuthenticatedRateLimitMiddleware tạo middleware Rate Limit & Concurrency Limit chạy SAU Authentication (Layer B)
-func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*http.Request) string) func(http.Handler) http.Handler {
+func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*http.Request) string, metrics ...*domain.ContractMetrics) func(http.Handler) http.Handler {
+	var m *domain.ContractMetrics
+	if len(metrics) > 0 {
+		m = metrics[0]
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if limiter == nil {
@@ -423,13 +434,13 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 			}
 
 			// 1b. Trích xuất Model: ưu tiên Context, sau đó Query param, sau đó Body JSON an toàn (fallback: default)
-			if m, ok := domain.ModelFromContext(r.Context()); ok && m != "" {
-				identity.Model = m
-			} else if m := r.URL.Query().Get("model"); m != "" {
-				identity.Model = strings.TrimSpace(m)
+			if modelName, ok := domain.ModelFromContext(r.Context()); ok && modelName != "" {
+				identity.Model = modelName
+			} else if modelName := r.URL.Query().Get("model"); modelName != "" {
+				identity.Model = strings.TrimSpace(modelName)
 				r = r.WithContext(domain.ContextWithModel(r.Context(), identity.Model))
-			} else if m := extractTargetModel(r); m != "" {
-				identity.Model = m
+			} else if modelName := extractTargetModel(r); modelName != "" {
+				identity.Model = modelName
 				r = r.WithContext(domain.ContextWithModel(r.Context(), identity.Model))
 			}
 			if identity.Model == "" {
@@ -443,6 +454,9 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 			// 2. Kiểm tra Rate Limit (RPM)
 			decision, err := limiter.Allow(r.Context(), identity)
 			if err == nil && !decision.Allowed {
+				if m != nil {
+					m.RecordRateLimitRejection("rate_limit_exceeded")
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", fmt.Sprintf("%d", decision.RetryAfterSec))
 				w.WriteHeader(http.StatusTooManyRequests)
@@ -459,6 +473,9 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 			// 3. Kiểm tra Concurrency Limit
 			release, allowed, err := limiter.AcquireConcurrency(r.Context(), identity)
 			if err == nil && !allowed {
+				if m != nil {
+					m.RecordConcurrencyRejection("concurrency_limit_exceeded")
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "2")
 				w.WriteHeader(http.StatusTooManyRequests)
@@ -492,8 +509,8 @@ func NewIPRateLimiter(rate int, window time.Duration, trustedProxies ...[]string
 }
 
 // Middleware cung cấp tương thích ngược cho Chi router
-func (lim *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
-	return PreAuthIPRateLimitMiddleware(lim.LocalRateLimiter, lim.LocalRateLimiter.ExtractClientIP)
+func (lim *IPRateLimiter) Middleware(metrics ...*domain.ContractMetrics) func(http.Handler) http.Handler {
+	return PreAuthIPRateLimitMiddleware(lim.LocalRateLimiter, lim.LocalRateLimiter.ExtractClientIP, metrics...)
 }
 
 // MaxBodySizeMiddleware giới hạn kích thước tối đa của request body để chống DoS

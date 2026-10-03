@@ -31,6 +31,64 @@ func TestCheckpointMigrationFailure_ProductionStartupFails(t *testing.T) {
 	}
 }
 
+func TestProductionMode_DurabilityRequirementCannotBeOverridden(t *testing.T) {
+	// Production rule: ngay cả khi cấu hình vô tình bật allow_memory_fallback = true,
+	// môi trường production TUYỆT ĐỐI không cho phép silent fallback sang RAM.
+	cfg := &config.Config{
+		Environment: "production",
+		Storage: config.StorageConfig{
+			AllowMemoryFallback: true, // Không được phép ghi đè durability requirement
+		},
+	}
+
+	// 1. Khi db == nil
+	_, _, _, err := daemon.InitCriticalRepositories(cfg, nil)
+	if err == nil {
+		t.Fatalf("expected error in production when db is nil even if allow_memory_fallback=true, got nil")
+	}
+
+	// 2. Khi db bị lỗi kết nối/đã đóng
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	db.Close()
+
+	_, _, _, err = daemon.InitCriticalRepositories(cfg, db)
+	if err == nil {
+		t.Fatalf("expected error in production on closed db, got nil")
+	}
+}
+
+func TestDevelopmentMode_MemoryFallback(t *testing.T) {
+	// 1. Dev mode cho phép fallback khi allow_memory_fallback = true
+	cfgDevAllowed := &config.Config{
+		Environment: "development",
+		Storage: config.StorageConfig{
+			AllowMemoryFallback: true,
+		},
+	}
+	cp, m, ar, err := daemon.InitCriticalRepositories(cfgDevAllowed, nil)
+	if err != nil {
+		t.Fatalf("expected nil error on dev mode fallback, got: %v", err)
+	}
+	if cp == nil || m == nil || ar == nil {
+		t.Fatalf("expected in-memory fallback repos to be created")
+	}
+
+	// 2. Dev mode fail closed khi allow_memory_fallback = false
+	cfgDevBlocked := &config.Config{
+		Environment: "development",
+		Storage: config.StorageConfig{
+			AllowMemoryFallback: false,
+		},
+	}
+	_, _, _, err = daemon.InitCriticalRepositories(cfgDevBlocked, nil)
+	if err == nil {
+		t.Fatalf("expected error in dev mode when allow_memory_fallback=false, got nil")
+	}
+}
+
 func TestCheckpointMigrationFailure_DevModeMayFallback(t *testing.T) {
 	db, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {

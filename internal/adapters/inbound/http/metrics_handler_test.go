@@ -14,6 +14,17 @@ func TestPrometheusMetricsExporter(t *testing.T) {
 	metrics := domain.NewContractMetrics()
 	metrics.RecordRequest()
 	metrics.AddSchema()
+	metrics.IncActiveRequests()
+	metrics.IncActiveStreams()
+	metrics.SetAgentQueueDepth(2)
+	metrics.SetCircuitBreakerState(0)
+	metrics.RecordRateLimitRejection("rate_limit_exceeded")
+	metrics.RecordConcurrencyRejection("concurrency_limit_exceeded")
+	metrics.RecordUpstreamFailover("failover")
+	metrics.RecordToolExecution("shell")
+	metrics.RecordToolExecutionError("shell", "policy_violation")
+	metrics.RecordAgentRun("completed")
+	metrics.RecordAgentRunFailure("timeout")
 
 	exporter := NewPrometheusMetricsExporter(nil, nil, nil, metrics)
 
@@ -32,11 +43,57 @@ func TestPrometheusMetricsExporter(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "gateway_requests_total 1") {
-		t.Errorf("expected gateway_requests_total 1 in body, got:\n%s", body)
+
+	requiredMetrics := []string{
+		"gateway_requests_total",
+		"gateway_errors_total",
+		"gateway_request_duration_seconds",
+		"gateway_upstream_duration_seconds",
+		"gateway_tool_duration_seconds",
+		"gateway_agent_run_duration_seconds",
+		"gateway_active_requests",
+		"gateway_active_streams",
+		"gateway_agent_queue_depth",
+		"gateway_rate_limit_rejections_total",
+		"gateway_concurrency_rejections_total",
+		"gateway_upstream_failover_total",
+		"gateway_circuit_breaker_state",
+		"gateway_tool_execution_total",
+		"gateway_tool_execution_errors_total",
+		"gateway_agent_runs_total",
+		"gateway_agent_run_failures_total",
 	}
-	if !strings.Contains(body, "gateway_errors_total 1") {
-		t.Errorf("expected gateway_errors_total 1 in body, got:\n%s", body)
+
+	for _, metric := range requiredMetrics {
+		if !strings.Contains(body, metric) {
+			t.Errorf("missing required metric %q in /metrics output", metric)
+		}
+	}
+}
+
+func TestRouter_VersionEndpoint(t *testing.T) {
+	router := BuildRouter(RouterDependencies{})
+
+	req := httptest.NewRequest(http.MethodGet, "/version", nil)
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 from /version, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, `"version"`) || !strings.Contains(body, `"go_version"`) || !strings.Contains(body, `"platform"`) {
+		t.Fatalf("expected version metadata in response, got: %s", body)
+	}
+
+	// Security: verify zero secrets in version response
+	forbiddenSubstrings := []string{"cookie", "secret", "password", "token", "master_key", "api_key"}
+	for _, f := range forbiddenSubstrings {
+		if strings.Contains(strings.ToLower(body), f) {
+			t.Fatalf("SECURITY VIOLATION: /version leaked potential secret term %q: %s", f, body)
+		}
 	}
 }
 

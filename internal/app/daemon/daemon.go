@@ -94,7 +94,10 @@ func Run(configPath string, portOverride int) error {
 
 	sqliteRepo, err := session.NewSqliteSessionRepository(dbPath, refresher, vault)
 	if err != nil {
-		log.Printf("[Database Warning] Không thể mở SQLite (%v), dùng bộ nhớ RAM MemorySessionRepository", err)
+		if cfg.IsProduction() || !cfg.Storage.AllowMemoryFallback {
+			return fmt.Errorf("không thể khởi tạo SqliteSessionRepository trong môi trường bền vững: %w", err)
+		}
+		log.Printf("[Database Warning] Không thể mở SQLite (%v), dùng bộ nhớ RAM MemorySessionRepository (Development Mode)", err)
 		sessionRepo = session.NewMemorySessionRepository(refresher)
 	} else {
 		log.Printf("[Database] Đã kích hoạt lưu trữ bền vững SQLite tại %s (WAL Mode, Vault AES-256-GCM)", dbPath)
@@ -117,15 +120,18 @@ func Run(configPath string, portOverride int) error {
 	if sqliteRepo != nil {
 		kr, err := session.NewSqliteKeyRepository(sqliteRepo.DB())
 		if err != nil {
-			if !cfg.Storage.AllowMemoryFallback {
+			if cfg.IsProduction() || !cfg.Storage.AllowMemoryFallback {
 				return fmt.Errorf("khởi tạo SqliteKeyRepository thất bại: %w", err)
 			}
-			log.Printf("[Key Database Warning] Không thể khởi tạo SqliteKeyRepository: %v, dùng bộ nhớ RAM", err)
+			log.Printf("[Key Database Warning] Không thể khởi tạo SqliteKeyRepository: %v, dùng bộ nhớ RAM (Development Mode)", err)
 			keyRepo = session.NewMemoryKeyRepository()
 		} else {
 			keyRepo = kr
 		}
 	} else {
+		if cfg.IsProduction() || !cfg.Storage.AllowMemoryFallback {
+			return errors.New("không thể khởi tạo KeyRepository khi chưa có database bền vững trong production")
+		}
 		keyRepo = session.NewMemoryKeyRepository()
 	}
 	masterAdminKey := cfg.Server.APIKey
@@ -620,53 +626,70 @@ func startStartupTierDiscovery(
 }
 
 // InitCriticalRepositories khởi tạo các repository tác vụ bền vững (Checkpoint, Memory, AgentRun)
-// Tuân thủ triệt để: trong môi trường production (allow_memory_fallback = false), nếu SQLite migration/init lỗi thì buộc phải báo lỗi startup fail.
+// Tuân thủ triệt để: trong môi trường production (hoặc allow_memory_fallback = false),
+// nếu persistent DB không khả dụng hoặc migration/init lỗi thì buộc phải báo lỗi startup fail.
+// allow_memory_fallback chỉ có tác dụng trong development/test, không được phép ghi đè trong production!
 func InitCriticalRepositories(cfg *config.Config, db *sql.DB) (ports.CheckpointRepository, ports.MemoryRepository, ports.AgentRunRepository, error) {
 	var checkpointRepo ports.CheckpointRepository
 	var memoryRepo ports.MemoryRepository
 	var agentRunRepo ports.AgentRunRepository
 
-	allowFallback := cfg != nil && cfg.Storage.AllowMemoryFallback
+	isProd := cfg != nil && cfg.IsProduction()
+	allowFallback := cfg != nil && !isProd && cfg.Storage.AllowMemoryFallback
 
-	if db != nil {
-		cpRepo, err := session.NewSqliteCheckpointRepository(db)
-		if err != nil {
-			if !allowFallback {
-				return nil, nil, nil, fmt.Errorf("khởi tạo SqliteCheckpointRepository thất bại: %w", err)
-			}
-			log.Printf("[Storage Warning] Khởi tạo SqliteCheckpointRepository thất bại, fallback sang MemoryCheckpointRepository: %v", err)
-		} else {
-			checkpointRepo = cpRepo
+	if db == nil {
+		if !allowFallback {
+			return nil, nil, nil, errors.New("cơ sở dữ liệu persistent không khả dụng trong môi trường production (fail closed)")
 		}
+		return session.NewMemoryCheckpointRepository(), session.NewMemoryMemoryRepository(), session.NewMemoryAgentRunRepository(), nil
+	}
 
-		mRepo, err := session.NewSqliteMemoryRepository(db)
-		if err != nil {
-			if !allowFallback {
-				return nil, nil, nil, fmt.Errorf("khởi tạo SqliteMemoryRepository thất bại: %w", err)
-			}
-			log.Printf("[Storage Warning] Khởi tạo SqliteMemoryRepository thất bại, fallback sang MemoryMemoryRepository: %v", err)
-		} else {
-			memoryRepo = mRepo
+	cpRepo, err := session.NewSqliteCheckpointRepository(db)
+	if err != nil {
+		if !allowFallback {
+			return nil, nil, nil, fmt.Errorf("khởi tạo SqliteCheckpointRepository thất bại: %w", err)
 		}
+		log.Printf("[Storage Warning] Khởi tạo SqliteCheckpointRepository thất bại, fallback sang MemoryCheckpointRepository: %v", err)
+	} else {
+		checkpointRepo = cpRepo
+	}
 
-		arRepo, err := session.NewSqliteAgentRunRepository(db)
-		if err != nil {
-			if !allowFallback {
-				return nil, nil, nil, fmt.Errorf("khởi tạo SqliteAgentRunRepository thất bại (migration fail): %w", err)
-			}
-			log.Printf("[Storage Warning] Khởi tạo SqliteAgentRunRepository thất bại, fallback sang MemoryAgentRunRepository: %v", err)
-		} else {
-			agentRunRepo = arRepo
+	mRepo, err := session.NewSqliteMemoryRepository(db)
+	if err != nil {
+		if !allowFallback {
+			return nil, nil, nil, fmt.Errorf("khởi tạo SqliteMemoryRepository thất bại: %w", err)
 		}
+		log.Printf("[Storage Warning] Khởi tạo SqliteMemoryRepository thất bại, fallback sang MemoryMemoryRepository: %v", err)
+	} else {
+		memoryRepo = mRepo
+	}
+
+	arRepo, err := session.NewSqliteAgentRunRepository(db)
+	if err != nil {
+		if !allowFallback {
+			return nil, nil, nil, fmt.Errorf("khởi tạo SqliteAgentRunRepository thất bại (migration fail): %w", err)
+		}
+		log.Printf("[Storage Warning] Khởi tạo SqliteAgentRunRepository thất bại, fallback sang MemoryAgentRunRepository: %v", err)
+	} else {
+		agentRunRepo = arRepo
 	}
 
 	if checkpointRepo == nil {
+		if !allowFallback {
+			return nil, nil, nil, errors.New("CheckpointRepository không được khởi tạo bền vững trong môi trường production")
+		}
 		checkpointRepo = session.NewMemoryCheckpointRepository()
 	}
 	if memoryRepo == nil {
+		if !allowFallback {
+			return nil, nil, nil, errors.New("MemoryRepository không được khởi tạo bền vững trong môi trường production")
+		}
 		memoryRepo = session.NewMemoryMemoryRepository()
 	}
 	if agentRunRepo == nil {
+		if !allowFallback {
+			return nil, nil, nil, errors.New("AgentRunRepository không được khởi tạo bền vững trong môi trường production")
+		}
 		agentRunRepo = session.NewMemoryAgentRunRepository()
 	}
 

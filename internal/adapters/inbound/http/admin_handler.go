@@ -10,6 +10,7 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/core/services"
+	"dezuxk-gateway/internal/version"
 )
 
 type AdminHandler struct {
@@ -162,6 +163,7 @@ func (h *AdminHandler) HandleOverview(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"status":      "ok",
+		"version":     version.GetInfo(),
 		"timestamp":   time.Now().Format(time.RFC3339),
 		"accounts":    accounts,
 		"metrics":     metricsSnapshot,

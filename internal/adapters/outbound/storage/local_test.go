@@ -180,3 +180,78 @@ func TestLocalStorageAdapter_SSRFProtection(t *testing.T) {
 		t.Fatalf("expected error for file:// protocol, got nil")
 	}
 }
+
+func TestLocalStorageAdapter_CorruptedMetadataFailsClosed(t *testing.T) {
+	tempDir := t.TempDir()
+
+	assetID := "corrupted-meta-asset"
+	mediaPath := filepath.Join(tempDir, assetID+".png")
+	if err := os.WriteFile(mediaPath, []byte("valid-image-bytes"), 0644); err != nil {
+		t.Fatalf("failed to create media file: %v", err)
+	}
+
+	// Write corrupted JSON metadata
+	metaPath := filepath.Join(tempDir, assetID+".metadata.json")
+	if err := os.WriteFile(metaPath, []byte("{ this is not valid json! }"), 0644); err != nil {
+		t.Fatalf("failed to write corrupted metadata: %v", err)
+	}
+
+	adapter, err := storage.NewLocalStorageAdapter(tempDir, "http://localhost:8080")
+	if err != nil {
+		t.Fatalf("failed to initialize adapter: %v", err)
+	}
+
+	// 1. GetAsset must fail closed
+	_, _, err = adapter.GetAsset(context.Background(), assetID)
+	if err == nil {
+		t.Fatalf("expected error on corrupted metadata, got nil")
+	}
+	if !strings.Contains(err.Error(), "fail closed") && !strings.Contains(err.Error(), "hỏng") {
+		t.Fatalf("expected fail closed error message, got: %v", err)
+	}
+
+	// 2. ServeAssetHTTP must fail closed (404 Not Found)
+	req := httptest.NewRequest(http.MethodGet, "/v1/media/"+assetID, nil)
+	rec := httptest.NewRecorder()
+	err = adapter.ServeAssetHTTP(rec, req, assetID)
+	if err == nil || rec.Code == http.StatusOK {
+		t.Fatalf("SECURITY VIOLATION: served file with corrupted metadata! code: %d, err: %v", rec.Code, err)
+	}
+}
+
+func TestLocalStorageAdapter_MetadataWriteFailureCleansUpMediaFile(t *testing.T) {
+	tempDir := t.TempDir()
+	adapter, err := storage.NewLocalStorageAdapter(tempDir, "http://localhost:8080")
+	if err != nil {
+		t.Fatalf("failed to create adapter: %v", err)
+	}
+
+	assetID := "fail-write-metadata-asset"
+
+	// Block metadata writing by creating a directory where the temp metadata file is supposed to be created
+	tmpMetaDir := filepath.Join(tempDir, assetID+".metadata.json.tmp")
+	if err := os.Mkdir(tmpMetaDir, 0755); err != nil {
+		t.Fatalf("failed to create blocking directory: %v", err)
+	}
+
+	asset := &domain.MediaAsset{
+		ID:        assetID,
+		FileName:  assetID + ".png",
+		Kind:      domain.MediaImagePNG,
+		TenantID:  "tenant-alpha",
+		IsPublic:  false,
+		CreatedAt: time.Now(),
+	}
+
+	content := []byte("image-data-that-should-be-cleaned-up")
+	err = adapter.SaveAsset(context.Background(), asset, bytes.NewReader(content))
+	if err == nil {
+		t.Fatalf("expected SaveAsset to fail due to blocked metadata file, got nil")
+	}
+
+	// Verify that NO orphan media binary file was left on disk
+	mediaFile := filepath.Join(tempDir, asset.FileName)
+	if _, statErr := os.Stat(mediaFile); statErr == nil {
+		t.Fatalf("SECURITY VIOLATION: orphan media file %s was left on disk after metadata write failure!", mediaFile)
+	}
+}

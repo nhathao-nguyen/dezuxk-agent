@@ -86,8 +86,8 @@ func RequestTraceMiddleware(enableAccessLog bool) func(http.Handler) http.Handle
 
 			duration := time.Since(tc.StartTime)
 
-			// Ghi log có cấu trúc nếu bật access log và không phải endpoint health check
-			if enableAccessLog && r.URL.Path != "/health" && r.URL.Path != "/ready" && r.URL.Path != "/metrics" {
+			// Ghi log có cấu trúc nếu bật access log và không phải endpoint health check / version
+			if enableAccessLog && r.URL.Path != "/health" && r.URL.Path != "/ready" && r.URL.Path != "/metrics" && r.URL.Path != "/version" {
 				tenant := tc.TenantID
 				if tenant == "" {
 					tenant = "anonymous"

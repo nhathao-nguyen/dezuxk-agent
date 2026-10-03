@@ -275,11 +275,22 @@ func (s *LocalStorageAdapter) SaveAsset(ctx context.Context, asset *domain.Media
 	if err != nil {
 		return fmt.Errorf("lỗi tạo file media %s: %w", targetPath, err)
 	}
-	defer f.Close()
 
-	n, err := io.Copy(f, content)
-	if err != nil {
-		return fmt.Errorf("lỗi ghi nội dung media: %w", err)
+	n, copyErr := io.Copy(f, content)
+	if copyErr != nil {
+		_ = f.Close()
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi ghi nội dung media: %w", copyErr)
+	}
+
+	if syncErr := f.Sync(); syncErr != nil {
+		_ = f.Close()
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi fsync file media %s: %w", targetPath, syncErr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi đóng file media %s: %w", targetPath, closeErr)
 	}
 
 	asset.FilePath = targetPath
@@ -292,7 +303,7 @@ func (s *LocalStorageAdapter) SaveAsset(ctx context.Context, asset *domain.Media
 		asset.LocalURL = fmt.Sprintf("%s/v1/media/%s", s.baseURL, asset.ID)
 	}
 
-	// Lưu sidecar metadata bền vững ra đĩa
+	// Lưu sidecar metadata bền vững và nguyên tử (atomic persistence) ra đĩa
 	meta := mediaAssetMetadata{
 		AssetID:     asset.ID,
 		TenantID:    asset.TenantID,
@@ -306,9 +317,50 @@ func (s *LocalStorageAdapter) SaveAsset(ctx context.Context, asset *domain.Media
 		Model:       asset.Model,
 	}
 	metaBytes, err := json.MarshalIndent(meta, "", "  ")
-	if err == nil {
-		metaPath := filepath.Join(cleanStorageDir, asset.ID+".metadata.json")
-		_ = os.WriteFile(metaPath, metaBytes, 0600)
+	if err != nil {
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi marshal metadata cho asset %s: %w", asset.ID, err)
+	}
+
+	tmpMetaPath := filepath.Join(cleanStorageDir, asset.ID+".metadata.json.tmp")
+	finalMetaPath := filepath.Join(cleanStorageDir, asset.ID+".metadata.json")
+
+	fMeta, err := os.OpenFile(tmpMetaPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi tạo file tạm metadata %s: %w", tmpMetaPath, err)
+	}
+
+	if _, err := fMeta.Write(metaBytes); err != nil {
+		_ = fMeta.Close()
+		_ = os.Remove(tmpMetaPath)
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi ghi nội dung metadata tạm: %w", err)
+	}
+
+	if err := fMeta.Sync(); err != nil {
+		_ = fMeta.Close()
+		_ = os.Remove(tmpMetaPath)
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi fsync metadata tạm: %w", err)
+	}
+
+	if err := fMeta.Close(); err != nil {
+		_ = os.Remove(tmpMetaPath)
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi đóng file metadata tạm: %w", err)
+	}
+
+	if err := os.Rename(tmpMetaPath, finalMetaPath); err != nil {
+		_ = os.Remove(tmpMetaPath)
+		_ = os.Remove(targetPath)
+		return fmt.Errorf("lỗi atomic rename metadata %s -> %s: %w", tmpMetaPath, finalMetaPath, err)
+	}
+
+	// Đồng bộ thư mục cha trên các hệ thống tệp hỗ trợ
+	if dirF, err := os.Open(cleanStorageDir); err == nil {
+		_ = dirF.Sync()
+		_ = dirF.Close()
 	}
 
 	s.mu.Lock()
@@ -326,39 +378,41 @@ func (s *LocalStorageAdapter) GetAsset(ctx context.Context, assetID string) (*do
 		// Kiểm tra sidecar metadata trên đĩa (khôi phục sau restart)
 		metaPath := filepath.Join(s.storageDir, assetID+".metadata.json")
 		data, err := os.ReadFile(metaPath)
-		if err == nil {
-			var meta mediaAssetMetadata
-			if jsonErr := json.Unmarshal(data, &meta); jsonErr == nil && meta.AssetID == assetID {
-				filePath := filepath.Join(s.storageDir, meta.FileName)
-				f, fErr := os.Open(filePath)
-				if fErr == nil {
-					asset = &domain.MediaAsset{
-						ID:          meta.AssetID,
-						TenantID:    meta.TenantID,
-						IsPublic:    meta.IsPublic,
-						FileName:    meta.FileName,
-						FilePath:    filePath,
-						Kind:        meta.Kind,
-						SizeBytes:   meta.SizeBytes,
-						IsReady:     true,
-						CreatedAt:   meta.CreatedAt,
-						OriginalURL: meta.OriginalURL,
-						Prompt:      meta.Prompt,
-						Model:       meta.Model,
-					}
-					if s.baseURL != "" {
-						asset.LocalURL = fmt.Sprintf("%s/v1/media/%s", s.baseURL, asset.ID)
-					}
-					s.mu.Lock()
-					s.assets[assetID] = asset
-					s.mu.Unlock()
-					return asset, f, nil
-				}
-			}
+		if err != nil {
+			// Nguyên tắc bảo mật: missing security metadata => FAIL CLOSED!
+			return nil, nil, fmt.Errorf("không tìm thấy asset media hoặc thiếu metadata bảo mật cho ID %s (fail closed): %w", assetID, err)
 		}
-		// Nguyên tắc bảo mật: missing security metadata => FAIL CLOSED!
-		// Tuyệt đối không phục vụ file khi thiếu metadata chủ sở hữu/tenant hợp lệ.
-		return nil, nil, fmt.Errorf("không tìm thấy asset media hoặc thiếu metadata bảo mật cho ID %s (fail closed)", assetID)
+		var meta mediaAssetMetadata
+		if jsonErr := json.Unmarshal(data, &meta); jsonErr != nil || meta.AssetID != assetID || meta.FileName == "" {
+			// Nguyên tắc bảo mật: corrupted metadata => FAIL CLOSED!
+			return nil, nil, fmt.Errorf("metadata bảo mật bị hỏng hoặc không hợp lệ cho ID %s (fail closed)", assetID)
+		}
+		filePath := filepath.Join(s.storageDir, meta.FileName)
+		f, fErr := os.Open(filePath)
+		if fErr != nil {
+			return nil, nil, fmt.Errorf("không thể mở file asset tương ứng với metadata %s: %w", filePath, fErr)
+		}
+		asset = &domain.MediaAsset{
+			ID:          meta.AssetID,
+			TenantID:    meta.TenantID,
+			IsPublic:    meta.IsPublic,
+			FileName:    meta.FileName,
+			FilePath:    filePath,
+			Kind:        meta.Kind,
+			SizeBytes:   meta.SizeBytes,
+			IsReady:     true,
+			CreatedAt:   meta.CreatedAt,
+			OriginalURL: meta.OriginalURL,
+			Prompt:      meta.Prompt,
+			Model:       meta.Model,
+		}
+		if s.baseURL != "" {
+			asset.LocalURL = fmt.Sprintf("%s/v1/media/%s", s.baseURL, asset.ID)
+		}
+		s.mu.Lock()
+		s.assets[assetID] = asset
+		s.mu.Unlock()
+		return asset, f, nil
 	}
 
 	f, err := os.Open(asset.FilePath)
