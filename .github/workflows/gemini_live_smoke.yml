@@ -1,0 +1,37 @@
+name: Gemini Live Smoke Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Chạy kiểm thử live định kỳ hàng ngày (03:00 UTC) nếu lab secret được cấu hình
+    - cron: '0 3 * * *'
+
+jobs:
+  smoke:
+    name: Live Google Upstream Smoke Test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || env.GEMINI_LAB_COOKIE != ''
+    env:
+      GEMINI_LAB_COOKIE: ${{ secrets.GEMINI_LAB_COOKIE }}
+      DEZUXK_LAB_COOKIE: ${{ secrets.DEZUXK_LAB_COOKIE }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Check Lab Secret Availability
+        run: |
+          if [ -z "$GEMINI_LAB_COOKIE" ] && [ -z "$DEZUXK_LAB_COOKIE" ]; then
+            echo "GEMINI_LAB_COOKIE secret is not configured. Skipping live test."
+            exit 0
+          fi
+          echo "Lab secret is present. Running live smoke tests..."
+
+      - name: Run Live Golden Tests
+        run: |
+          go test -v -count=1 -run TestGeminiChatGoldenJob_LiveLabAccount ./internal/adapters/outbound/google

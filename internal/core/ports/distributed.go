@@ -27,3 +27,9 @@ type EventBus interface {
 	Publish(ctx context.Context, topic string, payload []byte) error
 	Subscribe(ctx context.Context, topic string) (events <-chan []byte, unsubscribe func(), err error)
 }
+
+// DistributedClusterClient giao diện kiểm tra sức khỏe và quản lý vòng đời kết nối cụm phân tán
+type DistributedClusterClient interface {
+	Ping(ctx context.Context) error
+	Close() error
+}

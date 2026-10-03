@@ -228,8 +228,7 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 		}
 
 		var canRetry bool
-		var callErr error
-		callErr = session.RetryAfterRefresh(ctx, s.sessionRepo, account, domain.ServiceGemini, func() error {
+		callErr := session.RetryAfterRefresh(ctx, s.sessionRepo, account, domain.ServiceGemini, func() error {
 			var err error
 			canRetry, err = action(account)
 			return err
@@ -285,13 +284,6 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, action failoverActi
 		return domain.EnsureGateway(lastErr, domain.OpChatCompletions, domain.ServiceGemini)
 	}
 	return domain.UpstreamUnavailable(domain.OpChatCompletions, "", domain.ServiceGemini, "hết tài khoản khả dụng để hoàn thành yêu cầu")
-}
-
-func (s *ChatService) runGemini(ctx context.Context, fn func(*domain.ManagedAccount) error) error {
-	return s.runGeminiFailover(ctx, func(account *domain.ManagedAccount) (bool, error) {
-		err := fn(account)
-		return true, err
-	})
 }
 
 func isFailoverCandidate(err error) bool {
@@ -535,6 +527,8 @@ func (s *ChatService) streamRound(
 	stopReason := "stop"
 	if len(toolCalls) > 0 {
 		stopReason = "tool_calls"
+	} else if maxTokens := req.EffectiveMaxTokens(); maxTokens != nil && *maxTokens > 0 && usage != nil && usage.CompletionTokens >= *maxTokens {
+		stopReason = "length"
 	}
 
 	finalChunk := domain.OpenAIChatResponse{
@@ -694,6 +688,8 @@ func (s *ChatService) syncRound(
 	stopReason := "stop"
 	if len(toolCalls) > 0 {
 		stopReason = "tool_calls"
+	} else if maxTokens := req.EffectiveMaxTokens(); maxTokens != nil && *maxTokens > 0 && usage != nil && usage.CompletionTokens >= *maxTokens {
+		stopReason = "length"
 	}
 
 	choices := []domain.OpenAIChoice{
@@ -857,6 +853,7 @@ func (s *ChatService) postGemini(
 		EnableCodeExecution:   isCodeInterpreter,
 		Attachments:           attachments,
 		ClientUUID:            fmt.Sprintf("req_%d", time.Now().UnixNano()),
+		MaxOutputTokens:       req.EffectiveMaxTokens(),
 	}
 
 	if s.wire == nil {

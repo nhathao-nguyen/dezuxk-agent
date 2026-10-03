@@ -79,7 +79,7 @@ func (c *BrowserCDPController) getWebSocketURL(ctx context.Context) (string, err
 	}
 
 	if data.WebSocketDebuggerURL == "" {
-		return "", fmt.Errorf("Chrome CDP không trả về webSocketDebuggerUrl")
+		return "", fmt.Errorf("chrome CDP không trả về webSocketDebuggerUrl")
 	}
 
 	return data.WebSocketDebuggerURL, nil
@@ -201,7 +201,7 @@ func (c *BrowserCDPController) GetOrCreateTenantSession(ctx context.Context, ten
 		BrowserContextID string `json:"browserContextId"`
 	}
 	if err := json.Unmarshal(resCtx, &ctxData); err != nil || ctxData.BrowserContextID == "" {
-		return nil, fmt.Errorf("Chrome CDP không trả về browserContextId: %v", err)
+		return nil, fmt.Errorf("chrome CDP không trả về browserContextId: %v", err)
 	}
 
 	// 2. Tạo target tab trong context đó
@@ -218,7 +218,7 @@ func (c *BrowserCDPController) GetOrCreateTenantSession(ctx context.Context, ten
 	}
 	if err := json.Unmarshal(resTarget, &targetData); err != nil || targetData.TargetID == "" {
 		_, _ = c.executeCDPCommand(ctx, "Target.disposeBrowserContext", map[string]interface{}{"browserContextId": ctxData.BrowserContextID})
-		return nil, fmt.Errorf("Chrome CDP không trả về targetId: %v", err)
+		return nil, fmt.Errorf("chrome CDP không trả về targetId: %v", err)
 	}
 
 	// 3. Đính kèm target để lấy sessionId
@@ -237,7 +237,7 @@ func (c *BrowserCDPController) GetOrCreateTenantSession(ctx context.Context, ten
 	if err := json.Unmarshal(resAttach, &attachData); err != nil || attachData.SessionID == "" {
 		_, _ = c.executeCDPCommand(ctx, "Target.closeTarget", map[string]interface{}{"targetId": targetData.TargetID})
 		_, _ = c.executeCDPCommand(ctx, "Target.disposeBrowserContext", map[string]interface{}{"browserContextId": ctxData.BrowserContextID})
-		return nil, fmt.Errorf("Chrome CDP không trả về sessionId: %v", err)
+		return nil, fmt.Errorf("chrome CDP không trả về sessionId: %v", err)
 	}
 
 	session := &TenantBrowserSession{

@@ -206,28 +206,13 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		metricsExporter.ServeHTTP(w, r)
 	})
 
-	// 5. Health Check (Liveness Probe - Kiểm tra tiến trình sống còn)
+	// 5. Health Check (Liveness Probe - Kiểm tra tiến trình sống còn thuần túy)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		activeModels := 0
-		if deps.ModelRegistry != nil {
-			activeModels = deps.ModelRegistry.Count()
-		}
-		isReady := true
-		if deps.ReadinessManager != nil && !deps.ReadinessManager.IsReady() {
-			isReady = false
-		}
-		payload := map[string]any{
-			"status":        "ok",
-			"ready":         isReady,
-			"models_active": activeModels,
-			"timestamp":     time.Now().Format(time.RFC3339),
-		}
-		if deps.Metrics != nil {
-			payload["contract"] = deps.Metrics.Snapshot()
-		}
-		_ = json.NewEncoder(w).Encode(payload)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+		})
 	})
 
 	// 6. Readiness Check (Readiness Probe - Kiểm tra khả năng phục vụ lưu lượng thực tế)
@@ -251,17 +236,19 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 
 		if deps.SessionRepo == nil {
-			checks["sessions"] = "session repository not initialized"
+			checks["storage"] = "storage repository not initialized"
 			isReady = false
 		} else if pinger, ok := deps.SessionRepo.(interface{ Ping(context.Context) error }); ok {
-			if err := pinger.Ping(r.Context()); err != nil {
-				checks["sessions"] = fmt.Sprintf("database ping error: %v", err)
+			pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
+			defer pingCancel()
+			if err := pinger.Ping(pingCtx); err != nil {
+				checks["storage"] = fmt.Sprintf("database ping error: %v", err)
 				isReady = false
 			} else {
-				checks["sessions"] = "ok"
+				checks["storage"] = "ok"
 			}
 		} else {
-			checks["sessions"] = "ok"
+			checks["storage"] = "ok"
 		}
 
 		// Kiểm tra trạng thái tài khoản khả dụng nếu có session repo
@@ -274,12 +261,15 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 					break
 				}
 			}
-			if len(accounts) > 0 && !hasUsable {
+			if !hasUsable {
 				checks["accounts"] = "all upstream accounts are degraded or unavailable"
 				isReady = false
 			} else {
 				checks["accounts"] = "ok"
 			}
+		} else {
+			checks["accounts"] = "session repository not initialized"
+			isReady = false
 		}
 
 		status := http.StatusOK
@@ -406,6 +396,19 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 					})
 				})
 			}
+		}
+
+		// Layer B — Post-auth limiter: rate-limit và concurrency limit theo tenant, key, endpoint, model
+		if limiter != nil && limiter.LocalRateLimiter != nil {
+			v1.Use(AuthenticatedRateLimitMiddleware(limiter.LocalRateLimiter, limiter.LocalRateLimiter.ExtractClientIP))
+		}
+
+		// Phục vụ tệp Media qua API chuẩn /v1/media/{id}
+		if deps.MediaStorage != nil {
+			v1.Get("/media/{id}", func(w http.ResponseWriter, r *http.Request) {
+				id := chi.URLParam(r, "id")
+				_ = deps.MediaStorage.ServeAssetHTTP(w, r, id)
+			})
 		}
 
 		// Quản trị nội bộ Virtual API Keys

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"math"
-	"sync"
 	"sync/atomic"
 
 	"dezuxk-gateway/internal/core/domain"
@@ -128,7 +127,6 @@ func (s *LeastFailuresStrategy) Select(ctx context.Context, candidates []*domain
 
 // LeastLatencyStrategy ưu tiên tài khoản có thời gian phản hồi trung bình thấp nhất
 type LeastLatencyStrategy struct {
-	mu sync.Mutex
 }
 
 func NewLeastLatencyStrategy() *LeastLatencyStrategy {

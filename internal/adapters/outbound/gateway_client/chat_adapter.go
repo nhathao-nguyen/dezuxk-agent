@@ -87,7 +87,7 @@ func (c *HTTPChatAdapter) ExecuteChatSync(
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Gateway trả về mã lỗi HTTP %d: %s", resp.StatusCode, string(respBytes))
+		return nil, fmt.Errorf("gateway trả về mã lỗi HTTP %d: %s", resp.StatusCode, string(respBytes))
 	}
 
 	var chatResp domain.OpenAIChatResponse

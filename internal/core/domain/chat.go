@@ -427,6 +427,7 @@ type GeminiPayloadBuilder struct {
 	EnableCodeExecution   bool
 	Attachments           []GeminiAttachment
 	ClientUUID            string
+	MaxOutputTokens       *int
 }
 
 // ModelIdentityInstruction trả về System Instruction nhận diện cho từng model để model tự biết danh tính chuẩn xác

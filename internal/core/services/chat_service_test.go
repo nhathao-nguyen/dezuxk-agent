@@ -41,10 +41,7 @@ func (m *mockSessionRepo) RefreshDerived(ctx context.Context, account *domain.Ma
 }
 func (m *mockSessionRepo) Invalidate(account *domain.ManagedAccount, service domain.ServiceKind) {}
 func (m *mockSessionRepo) TryWriteLease(account *domain.ManagedAccount, service domain.ServiceKind) bool {
-	if m.denyLease {
-		return false
-	}
-	return true
+	return !m.denyLease
 }
 func (m *mockSessionRepo) ReleaseWriteLease(account *domain.ManagedAccount, service domain.ServiceKind) {
 }
@@ -236,7 +233,7 @@ func (m *mockMediaRepo) DownloadAndCacheWithAuth(ctx context.Context, remoteURL 
 	m.calledWithURL = remoteURL
 	return &domain.MediaAsset{
 		ID:       "hash123",
-		LocalURL: "http://localhost:8080/media/hash123.png",
+		LocalURL: "http://localhost:8080/v1/media/hash123.png",
 		IsReady:  true,
 	}, nil
 }
@@ -285,11 +282,11 @@ func TestChatService_CachesMediaURLs(t *testing.T) {
 		t.Errorf("Expected storage to be called with remote URL, got %s", storageMock.calledWithURL)
 	}
 
-	if len(resp.MediaURLs) != 1 || resp.MediaURLs[0] != "http://localhost:8080/media/hash123.png" {
+	if len(resp.MediaURLs) != 1 || resp.MediaURLs[0] != "http://localhost:8080/v1/media/hash123.png" {
 		t.Errorf("Expected resp.MediaURLs to be local facade URL, got %v", resp.MediaURLs)
 	}
 
-	expectedText := "Đây là ảnh mèo:\n![Hình ảnh](http://localhost:8080/media/hash123.png)"
+	expectedText := "Đây là ảnh mèo:\n![Hình ảnh](http://localhost:8080/v1/media/hash123.png)"
 	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content != expectedText {
 		t.Errorf("Expected content with local URL replaced, got %s", resp.Choices[0].Message.Content)
 	}

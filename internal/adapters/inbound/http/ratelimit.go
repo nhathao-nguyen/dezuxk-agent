@@ -159,15 +159,28 @@ func (l *LocalRateLimiter) ExtractClientIP(r *http.Request) string {
 }
 
 func (l *LocalRateLimiter) buildBucketKey(id ports.RateLimitIdentity) string {
-	if id.TenantID != "" && id.TenantID != "default" {
-		if id.KeyID != "" {
-			return fmt.Sprintf("tenant:%s:key:%s", id.TenantID, id.KeyID)
+	// Post-auth rate limit bằng: tenant_id, key_id, endpoint, model
+	// Định dạng canonical key: tenant:{tenant}:key:{key}:endpoint:{endpoint}:model:{model}
+	if id.TenantID != "" || id.KeyID != "" {
+		tenant := id.TenantID
+		if tenant == "" {
+			tenant = "default"
 		}
-		return "tenant:" + id.TenantID
+		key := id.KeyID
+		if key == "" {
+			key = "anonymous"
+		}
+		endpoint := id.Endpoint
+		if endpoint == "" {
+			endpoint = "default"
+		}
+		model := id.Model
+		if model == "" {
+			model = "default"
+		}
+		return fmt.Sprintf("tenant:%s:key:%s:endpoint:%s:model:%s", tenant, key, endpoint, model)
 	}
-	if id.KeyID != "" {
-		return "key:" + id.KeyID
-	}
+	// Pre-auth rate limit chỉ bằng client IP
 	if id.IP != "" {
 		return "ip:" + id.IP
 	}
@@ -232,23 +245,40 @@ func (l *LocalRateLimiter) Allow(ctx context.Context, id ports.RateLimitIdentity
 }
 
 // AcquireConcurrency kiểm tra và chiếm giữ 1 slot đồng thời
+// Phân tách riêng biệt giữa normal chat concurrency và agent run concurrency
 func (l *LocalRateLimiter) AcquireConcurrency(ctx context.Context, id ports.RateLimitIdentity) (func(), bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	key := l.buildBucketKey(id)
-	current := l.inFlight[key]
-
-	max := l.maxConcurrent
-	if id.IsAgentRun {
-		max = l.maxAgentRuns
+	tenant := id.TenantID
+	if tenant == "" {
+		tenant = "default"
+	}
+	key := id.KeyID
+	if key == "" {
+		if id.IP != "" {
+			key = id.IP
+		} else {
+			key = "anonymous"
+		}
 	}
 
+	var concurrencyKey string
+	var max int
+	if id.IsAgentRun {
+		concurrencyKey = fmt.Sprintf("concurrency:agent:tenant:%s:key:%s", tenant, key)
+		max = l.maxAgentRuns
+	} else {
+		concurrencyKey = fmt.Sprintf("concurrency:chat:tenant:%s:key:%s", tenant, key)
+		max = l.maxConcurrent
+	}
+
+	current := l.inFlight[concurrencyKey]
 	if max > 0 && current >= max {
 		return nil, false, nil
 	}
 
-	l.inFlight[key] = current + 1
+	l.inFlight[concurrencyKey] = current + 1
 
 	released := false
 	release := func() {
@@ -258,11 +288,11 @@ func (l *LocalRateLimiter) AcquireConcurrency(ctx context.Context, id ports.Rate
 			return
 		}
 		released = true
-		cur := l.inFlight[key]
+		cur := l.inFlight[concurrencyKey]
 		if cur <= 1 {
-			delete(l.inFlight, key)
+			delete(l.inFlight, concurrencyKey)
 		} else {
-			l.inFlight[key] = cur - 1
+			l.inFlight[concurrencyKey] = cur - 1
 		}
 	}
 
@@ -305,7 +335,53 @@ func (l *LocalRateLimiter) SetMaxAgentRuns(max int) {
 // HTTP Middlewares
 // -------------------------------------------------------------------------
 
-// AuthenticatedRateLimitMiddleware tạo middleware Rate Limit & Concurrency Limit chạy SAU Authentication
+// PreAuthIPRateLimitMiddleware tạo middleware Rate Limiting chạy TRƯỚC authentication (Layer A)
+// Chỉ sử dụng client IP để chống brute force, flood, abuse. Tuyệt đối không dùng API key hoặc tenant ở layer này.
+func PreAuthIPRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*http.Request) string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if limiter == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// Bỏ qua rate limit cho endpoint sức khỏe nội bộ
+			if r.URL.Path == "/health" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			clientIP := r.RemoteAddr
+			if extractIP != nil {
+				clientIP = extractIP(r)
+			}
+
+			// Layer A: Chỉ sử dụng client IP, không kiểm tra API key hoặc tenant
+			identity := ports.RateLimitIdentity{
+				IP: clientIP,
+			}
+
+			decision, err := limiter.Allow(r.Context(), identity)
+			if err == nil && !decision.Allowed {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", decision.RetryAfterSec))
+				w.WriteHeader(http.StatusTooManyRequests)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"error": map[string]any{
+						"message": fmt.Sprintf("IP rate limit exceeded. Please wait %d seconds before retrying.", decision.RetryAfterSec),
+						"type":    "rate_limit_error",
+						"code":    "ip_rate_limit_exceeded",
+					},
+				})
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// AuthenticatedRateLimitMiddleware tạo middleware Rate Limit & Concurrency Limit chạy SAU Authentication (Layer B)
 func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +399,7 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 			// 1. Phân giải định danh an toàn (TenantID / KeyID / Hash) từ Context đã xác thực
 			identity := ports.RateLimitIdentity{
 				Endpoint: r.URL.Path,
+				Model:    "default",
 			}
 			if extractIP != nil {
 				identity.IP = extractIP(r)
@@ -343,6 +420,10 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 				} else if xKey := r.Header.Get("x-api-key"); xKey != "" {
 					identity.KeyID = HashKeyID(xKey)
 				}
+			}
+
+			if m := r.URL.Query().Get("model"); m != "" {
+				identity.Model = m
 			}
 
 			if strings.Contains(r.URL.Path, "/agent/") || strings.Contains(r.URL.Path, "/runs") {
@@ -402,7 +483,7 @@ func NewIPRateLimiter(rate int, window time.Duration, trustedProxies ...[]string
 
 // Middleware cung cấp tương thích ngược cho Chi router
 func (lim *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
-	return AuthenticatedRateLimitMiddleware(lim.LocalRateLimiter, lim.LocalRateLimiter.ExtractClientIP)
+	return PreAuthIPRateLimitMiddleware(lim.LocalRateLimiter, lim.LocalRateLimiter.ExtractClientIP)
 }
 
 // MaxBodySizeMiddleware giới hạn kích thước tối đa của request body để chống DoS

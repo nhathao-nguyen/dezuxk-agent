@@ -13,40 +13,6 @@ import (
 	"dezuxk-gateway/internal/core/domain"
 )
 
-type fakeSessionRepo struct {
-	account *domain.ManagedAccount
-	err     error
-}
-
-func (f *fakeSessionRepo) GetAvailable(ctx context.Context, service domain.ServiceKind, minCredits int) (*domain.ManagedAccount, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.account, nil
-}
-func (f *fakeSessionRepo) Release(account *domain.ManagedAccount, err error) {}
-func (f *fakeSessionRepo) ListAll(ctx context.Context) []*domain.ManagedAccount {
-	return nil
-}
-func (f *fakeSessionRepo) Save(ctx context.Context, account *domain.ManagedAccount) error {
-	return nil
-}
-func (f *fakeSessionRepo) FindByID(ctx context.Context, id string) (*domain.ManagedAccount, error) {
-	return f.account, nil
-}
-func (f *fakeSessionRepo) RefreshDerived(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind) error {
-	return nil
-}
-func (f *fakeSessionRepo) Invalidate(account *domain.ManagedAccount, service domain.ServiceKind) {}
-func (f *fakeSessionRepo) TryWriteLease(account *domain.ManagedAccount, service domain.ServiceKind) bool {
-	return true
-}
-func (f *fakeSessionRepo) ReleaseWriteLease(account *domain.ManagedAccount, service domain.ServiceKind) {
-}
-func (f *fakeSessionRepo) GetAlerts() []domain.SessionAlert   { return nil }
-func (f *fakeSessionRepo) AddAlert(alert domain.SessionAlert) {}
-func (f *fakeSessionRepo) ClearAlerts(accountID string)       {}
-
 func testRouter(metrics *domain.ContractMetrics) http.Handler {
 	return BuildRouter(RouterDependencies{
 		Config:        &config.Config{Server: config.ServerConfig{AllowedOrigins: []string{"*"}}},
@@ -55,7 +21,7 @@ func testRouter(metrics *domain.ContractMetrics) http.Handler {
 	})
 }
 
-func TestHealthKeepsModelCount(t *testing.T) {
+func TestHealthIsPureLiveness(t *testing.T) {
 	metrics := domain.NewContractMetrics()
 	metrics.AddSchema()
 	handler := testRouter(metrics)
@@ -65,12 +31,14 @@ func TestHealthKeepsModelCount(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if body["status"] != "ok" || body["models_active"].(float64) != 0 {
-		t.Fatalf("health = %s", rec.Body.String())
+	if body["status"] != "ok" {
+		t.Fatalf("health status = %v", body["status"])
 	}
-	contract := body["contract"].(map[string]any)
-	if contract["schema_unexpected"].(float64) != 1 {
-		t.Fatalf("contract = %v", contract)
+	if _, ok := body["models_active"]; ok {
+		t.Fatalf("/health must not leak models_active: %s", rec.Body.String())
+	}
+	if _, ok := body["contract"]; ok {
+		t.Fatalf("/health must not leak contract metrics: %s", rec.Body.String())
 	}
 }
 

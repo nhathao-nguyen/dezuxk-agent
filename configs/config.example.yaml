@@ -18,9 +18,26 @@ server:
     - "127.0.0.1"
     - "::1"
 
-# Cơ sở dữ liệu SQLite lưu trữ phiên bền vững
+# Cơ sở dữ liệu lưu trữ phiên bền vững (Hỗ trợ "sqlite" cho single-node hoặc "postgres" cho multi-node cluster)
 storage:
+  driver: "sqlite" # "sqlite" | "postgres"
   database_path: "./storage/gateway.db"
+  # postgres:
+  #   host: "localhost"
+  #   port: 5432
+  #   user: "postgres"
+  #   password: ""
+  #   dbname: "dezuxk_agent"
+  #   sslmode: "disable"
+
+# Kiến trúc phân tán cụm Multi-Node (Redis cho Distributed Lock, Rate Limiting, Pub/Sub Event Bus)
+distributed:
+  enabled: false
+  driver: "redis"
+  redis:
+    addr: "127.0.0.1:6379"
+    password: ""
+    db: 0
 
 # Chu kỳ đối soát hợp đồng định kỳ (GeminiChatGoldenJob)
 golden_job:

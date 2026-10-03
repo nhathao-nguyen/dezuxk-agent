@@ -116,7 +116,11 @@ func (r *SqliteCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 	var args []any
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if hasID && identity.Role != "admin" && identity.TenantID != "" {
+	if !hasID || identity.Role != "admin" {
+		tenantID := "default"
+		if hasID && identity.TenantID != "" {
+			tenantID = identity.TenantID
+		}
 		query = `
 		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
 		FROM agent_checkpoints
@@ -124,7 +128,7 @@ func (r *SqliteCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 		ORDER BY id DESC
 		LIMIT 1;
 		`
-		args = []any{taskID, identity.TenantID}
+		args = []any{taskID, tenantID}
 	} else {
 		query = `
 		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
@@ -169,14 +173,18 @@ func (r *SqliteCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 	var args []any
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if hasID && identity.Role != "admin" && identity.TenantID != "" {
+	if !hasID || identity.Role != "admin" {
+		tenantID := "default"
+		if hasID && identity.TenantID != "" {
+			tenantID = identity.TenantID
+		}
 		query = `
 		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
 		FROM agent_checkpoints
 		WHERE task_id = ? AND tenant_id = ?
 		ORDER BY id ASC;
 		`
-		args = []any{taskID, identity.TenantID}
+		args = []any{taskID, tenantID}
 	} else {
 		query = `
 		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
@@ -220,9 +228,13 @@ func (r *SqliteCheckpointRepository) DeleteCheckpoints(ctx context.Context, task
 	defer r.mu.Unlock()
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if hasID && identity.Role != "admin" && identity.TenantID != "" {
+	if !hasID || identity.Role != "admin" {
+		tenantID := "default"
+		if hasID && identity.TenantID != "" {
+			tenantID = identity.TenantID
+		}
 		query := `DELETE FROM agent_checkpoints WHERE task_id = ? AND tenant_id = ?;`
-		_, err := r.db.ExecContext(ctx, query, taskID, identity.TenantID)
+		_, err := r.db.ExecContext(ctx, query, taskID, tenantID)
 		return err
 	}
 
@@ -273,11 +285,21 @@ func (m *MemoryCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 	defer m.mu.RUnlock()
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	callerTenant := "default"
+	isAdmin := false
+	if hasID {
+		if identity.Role == "admin" {
+			isAdmin = true
+		}
+		if identity.TenantID != "" {
+			callerTenant = identity.TenantID
+		}
+	}
 
 	list := m.checkpoints[taskID]
 	for i := len(list) - 1; i >= 0; i-- {
 		cp := list[i]
-		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID {
+		if isAdmin || cp.TenantID == callerTenant {
 			return cp, nil
 		}
 	}
@@ -289,9 +311,20 @@ func (m *MemoryCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 	defer m.mu.RUnlock()
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
+	callerTenant := "default"
+	isAdmin := false
+	if hasID {
+		if identity.Role == "admin" {
+			isAdmin = true
+		}
+		if identity.TenantID != "" {
+			callerTenant = identity.TenantID
+		}
+	}
+
 	var res []*domain.AgentCheckpoint
 	for _, cp := range m.checkpoints[taskID] {
-		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID {
+		if isAdmin || cp.TenantID == callerTenant {
 			res = append(res, cp)
 		}
 	}
@@ -303,14 +336,25 @@ func (m *MemoryCheckpointRepository) DeleteCheckpoints(ctx context.Context, task
 	defer m.mu.Unlock()
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if !hasID || identity.Role == "admin" {
+	callerTenant := "default"
+	isAdmin := false
+	if hasID {
+		if identity.Role == "admin" {
+			isAdmin = true
+		}
+		if identity.TenantID != "" {
+			callerTenant = identity.TenantID
+		}
+	}
+
+	if isAdmin {
 		delete(m.checkpoints, taskID)
 		return nil
 	}
 
 	var remaining []*domain.AgentCheckpoint
 	for _, cp := range m.checkpoints[taskID] {
-		if cp.TenantID != identity.TenantID {
+		if cp.TenantID != callerTenant {
 			remaining = append(remaining, cp)
 		}
 	}

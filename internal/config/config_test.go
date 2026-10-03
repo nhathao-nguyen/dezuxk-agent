@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -8,10 +9,61 @@ import (
 )
 
 func TestLoadConfig_YamlWithOperations(t *testing.T) {
-	path := filepath.Join("..", "..", "configs", "config.yaml")
-	cfg, err := config.LoadConfig(path)
+	tempDir := t.TempDir()
+	fixturePath := filepath.Join(tempDir, "config.test.yaml")
+	fixtureContent := `
+server:
+  host: "127.0.0.1"
+  port: 8080
+  api_key: "test-api-key"
+  rate_limit:
+    max_requests: 120
+    window_seconds: 60
+
+profiles:
+  base_dir: "./profiles"
+
+operations:
+  chat_completions: true
+
+vision:
+  enabled: true
+  max_image_size_bytes: 10485760
+  allowed_mime_types:
+    - "image/jpeg"
+    - "image/png"
+    - "image/webp"
+  upload_method: "scotty"
+
+tokens:
+  encoding: "cl100k_base"
+  prompt_token_ratio: 0.25
+  completion_token_ratio: 0.25
+  image_tokens_per_tile: 258
+
+failover:
+  max_attempts: 3
+  cooling_duration: 60s
+
+cache:
+  enabled: true
+  max_entries: 1000
+  ttl_seconds: 300
+  methods:
+    - "chat"
+
+admin:
+  enabled: true
+  username: "admin"
+  password: "dezuxk_admin_secret_pass"
+`
+	if err := os.WriteFile(fixturePath, []byte(fixtureContent), 0644); err != nil {
+		t.Fatalf("failed to write test config fixture: %v", err)
+	}
+
+	cfg, err := config.LoadConfig(fixturePath)
 	if err != nil {
-		t.Fatalf("failed to load configs/config.yaml: %v", err)
+		t.Fatalf("failed to load fixture config: %v", err)
 	}
 
 	if !cfg.Operations.Enabled("chat.completions") {
@@ -119,5 +171,78 @@ func TestConfig_ProductionSecretsValidation(t *testing.T) {
 	cfg.Server.APIKey = "dezuxk-prod-api-key-test"
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("expected valid production config to pass, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ExampleYamlIsValid(t *testing.T) {
+	examplePath := filepath.Join("..", "..", "configs", "config.example.yaml")
+	cfg, err := config.LoadConfig(examplePath)
+	if err != nil {
+		t.Fatalf("expected config.example.yaml to load cleanly without error: %v", err)
+	}
+	if cfg.Server.Port != 8080 {
+		t.Errorf("expected port 8080 from config.example.yaml, got %d", cfg.Server.Port)
+	}
+	if cfg.Storage.Driver != "sqlite" {
+		t.Errorf("expected storage.driver sqlite, got %s", cfg.Storage.Driver)
+	}
+	if cfg.Distributed.Enabled {
+		t.Errorf("expected distributed.enabled false by default in example")
+	}
+}
+
+func TestStorageAndDistributedConfig(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Host: "127.0.0.1",
+			Port: 8080,
+		},
+		Profiles: config.ProfilesConfig{
+			BaseDir: "./profiles",
+		},
+	}
+
+	// 1. Default empty driver defaults to sqlite and passes
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected default sqlite storage to pass: %v", err)
+	}
+
+	// 2. Unsupported storage driver fails
+	cfg.Storage.Driver = "mongodb"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for unsupported storage driver mongodb")
+	}
+
+	// 3. Postgres without host/dbname fails
+	cfg.Storage.Driver = "postgres"
+	cfg.Storage.Postgres.Host = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error when postgres host/dbname are missing")
+	}
+	cfg.Storage.Postgres.Host = "localhost"
+	cfg.Storage.Postgres.DBName = "dezuxk_db"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected valid postgres config to pass: %v", err)
+	}
+
+	// 4. Distributed enabled without redis addr fails (fail-fast)
+	cfg.Distributed.Enabled = true
+	cfg.Distributed.Driver = "redis"
+	cfg.Distributed.Redis.Addr = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected fail-fast error when distributed is enabled without redis addr")
+	}
+
+	// 5. Distributed with invalid driver fails
+	cfg.Distributed.Driver = "etcd"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for unsupported distributed driver")
+	}
+
+	// 6. Distributed with redis addr passes
+	cfg.Distributed.Driver = "redis"
+	cfg.Distributed.Redis.Addr = "127.0.0.1:6379"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected valid distributed config to pass: %v", err)
 	}
 }

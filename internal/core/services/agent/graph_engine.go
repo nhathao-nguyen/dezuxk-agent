@@ -149,6 +149,15 @@ func (g *GraphEngine) ResumeGraph(ctx context.Context, taskID string, opts domai
 		return nil, fmt.Errorf("không có CheckpointRepository để phục hồi task %s", taskID)
 	}
 
+	identity, hasIdentity := domain.TenantIdentityFromContext(ctx)
+	if !hasIdentity {
+		identity = domain.DefaultInternalIdentity()
+		if opts.Supervised {
+			identity.RequireApproval = true
+		}
+		ctx = domain.ContextWithTenantIdentity(ctx, identity)
+	}
+
 	latestCP, err := g.checkpointRepo.GetLatestCheckpoint(ctx, taskID)
 	if err != nil {
 		return nil, fmt.Errorf("không thể tìm thấy checkpoint cho task %s: %w", taskID, err)
@@ -590,7 +599,7 @@ MANDATORY INSTRUCTIONS:
 		}
 	}
 	if !hasModifiedFile {
-		return fmt.Errorf("Fix node thất bại: mô hình không thực thi bất kỳ thao tác sửa đổi file nào (replace_file_content hoặc write_file) để khắc phục lỗi")
+		return fmt.Errorf("fix node thất bại: mô hình không thực thi bất kỳ thao tác sửa đổi file nào (replace_file_content hoặc write_file) để khắc phục lỗi")
 	}
 
 	state.AgentState = *resState

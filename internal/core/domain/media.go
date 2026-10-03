@@ -27,4 +27,6 @@ type MediaAsset struct {
 	Resolution  string    `json:"resolution,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	IsReady     bool      `json:"is_ready"`
+	TenantID    string    `json:"tenant_id,omitempty"`
+	IsPublic    bool      `json:"is_public,omitempty"`
 }

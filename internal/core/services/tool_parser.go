@@ -377,9 +377,22 @@ func parseSingleToolCallMap(item map[string]any, index int) (domain.OpenAIToolCa
 		}
 	}
 
+	callID := ""
+	for _, key := range []string{"id", "tool_call_id", "call_id"} {
+		if idVal, exists := item[key]; exists && idVal != nil {
+			if idStr, ok := idVal.(string); ok && strings.TrimSpace(idStr) != "" {
+				callID = strings.TrimSpace(idStr)
+				break
+			}
+		}
+	}
+	if callID == "" {
+		callID = generateToolCallID()
+	}
+
 	return domain.OpenAIToolCall{
 		Index: index,
-		ID:    generateToolCallID(),
+		ID:    callID,
 		Type:  "function",
 		Function: domain.OpenAIFunctionCallData{
 			Name:      name,

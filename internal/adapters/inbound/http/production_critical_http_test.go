@@ -80,14 +80,47 @@ func TestHealthEndpointDoesNotLeakAlerts(t *testing.T) {
 	if payload["status"] != "ok" {
 		t.Fatalf("expected status 'ok', got: %v", payload["status"])
 	}
-	if payload["ready"] != true {
-		t.Fatalf("expected ready=true, got: %v", payload["ready"])
+	if _, ok := payload["ready"]; ok {
+		t.Fatalf("/health must be a pure liveness endpoint and not expose 'ready'")
 	}
-	if _, ok := payload["models_active"]; !ok {
-		t.Fatalf("missing models_active in /health payload")
+	if _, ok := payload["models_active"]; ok {
+		t.Fatalf("/health must be a pure liveness endpoint and not expose 'models_active'")
 	}
-	if _, ok := payload["timestamp"]; !ok {
-		t.Fatalf("missing timestamp in /health payload")
+	if _, ok := payload["contract"]; ok {
+		t.Fatalf("/health must be a pure liveness endpoint and not expose 'contract'")
+	}
+
+	// 3. Kiểm tra /ready phản ánh readiness thật: khi chưa có model và account khả dụng -> /ready trả 503
+	recReadyNotReady := httptest.NewRecorder()
+	reqReadyNotReady := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	router.ServeHTTP(recReadyNotReady, reqReadyNotReady)
+	if recReadyNotReady.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 Service Unavailable from /ready when models/accounts missing, got: %d", recReadyNotReady.Code)
+	}
+
+	// 4. Khi nạp model và account khả dụng -> /ready trả 200 OK
+	models.Register(domain.ModelDescriptor{
+		ID:            "gemini-3.8-flash",
+		TargetService: domain.ServiceGemini,
+	})
+	sessionRepo.Save(context.Background(), &domain.ManagedAccount{
+		ID:           "acc-usable-1",
+		Email:        "user@corp.com",
+		HealthStatus: domain.HealthStatusHealthy,
+	})
+
+	recReady := httptest.NewRecorder()
+	reqReady := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	router.ServeHTTP(recReady, reqReady)
+	if recReady.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /ready after adding usable model and account, got: %d", recReady.Code)
+	}
+	var readyPayload map[string]any
+	if err := json.Unmarshal(recReady.Body.Bytes(), &readyPayload); err != nil {
+		t.Fatalf("invalid json response from /ready: %v", err)
+	}
+	if readyPayload["ready"] != true {
+		t.Fatalf("expected ready=true on /ready, got: %v", readyPayload["ready"])
 	}
 }
 

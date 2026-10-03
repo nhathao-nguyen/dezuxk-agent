@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +53,11 @@ func (s *LocalStorageAdapter) SaveAsset(ctx context.Context, asset *domain.Media
 	}
 	if asset.ID == "" {
 		asset.ID = generateAssetID()
+	}
+	if asset.TenantID == "" {
+		if id, ok := domain.TenantIdentityFromContext(ctx); ok && id.TenantID != "" {
+			asset.TenantID = id.TenantID
+		}
 	}
 	if asset.FileName == "" {
 		ext := ".bin"
@@ -208,10 +214,31 @@ func (s *LocalStorageAdapter) ServeAssetHTTP(w http.ResponseWriter, r *http.Requ
 	}
 	defer reader.Close()
 
+	// Tenant ownership verification for private media assets
+	if !asset.IsPublic && asset.TenantID != "" {
+		callerID, ok := domain.TenantIdentityFromContext(r.Context())
+		if !ok || (callerID.Role != "admin" && callerID.TenantID != asset.TenantID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"message": "Forbidden: unauthorized access to private media asset",
+					"type":    "permission_denied",
+					"code":    "tenant_isolation_violation",
+				},
+			})
+			return fmt.Errorf("forbidden: unauthorized access to private media asset %s", assetID)
+		}
+	}
+
 	if string(asset.Kind) != "" {
 		w.Header().Set("Content-Type", string(asset.Kind))
 	}
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	if asset.IsPublic {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+	} else {
+		w.Header().Set("Cache-Control", "private, no-cache, no-store, must-revalidate")
+	}
 	if file, ok := reader.(*os.File); ok {
 		http.ServeContent(w, r, asset.FileName, asset.CreatedAt, file)
 		return nil

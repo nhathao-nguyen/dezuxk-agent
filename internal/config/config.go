@@ -24,6 +24,7 @@ type Config struct {
 	Tokens       TokensConfig                 `yaml:"tokens"`
 	Failover     FailoverConfig               `yaml:"failover"`
 	Storage      StorageConfig                `yaml:"storage"`
+	Distributed  DistributedConfig            `yaml:"distributed"`
 	GoldenJob    GoldenJobConfig              `yaml:"golden_job"`
 	KeepAlive    KeepAliveConfig              `yaml:"keep_alive"`
 	Security     SecurityConfig               `yaml:"security"`
@@ -249,8 +250,31 @@ func (f FailoverConfig) GetCoolingDuration() time.Duration {
 }
 
 type StorageConfig struct {
-	DatabasePath        string `yaml:"database_path"`
-	AllowMemoryFallback bool   `yaml:"allow_memory_fallback"`
+	Driver              string         `yaml:"driver"` // "sqlite" (mặc định) | "postgres"
+	DatabasePath        string         `yaml:"database_path"`
+	Postgres            PostgresConfig `yaml:"postgres"`
+	AllowMemoryFallback bool           `yaml:"allow_memory_fallback"`
+}
+
+type PostgresConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	DBName   string `yaml:"dbname"`
+	SSLMode  string `yaml:"sslmode"`
+}
+
+type DistributedConfig struct {
+	Enabled bool        `yaml:"enabled"`
+	Driver  string      `yaml:"driver"` // "redis"
+	Redis   RedisConfig `yaml:"redis"`
+}
+
+type RedisConfig struct {
+	Addr     string `yaml:"addr"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
 }
 
 type GoldenJobConfig struct {
@@ -483,6 +507,15 @@ func applyEnvOverrides(cfg *Config) {
 	if dp := os.Getenv("DEZUXK_DATABASE_PATH"); dp != "" {
 		cfg.Storage.DatabasePath = dp
 	}
+	if sd := os.Getenv("DEZUXK_STORAGE_DRIVER"); sd != "" {
+		cfg.Storage.Driver = sd
+	}
+	if de := os.Getenv("DEZUXK_DISTRIBUTED_ENABLED"); de != "" {
+		cfg.Distributed.Enabled = (de == "true" || de == "1")
+	}
+	if ra := os.Getenv("DEZUXK_REDIS_ADDR"); ra != "" {
+		cfg.Distributed.Redis.Addr = ra
+	}
 	if u := os.Getenv("DEZUXK_ADMIN_USERNAME"); u != "" {
 		cfg.Admin.Username = u
 	}
@@ -504,6 +537,34 @@ func (c *Config) Validate() error {
 	}
 	if c.Profiles.BaseDir == "" {
 		return errors.New("profiles.base_dir là bắt buộc (thư mục lưu profile Chrome từng tài khoản)")
+	}
+
+	// Kiểm tra storage driver
+	storageDriver := strings.ToLower(strings.TrimSpace(c.Storage.Driver))
+	if storageDriver == "" {
+		storageDriver = "sqlite"
+	}
+	if storageDriver != "sqlite" && storageDriver != "postgres" {
+		return fmt.Errorf("storage.driver không được hỗ trợ: %q (chỉ hỗ trợ 'sqlite' hoặc 'postgres')", c.Storage.Driver)
+	}
+	if storageDriver == "postgres" {
+		if strings.TrimSpace(c.Storage.Postgres.Host) == "" || strings.TrimSpace(c.Storage.Postgres.DBName) == "" {
+			return errors.New("storage.postgres.host và storage.postgres.dbname là bắt buộc khi chọn driver 'postgres'")
+		}
+	}
+
+	// Kiểm tra multi-node cluster config (fail-fast: không giả vờ multi-node ready nếu cấu hình chưa đủ)
+	if c.Distributed.Enabled {
+		distDriver := strings.ToLower(strings.TrimSpace(c.Distributed.Driver))
+		if distDriver == "" {
+			distDriver = "redis"
+		}
+		if distDriver != "redis" {
+			return fmt.Errorf("distributed.driver không được hỗ trợ: %q (chỉ hỗ trợ 'redis')", c.Distributed.Driver)
+		}
+		if strings.TrimSpace(c.Distributed.Redis.Addr) == "" {
+			return errors.New("distributed.redis.addr là bắt buộc khi kích hoạt chế độ cụm phân tán (distributed.enabled: true)")
+		}
 	}
 
 	if c.IsProduction() {

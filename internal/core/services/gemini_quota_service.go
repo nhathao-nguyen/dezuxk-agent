@@ -78,7 +78,7 @@ func (s *GeminiQuotaService) GetQuotaForAccount(ctx context.Context, account *do
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Google /usage phản hồi mã %d", resp.StatusCode)
+		return nil, fmt.Errorf("google /usage phản hồi mã %d", resp.StatusCode)
 	}
 
 	return domain.ParseQuotaResponse(string(bodyBytes))

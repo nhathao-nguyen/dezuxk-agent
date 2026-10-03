@@ -229,3 +229,20 @@ dezuxk-gateway/
    nssm install DezuxkGateway "D:\path\to\dezuxk.exe" "--config D:\path\to\configs\config.yaml"
    nssm start DezuxkGateway
    ```
+
+---
+
+## 🔒 CI Pipeline & GitHub Branch Protection
+
+Để bảo vệ nhánh `main` / `master` khỏi các mã nguồn lỗi hoặc phá vỡ an toàn sản xuất, hãy cấu hình Branch Protection Rule trên GitHub Repository:
+
+1. Truy cập: **Settings** → **Branches** (hoặc **Rulesets**) → **Add branch ruleset** / **Add rule**.
+2. **Branch name pattern**: `main` (hoặc `master`).
+3. Tích chọn: **Require status checks to pass before merging**.
+4. Tìm kiếm và chọn chính xác tên status check sau:
+   * **`Production Verification Gate / Lint, Test & Race Verification`**
+5. Tích chọn: **Require branches to be up to date before merging**.
+6. Nhấn **Save changes** để kích hoạt.
+
+> **Lưu ý**: CI Pipeline (`.github/workflows/ci.yml`) tự động đồng bộ toolchain từ `go.mod` và thực thi chuỗi kiểm tra bắt buộc:
+> `go mod verify` $\rightarrow$ `gofmt` $\rightarrow$ `go vet` $\rightarrow$ `staticcheck` $\rightarrow$ `govulncheck` $\rightarrow$ `go test -v` $\rightarrow$ `go test -race`.

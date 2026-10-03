@@ -618,14 +618,6 @@ func walkMedia(v any, urls *[]string) {
 	}
 }
 
-func mustJSON(v any) string {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return ""
-	}
-	return string(raw)
-}
-
 type ExtractedMediaItem struct {
 	URL            string
 	PlaceholderURL string

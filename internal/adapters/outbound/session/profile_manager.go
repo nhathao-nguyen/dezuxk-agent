@@ -508,7 +508,7 @@ func (pm *ProfileManager) IngestLiveCookiesWithProxy(
 
 	hasGemini := jar.HasKey("__Secure-1PSID") && jar.HasKey("__Secure-1PSIDTS")
 	if !hasGemini {
-		return nil, fmt.Errorf("chưa đủ cookie xác thực Google! Cần __Secure-1PSID và __Secure-1PSIDTS cho Gemini. Hãy hoàn tất đăng nhập Google trên Chrome rồi thử lại.")
+		return nil, fmt.Errorf("chưa đủ cookie xác thực Google! Cần __Secure-1PSID và __Secure-1PSIDTS cho Gemini. Hãy hoàn tất đăng nhập Google trên Chrome rồi thử lại")
 	}
 
 	pm.mu.RLock()

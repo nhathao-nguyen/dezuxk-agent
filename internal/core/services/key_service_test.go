@@ -50,6 +50,9 @@ func TestKeyService_CreateAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected key with Bearer prefix to be valid, got: %v", err)
 	}
+	if vKey.ID != created.ID {
+		t.Fatalf("expected ID %s, got %s", created.ID, vKey.ID)
+	}
 
 	// 4. Validate với model không được phép
 	_, err = service.ValidateKey(ctx, created.Key, "veo-2.0-generate-001")

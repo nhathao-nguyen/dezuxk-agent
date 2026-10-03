@@ -529,11 +529,6 @@ func (r *SqliteSessionRepository) Release(account *domain.ManagedAccount, err er
 		account.InFlightReqs--
 	}
 
-	cdStr := ""
-	if !account.CooldownUntil.IsZero() {
-		cdStr = account.CooldownUntil.Format(time.RFC3339)
-	}
-
 	// Trường hợp yêu cầu thành công: Ghi nhận success và hồi phục điểm sức khỏe
 	if err == nil {
 		account.RecordSuccess()
@@ -569,7 +564,7 @@ func (r *SqliteSessionRepository) Release(account *domain.ManagedAccount, err er
 		cdUntil := time.Now().Add(dynamicCooldown)
 		account.CoolService(service, cdUntil, class)
 		account.SetCooldown(cdUntil)
-		cdStr = cdUntil.Format(time.RFC3339)
+		cdStr := cdUntil.Format(time.RFC3339)
 
 		// Ghi nhận cảnh báo Proxy khi gặp lỗi kết nối và tài khoản có cấu hình proxy
 		if account.GetProxy() != "" && class == domain.ClassUpstreamUnavailable {

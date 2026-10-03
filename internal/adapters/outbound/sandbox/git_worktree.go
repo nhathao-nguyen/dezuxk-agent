@@ -249,9 +249,18 @@ func (m *WorktreeManager) GetSandboxForTenant(ctx context.Context, taskID string
 		return nil, fmt.Errorf("không tìm thấy sandbox cho task %s", taskID)
 	}
 
-	identity, hasID := domain.TenantIdentityFromContext(ctx)
-	if hasID && identity.Role != "admin" && sb.TenantID != identity.TenantID && sb.TenantID != "default" && sb.TenantID != "" {
-		return nil, fmt.Errorf("truy cập bị chặn: sandbox %s không thuộc quyền sở hữu của tenant %s", taskID, identity.TenantID)
+	callerTenant := "default"
+	isAdmin := false
+	if identity, hasID := domain.TenantIdentityFromContext(ctx); hasID {
+		if identity.Role == "admin" {
+			isAdmin = true
+		}
+		if identity.TenantID != "" {
+			callerTenant = identity.TenantID
+		}
+	}
+	if !isAdmin && sb.TenantID != callerTenant {
+		return nil, fmt.Errorf("truy cập bị chặn: sandbox %s không thuộc quyền sở hữu của tenant %s", taskID, callerTenant)
 	}
 
 	return sb, nil

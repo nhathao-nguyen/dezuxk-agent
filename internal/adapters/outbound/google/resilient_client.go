@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -57,7 +56,6 @@ type ResilientUpstreamClient struct {
 	breaker    *CircuitBreaker
 
 	// Thống kê & Retry Budget
-	mu             sync.Mutex
 	totalRequests  int64
 	totalRetries   int64
 	totalFailures  int64

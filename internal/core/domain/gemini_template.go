@@ -12,13 +12,6 @@ const geminiNewChatFreq = `[null,"[[[\"Câu hỏi mở đầu cho cuộc trò ch
 
 const geminiThinkingFreq = `[null,"[[[\"Hãy chứng minh định lý Fermat nhỏ và giải thích từng bước tư duy\",0,null,null,null,null,0],[\"vi\"],[\"\",\"\",\"\",null,null,null,null,null,null,\"\"],null,null,null,[0],1,null,null,1,0,null,null,null,null,null,[[0]],0,null,null,null,null,null,null,null,null,1,null,null,[4],null,null,null,null,null,null,null,null,null,null,[1],null,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,null,\"THINKING_UUID\",null,[],null,null,null,null,null,0,1,null,null,null,null,null,null,null,null,null,null,3,1,null,null,null,null,null,null,null,null,null,null,0,null,null,null,null,1,null,1]]"]`
 
-const (
-	geminiFixturePrompt   = "Câu hỏi mở đầu cho cuộc trò chuyện mới"
-	geminiFixtureThinking = "Hãy chứng minh định lý Fermat nhỏ và giải thích từng bước tư duy"
-	geminiFixtureUUID     = "NEW_CHAT_UUID"
-	geminiFixtureThinkID  = "THINKING_UUID"
-)
-
 var (
 	geminiTemplateMu    sync.RWMutex
 	geminiBaseSlots     []any
