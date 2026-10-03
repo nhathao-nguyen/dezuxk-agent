@@ -55,15 +55,16 @@ func (h *AgentHandler) SetJobService(js ports.AgentJobService, repo ports.AgentR
 
 // AgentRunRequest cấu trúc payload gửi lên /v1/agent/run
 type AgentRunRequest struct {
-	Goal         string `json:"goal"`
-	Workflow     string `json:"workflow,omitempty"` // "graph" (mặc định) | "react"
-	ResumeTaskID string `json:"resume_task_id,omitempty"`
-	Model        string `json:"model,omitempty"`
-	Workspace    string `json:"workspace,omitempty"`
-	Supervised   bool   `json:"supervised,omitempty"`
-	MaxSteps     int    `json:"max_steps,omitempty"`
-	UseSandbox   bool   `json:"use_sandbox,omitempty"`
-	AutoMerge    bool   `json:"auto_merge,omitempty"`
+	Goal           string `json:"goal"`
+	Workflow       string `json:"workflow,omitempty"` // "graph" (mặc định) | "react"
+	ResumeTaskID   string `json:"resume_task_id,omitempty"`
+	Model          string `json:"model,omitempty"`
+	Workspace      string `json:"workspace,omitempty"`
+	Supervised     bool   `json:"supervised,omitempty"`
+	MaxSteps       int    `json:"max_steps,omitempty"`
+	UseSandbox     bool   `json:"use_sandbox,omitempty"`
+	AutoMerge      bool   `json:"auto_merge,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 func (h *AgentHandler) resolveEffectiveOptions(ctx context.Context, req AgentRunRequest) (domain.AgentRunOptions, error) {
@@ -766,6 +767,12 @@ func (h *AgentHandler) HandleCreateRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	idempKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempKey == "" {
+		idempKey = strings.TrimSpace(r.Header.Get("X-Idempotency-Key"))
+	}
+	if idempKey == "" {
+		idempKey = strings.TrimSpace(req.IdempotencyKey)
+	}
 	run, err := h.jobService.SubmitRun(r.Context(), req.Goal, opts, idempKey)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)

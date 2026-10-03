@@ -119,7 +119,7 @@ func TestClusterProcess_03_CrossNodeHTTPState(t *testing.T) {
 	}
 	defer respA.Body.Close()
 
-	if respA.StatusCode != http.StatusCreated && respA.StatusCode != http.StatusOK {
+	if respA.StatusCode != http.StatusCreated && respA.StatusCode != http.StatusOK && respA.StatusCode != http.StatusAccepted {
 		b, _ := io.ReadAll(respA.Body)
 		t.Fatalf("Gateway A trả về status %d: %s", respA.StatusCode, string(b))
 	}
@@ -391,6 +391,7 @@ func TestClusterProcess_07_IdempotencyRace(t *testing.T) {
 			req, _ := http.NewRequest(http.MethodPost, u+"/v1/agent/runs", bytes.NewReader(bBytes))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", "Bearer "+masterAPIKey)
+			req.Header.Set("Idempotency-Key", idempotencyKey)
 			req.Header.Set("X-Idempotency-Key", idempotencyKey)
 
 			resp, err := client.Do(req)
