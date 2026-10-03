@@ -79,21 +79,34 @@ type SubagentSupervisor interface {
 type AgentRunRepository interface {
 	Create(ctx context.Context, run *domain.AgentRun) error
 	Update(ctx context.Context, run *domain.AgentRun) error
+	UpdateWithTransition(ctx context.Context, run *domain.AgentRun, allowedFromStatuses ...domain.AgentRunStatus) (bool, error)
 	Get(ctx context.Context, runID string) (*domain.AgentRun, error)
+	GetForTenant(ctx context.Context, tenantID, runID string) (*domain.AgentRun, error)
 	List(ctx context.Context, tenantID string, limit, offset int) ([]*domain.AgentRun, error)
+	ListPendingRuns(ctx context.Context) ([]*domain.AgentRun, error)
 	AppendEvent(ctx context.Context, event *domain.AgentRunEvent) error
 	GetEvents(ctx context.Context, runID string, afterID int64) ([]domain.AgentRunEvent, error)
+	GetEventsForTenant(ctx context.Context, tenantID, runID string, afterID int64) ([]domain.AgentRunEvent, error)
 	Cancel(ctx context.Context, runID string) error
+	CancelForTenant(ctx context.Context, tenantID, runID string) error
+	ClaimRun(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error)
 	FindByTenantAndIdempotencyKey(ctx context.Context, tenantID, key string) (*domain.AgentRun, error)
 }
 
 // AgentJobService giao diện điều phối hàng đợi và thực thi tác vụ Agent chạy nền (Async Job Engine)
 type AgentJobService interface {
+	Start(ctx context.Context) error
+	Shutdown(ctx context.Context) error
+	RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun, error)
 	SubmitRun(ctx context.Context, goal string, opts domain.AgentRunOptions, idempotencyKey string) (*domain.AgentRun, error)
 	GetRun(ctx context.Context, runID string) (*domain.AgentRun, error)
+	GetRunForTenant(ctx context.Context, tenantID, runID string) (*domain.AgentRun, error)
 	CancelRun(ctx context.Context, runID string) error
+	CancelRunForTenant(ctx context.Context, tenantID, runID string) error
 	ResumeRun(ctx context.Context, runID string, feedback string) (*domain.AgentRun, error)
+	ResumeRunForTenant(ctx context.Context, tenantID, runID string, feedback string) (*domain.AgentRun, error)
 	SubscribeEvents(ctx context.Context, runID string) (<-chan domain.AgentRunEvent, func(), error)
+	SubscribeEventsForTenant(ctx context.Context, tenantID, runID string) (<-chan domain.AgentRunEvent, func(), error)
 }
 
 // DistributedLockProvider giao diện khóa phân tán hỗ trợ môi trường multi-instance

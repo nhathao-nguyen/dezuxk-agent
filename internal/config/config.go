@@ -93,12 +93,21 @@ type ServerConfig struct {
 	MaxHeaderBytes        int             `yaml:"max_header_bytes"`
 	EnableRequestLog      bool            `yaml:"enable_request_log"`
 	TrustedProxies        []string        `yaml:"trusted_proxies"`
+	ShutdownTimeout       time.Duration   `yaml:"shutdown_timeout"`
 	RateLimit             RateLimitConfig `yaml:"rate_limit"`
 }
 
 type RateLimitConfig struct {
 	MaxRequests   int `yaml:"max_requests"`
 	WindowSeconds int `yaml:"window_seconds"`
+}
+
+// GetShutdownTimeout trả về thời gian chờ an toàn khi tắt máy chủ (mặc định 15 giây)
+func (s ServerConfig) GetShutdownTimeout() time.Duration {
+	if s.ShutdownTimeout > 0 {
+		return s.ShutdownTimeout
+	}
+	return 15 * time.Second
 }
 
 // ShortTimeout là hạn chờ của nzlxg và handshake. Khóa thiếu thì 20 giây.

@@ -80,6 +80,7 @@ type AgentRunOptions struct {
 	RequireAction          bool                 `json:"require_action,omitempty"`           // Bắt buộc phải có tool call để sửa đổi thực tế, không chấp nhận text suông
 	UseSandbox             bool                 `json:"use_sandbox,omitempty"`              // Tự động tạo git worktree sandbox (.dezuxk/worktrees/<task_id>)
 	AutoMerge              bool                 `json:"auto_merge,omitempty"`               // Tự động merge vào nhánh chính khi hoàn tất thành công
+	InitialState           *AgentState          `json:"initial_state,omitempty"`            // Trạng thái Agent khởi điểm khi phục hồi từ Checkpoint (Resume)
 	OnProgress             StepProgressCallback `json:"-"`
 }
 

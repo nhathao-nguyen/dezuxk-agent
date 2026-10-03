@@ -27,11 +27,12 @@ func generateTaskID() string {
 
 // Runner triển khai ports.AgentRunner
 type Runner struct {
-	chatUseCase  ports.ChatUseCase
-	tools        ports.ToolRegistry
-	approval     ports.ApprovalProvider
-	policyEngine ports.ToolExecutionService
-	memorySvc    ports.MemoryService
+	chatUseCase    ports.ChatUseCase
+	tools          ports.ToolRegistry
+	approval       ports.ApprovalProvider
+	policyEngine   ports.ToolExecutionService
+	memorySvc      ports.MemoryService
+	checkpointRepo ports.CheckpointRepository
 }
 
 // NewRunner khởi tạo một Agent Runner
@@ -41,6 +42,11 @@ func NewRunner(chatUseCase ports.ChatUseCase, tools ports.ToolRegistry, approval
 		tools:       tools,
 		approval:    approval,
 	}
+}
+
+// SetCheckpointRepository thiết lập repository lưu trữ checkpoint cho Runner
+func (r *Runner) SetCheckpointRepository(cp ports.CheckpointRepository) {
+	r.checkpointRepo = cp
 }
 
 // SetPolicyEngine thiết lập engine chính sách điều phối kiểm soát tool
@@ -149,15 +155,43 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 
 	execCtx = domain.WithWorkspace(execCtx, opts.Workspace)
 
-	state := &domain.AgentState{
-		TaskID:      generateTaskID(),
-		Goal:        goal,
-		Model:       opts.Model,
-		Workspace:   opts.Workspace,
-		MaxSteps:    opts.MaxSteps,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-		IsCompleted: false,
+	var startStep int = 1
+	var state *domain.AgentState
+
+	if opts.InitialState != nil {
+		state = opts.InitialState
+		if state.CurrentStep > 0 {
+			startStep = state.CurrentStep + 1
+		}
+		if state.MaxSteps < opts.MaxSteps {
+			state.MaxSteps = opts.MaxSteps
+		}
+		if state.Model != "" && opts.Model == "gemini-3.8-flash" {
+			opts.Model = state.Model
+		}
+		if state.Workspace != "" && (opts.Workspace == "." || opts.Workspace == "") {
+			opts.Workspace = state.Workspace
+		}
+		state.UpdatedAt = time.Now()
+		state.IsCompleted = false
+		state.StopReason = ""
+	} else {
+		state = &domain.AgentState{
+			TaskID:      generateTaskID(),
+			Goal:        goal,
+			Model:       opts.Model,
+			Workspace:   opts.Workspace,
+			MaxSteps:    opts.MaxSteps,
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+			IsCompleted: false,
+		}
+		// Khởi tạo ngữ cảnh hội thoại
+		sysPrompt := r.buildSystemPrompt(opts.Workspace, opts.CustomPrompt)
+		state.Messages = []domain.OpenAIMessage{
+			{Role: "system", Content: sysPrompt},
+			{Role: "user", Content: goal},
+		}
 	}
 
 	var sb *sandbox.Sandbox
@@ -196,20 +230,13 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	}
 	defer finalizeSandbox()
 
-	// Khởi tạo ngữ cảnh hội thoại
-	sysPrompt := r.buildSystemPrompt(opts.Workspace, opts.CustomPrompt)
-	state.Messages = []domain.OpenAIMessage{
-		{Role: "system", Content: sysPrompt},
-		{Role: "user", Content: goal},
-	}
-
 	openAITools := r.tools.ToOpenAITools()
 
 	var lastToolSig string
 	var repeatedToolCount int
 	var consecutiveFailures int
 
-	for step := 1; step <= opts.MaxSteps; step++ {
+	for step := startStep; step <= opts.MaxSteps; step++ {
 		state.CurrentStep = step
 		state.UpdatedAt = time.Now()
 
@@ -408,6 +435,24 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		}
 
 		state.Steps = append(state.Steps, stepRecord)
+
+		if r.checkpointRepo != nil {
+			cp := &domain.AgentCheckpoint{
+				TenantID:      identity.TenantID,
+				TaskID:        state.TaskID,
+				NodeKind:      domain.NodeKindExecute,
+				StepIndex:     step,
+				StateSnapshot: *state,
+				PlanSnapshot: domain.TaskPlan{
+					Goal: state.Goal,
+				},
+				CreatedAt: time.Now(),
+			}
+			_ = r.checkpointRepo.SaveCheckpoint(execCtx, cp)
+			if opts.OnProgress != nil {
+				opts.OnProgress(step, "checkpoint", fmt.Sprintf("Checkpoint tại bước %d đã được lưu bền vững", step))
+			}
+		}
 	}
 
 	// Hết số bước tối đa

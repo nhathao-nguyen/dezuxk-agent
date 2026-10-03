@@ -395,17 +395,20 @@ flowchart TD
 * **Thời hạn thực thi tối đa (Execution Deadline)**: Ngắt tác vụ với `timeout` nếu vượt quá `MaxExecutionDuration`.
 * **9 Stop Reasons chuẩn hóa**: `completed`, `max_steps_reached`, `max_tool_calls_reached`, `repeated_tool_loop`, `timeout`, `cancelled`, `upstream_unavailable`, `policy_denied`, `verification_failed`.
 
-### 9.6. Durable Agent Job System & Checkpointing (P1)
+### 9.6. Durable Agent Job System, Checkpointing & Recovery (P0/P1)
 * **Bất đồng bộ hóa (Async Job API)**:
   * `POST /v1/agent/runs`: Khởi tạo tác vụ chạy nền, trả ngay HTTP 202 `{ "id": "...", "status": "queued" }`.
-  * `GET /v1/agent/runs/{id}`: Tra cứu trạng thái và toàn bộ các bước thực thi.
-  * `GET /v1/agent/runs`: Liệt kê các tác vụ của tenant.
-  * `POST /v1/agent/runs/{id}/cancel`: Hủy tác vụ đang chạy nền.
-  * `POST /v1/agent/runs/{id}/resume`: Tiếp tục tác vụ với phản hồi bổ sung từ người dùng.
-  * `GET /v1/agent/runs/{id}/events`: Stream SSE thời gian thực tiến trình của tác vụ (`thinking`, `tool_start`, `tool_end`, `completed`).
+  * `GET /v1/agent/runs/{id}`: Tra cứu trạng thái và toàn bộ các bước thực thi (bảo vệ tuyệt đối theo Tenant).
+  * `GET /v1/agent/runs`: Liệt kê các tác vụ của tenant tương ứng.
+  * `POST /v1/agent/runs/{id}/cancel`: Hủy tác vụ đang chạy nền (ngăn chặn race condition ghi đè trạng thái).
+  * `POST /v1/agent/runs/{id}/resume`: Phục hồi tác vụ dựa trên snapshot trạng thái thực (`AgentCheckpoint`), liên kết quan hệ cha - con qua `ParentRunID` và `ResumeFromRunID`. Trả về lỗi rõ ràng `run_not_resumable` nếu thiếu dữ liệu snapshot.
+  * `GET /v1/agent/runs/{id}/events`: Stream SSE thời gian thực tiến trình của tác vụ với cơ chế kiểm tra quyền Tenant.
 * **Tương thích hoàn toàn (Backward Compatibility)**: Duy trì đầy đủ endpoint đồng bộ `POST /v1/agent/run` và `POST /v1/agent/run/stream`.
-* **Bền vững hóa với SQLite Checkpointing**: Lưu trữ bản ghi `agent_runs` và `agent_run_events` trên cơ sở dữ liệu SQLite (WAL mode), đảm bảo không mất trạng thái khi máy chủ khởi động lại.
-* **Cơ chế Idempotency**: Header `Idempotency-Key` ngăn chặn việc khởi tạo lặp tác vụ khi client gửi lại request do timeout mạng.
+* **Cơ chế Idempotency Race-Safe**: Unique partial index `(tenant_id, idempotency_key)` trên SQLite đảm bảo 100% khi nhiều request cùng gửi đồng thời chỉ sinh đúng 1 bản ghi duy nhất, các request song song trả về run đã tồn tại.
+* **Khôi phục tác vụ bền vững sau khởi động lại (`RecoverPendingRuns`)**:
+  * Tự động quét trạng thái khi startup: `queued` (requeue), `running` (phục hồi checkpoint sang `recovering` hoặc dừng an toàn `interrupted` với stop reason `server_restart`), `waiting_for_approval` (tiếp tục chờ), `waiting_for_tool` (phục hồi nếu có checkpoint).
+  * Ghi nhận audit trail: `server_restart_detected`, `run_recovered`, `run_interrupted`.
+* **Atomic Claim Semantics (Multi-Instance Ready)**: Bổ sung các trường `worker_id`, `lease_until`, `heartbeat_at` cho `agent_runs`, hỗ trợ claim độc quyền tác vụ qua SQL Compare-And-Swap (CAS).
 
 ### 9.7. Tool Calling Normalization & Execution Policy (P1)
 * **Canonical Internal Representation**: `ToolCall` và `ToolResult` chuẩn hóa độc lập với định dạng OpenAI hay Gemini.
@@ -419,7 +422,7 @@ flowchart TD
 * **Dynamic Retry-After**: Tự động tính toán chính xác số giây cần chờ và phản hồi chuẩn HTTP 429.
 * **Max Request Body Size**: Giới hạn trần tối đa dung lượng request (50MB) bảo vệ máy chủ khỏi tấn công DoS payload lớn.
 
-### 9.9. Giám Sát & Observability Toàn Diện (P2)
+### 9.9. Giám Sát, Readiness & Graceful Lifecycle (P0/P1/P2)
 * **Prometheus Metrics Exporter (`GET /metrics`)**: Xuất dữ liệu chuẩn Prometheus format:
   * `gateway_requests_total`
   * `gateway_errors_total`
@@ -428,10 +431,19 @@ flowchart TD
   * `gemini_account_failures_total{account_id, status, code}`
   * `gemini_account_avg_latency_ms{account_id}`
   * `agent_runs_total{status}`
-* **Liveness vs Readiness Probes**:
+* **Liveness vs Graceful Readiness Probes**:
   * `GET /health` (Liveness): Trả về HTTP 200 `status: "ok"` kiểm tra tiến trình máy chủ còn hoạt động.
-  * `GET /ready` (Readiness): Kiểm tra kết nối cơ sở dữ liệu SQLite, kho lưu trữ phiên tài khoản, và danh mục mô hình khả dụng.
-* **Graceful Shutdown**: Lắng nghe tín hiệu `SIGINT` / `SIGTERM`, dừng nhận request mới, đợi 15 giây cho các tác vụ in-flight và agent jobs kết thúc an toàn, sau đó đóng kết nối cơ sở dữ liệu SQLite.
+  * `GET /ready` (Readiness): Kiểm soát qua `ReadinessManager` (cờ nguyên tử `atomic.Bool`). Khi server bắt đầu shutdown drain, `/ready` chuyển ngay lập tức sang HTTP 503 trước khi ngắt kết nối.
+* **Trật tự tắt máy chủ chuẩn mực (Graceful Shutdown)**:
+  `Dừng nhận HTTP → Dừng nhận Agent Runs mới → Drain/Cancel JobService workers → Chờ workers kết thúc → Persist DB → Đóng SQLite`.
+
+### 9.10. Tenant Isolation Architecture (P0)
+* **Cô lập dữ liệu đa người thuê (Multi-Tenant Isolation)**:
+  * Toàn bộ thao tác CRUD và sự kiện Agent Runs bắt buộc kiểm tra định danh `TenantIdentity` từ Context.
+  * Tầng Repository áp dụng mệnh đề `WHERE id = ? AND tenant_id = ?` cho toàn bộ các API tenant-facing.
+  * Tuyệt đối không fallback về tenant `"default"` khi request đã xác thực nhưng thiếu tenant ID.
+  * Ngăn chặn hoàn toàn việc rò rỉ dữ liệu hoặc can thiệp chéo giữa các Tenant (ID Enumeration / Insecure Direct Object References).
+
 
 
 

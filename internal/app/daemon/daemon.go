@@ -238,7 +238,17 @@ func Run(configPath string, portOverride int) error {
 	if agentRunRepo == nil {
 		agentRunRepo = session.NewMemoryAgentRunRepository()
 	}
+	agentRunner.SetCheckpointRepository(checkpointRepo)
+
 	agentJobService := agent.NewJobService(agentRunRepo, agentRunner)
+	agentJobService.SetCheckpointRepository(checkpointRepo)
+
+	serverCtx, serverCancel := context.WithCancel(context.Background())
+	defer serverCancel()
+	_ = agentJobService.Start(serverCtx)
+
+	readinessManager := adaptersHTTP.NewReadinessManager()
+	readinessManager.SetReady(false)
 
 	// Khởi tạo 3-Tier Memory Manager (Working, Recall, Archival)
 	initialCore := domain.CoreMemory{
@@ -308,6 +318,7 @@ func Run(configPath string, portOverride int) error {
 		SubagentSupervisor:    subagentSupervisor,
 		AgentJobService:       agentJobService,
 		AgentRunRepo:          agentRunRepo,
+		ReadinessManager:      readinessManager,
 	})
 
 	// 8. Khởi động GeminiChatGoldenJob và Proactive Session Keep-Alive Worker
@@ -316,6 +327,15 @@ func Run(configPath string, portOverride int) error {
 	startGeminiChatGoldenRunner(goldenCtx, wire, upstreamTransport, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
 	startProactiveKeepAliveRunner(goldenCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
 	startStartupTierDiscovery(goldenCtx, sessionRepo, geminiQuotaService)
+
+	// Phục hồi an toàn các tác vụ Agent dở dang trước khi mở sẵn sàng
+	log.Println("[Agent Recovery] Đang quét và khôi phục các tác vụ Agent dở dang...")
+	if recovered, err := agentJobService.RecoverPendingRuns(serverCtx); err != nil {
+		log.Printf("[Agent Recovery Warning] Lỗi khi khôi phục pending runs: %v", err)
+	} else if len(recovered) > 0 {
+		log.Printf("[Agent Recovery] Đã khôi phục và xử lý an toàn %d tác vụ dở dang sau khởi động lại.", len(recovered))
+	}
+	readinessManager.SetReady(true)
 
 	serverAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	httpServer := &http.Server{
@@ -348,15 +368,29 @@ func Run(configPath string, portOverride int) error {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("[Server] Shutting down gracefully (15s drain)...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	log.Println("[Server] Bắt đầu quy trình tắt máy chủ an toàn (Graceful Shutdown)...")
+	// 1. Chuyển /ready sang 503 ngay lập tức trước khi drain
+	readinessManager.SetReady(false)
+
+	shutdownTimeout := cfg.Server.GetShutdownTimeout()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
+	// 2. Dừng nhận HTTP và drain kết nối
+	log.Printf("[Server] Dừng tiếp nhận HTTP và drain kết nối (timeout: %v)...", shutdownTimeout)
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("force shutdown error: %w", err)
+		log.Printf("[Server Warning] Lỗi khi dừng HTTP server: %v", err)
 	}
 
+	// 3. Dừng tiếp nhận Agent Runs mới và drain / cancel JobService workers
+	log.Println("[Agent] Dừng tiếp nhận Agent Runs mới và chờ hoàn tất các tác vụ nền...")
+	if err := agentJobService.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[Agent Warning] Lỗi khi shutdown Agent Job Service: %v", err)
+	}
+
+	// 4. Đóng kết nối cơ sở dữ liệu SQLite sau khi tất cả worker đã hoàn tất ghi trạng thái
 	if sqliteRepo != nil {
+		log.Println("[Database] Đóng cơ sở dữ liệu SQLite...")
 		_ = sqliteRepo.Close()
 	}
 

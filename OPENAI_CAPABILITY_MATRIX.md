@@ -11,15 +11,15 @@ Tài liệu này xác định chi tiết ma trận tương thích giữa Dezuxk 
 | `/v1/models` | GET | **100%** | Trả về danh sách mô hình dạng OpenAI standard. |
 | `/v1/agent/run` | POST | **100%** | Synchronous Agent ReAct Loop và State Machine Graph. |
 | `/v1/agent/run/stream` | POST | **100%** | Synchronous SSE Streaming Agent execution. |
-| `/v1/agent/runs` | POST | **100%** | Async Durable Agent Job Submission (trả ngay HTTP 202 `{id, status}`). |
-| `/v1/agent/runs/{id}` | GET | **100%** | Tra cứu trạng thái và lịch sử bước chạy của Agent Run. |
-| `/v1/agent/runs` | GET | **100%** | Liệt kê danh sách Agent Runs theo tenant. |
-| `/v1/agent/runs/{id}/cancel` | POST | **100%** | Hủy tác vụ Agent đang chạy nền. |
-| `/v1/agent/runs/{id}/resume` | POST | **100%** | Tiếp tục Agent Run với phản hồi bổ sung từ người dùng. |
-| `/v1/agent/runs/{id}/events` | GET | **100%** | Server-Sent Events (SSE) theo dõi sự kiện thời gian thực của tác vụ. |
+| `/v1/agent/runs` | POST | **100%** | Async Durable Agent Job Submission (trả ngay HTTP 202 `{id, status}`). Idempotency an toàn trước race condition. |
+| `/v1/agent/runs/{id}` | GET | **100%** | Tra cứu trạng thái và lịch sử bước chạy của Agent Run có bảo vệ Tenant Isolation. |
+| `/v1/agent/runs` | GET | **100%** | Liệt kê danh sách Agent Runs theo tenant xác thực. |
+| `/v1/agent/runs/{id}/cancel` | POST | **100%** | Hủy tác vụ Agent đang chạy nền (chống race condition đè trạng thái). |
+| `/v1/agent/runs/{id}/resume` | POST | **Partial** | Phục hồi tác vụ dựa trên snapshot trạng thái thực (`AgentCheckpoint`). Nếu không có checkpoint khả dụng, trả về lỗi `run_not_resumable`. |
+| `/v1/agent/runs/{id}/events` | GET | **100%** | Server-Sent Events (SSE) theo dõi sự kiện thời gian thực (được bảo vệ theo Tenant). |
 | `/metrics` | GET | **100%** | Prometheus Metrics Exporter (text/plain 0.0.4) cho Grafana/Datadog. |
 | `/health` | GET | **100%** | Liveness Probe kiểm tra tiến trình máy chủ còn hoạt động (`status: ok`). |
-| `/ready` | GET | **100%** | Readiness Probe kiểm tra SQLite DB, session pool, và active models. |
+| `/ready` | GET | **100%** | Readiness Probe kiểm tra SQLite DB, session pool, active models, và ReadinessManager (trả về 503 ngay khi shutdown). |
 
 ---
 
@@ -63,4 +63,14 @@ Tài liệu này xác định chi tiết ma trận tương thích giữa Dezuxk 
 
 - **OpenAI Codex CLI Fallback**: Khi `Accept` header chứa `text/event-stream` hoặc `User-Agent` chứa `codex`, gateway tự động kích hoạt chế độ streaming event translator tương thích chuẩn Responses API.
 - **Malformed Tool Arguments Repair**: Gateway tự động sửa cú pháp JSON bị lỗi từ mô hình (loại bỏ markdown fence, sửa trailing comma, đóng ngoặc bị cắt ngắn) trước khi chuyển sang lớp thực thi công cụ.
+
+---
+
+## 5. Deployment & Scalability Capability Matrix
+
+| Khả năng | Trạng thái | Ghi chú & Giới hạn |
+| :--- | :---: | :--- |
+| **Single-Instance Production** | **100% (Ready)** | SQLite WAL mode, Atomic Claim qua SQL CAS, Idempotency Unique partial index, Graceful Shutdown và Durable Job Recovery hoạt động độc lập toàn diện. |
+| **Multi-Instance Distributed Cluster** | **Partial** | Đã sẵn sàng các trường `worker_id`, `lease_until`, `heartbeat_at` và interface `DistributedLockProvider`. Tuy nhiên, nếu triển khai nhiều node gateway vật lý trên các máy chủ khác nhau mà không dùng shared file system (NFS/Ceph) hoặc database phân tán (PostgreSQL/Redis), cần cắm thêm distributed adapter bên ngoài. |
+
 

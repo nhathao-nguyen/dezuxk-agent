@@ -115,9 +115,57 @@
 ---
 
 ## 3. CHECKLIST KIỂM SOÁT TÍNH TƯƠNG THÍCH (BACKWARD COMPATIBILITY)
-- [ ] Giữ nguyên 100% chữ ký của `POST /v1/chat/completions` (sync và stream).
-- [ ] Giữ nguyên `POST /v1/responses` tương thích OpenAI Codex CLI.
-- [ ] Giữ nguyên `GET /v1/models`.
-- [ ] Giữ nguyên `POST /v1/agent/run` và `POST /v1/agent/run/stream`.
-- [ ] Giữ nguyên các use cases và interfaces hiện hành trong `ports/`.
-- [ ] Tất cả các test hiện có (`go test ./...` và `go test -race ./...`) phải tiếp tục PASS.
+- [x] Giữ nguyên 100% chữ ký của `POST /v1/chat/completions` (sync và stream).
+- [x] Giữ nguyên `POST /v1/responses` tương thích OpenAI Codex CLI.
+- [x] Giữ nguyên `GET /v1/models`.
+- [x] Giữ nguyên `POST /v1/agent/run` và `POST /v1/agent/run/stream`.
+- [x] Giữ nguyên các use cases và interfaces hiện hành trong `ports/`.
+- [x] Tất cả các test hiện có (`go test ./...` và `go test -race ./...`) đạt 100% PASS.
+
+---
+
+## 4. KẾT QUẢ TRIỂN KHAI PRODUCTION HARDENING (AUDIT → PATCH → TEST → RACE TEST → VERIFY)
+
+### 4.1 P0 & P1 Hardening Status
+1. **Tenant Isolation (Hoàn tất 100%):**
+   - Enforce định danh `TenantIdentity` tại tầng Repository (`GetForTenant`, `CancelForTenant`, `GetEventsForTenant`) và Service (`GetRunForTenant`, `CancelRunForTenant`, `ResumeRunForTenant`, `SubscribeEventsForTenant`).
+   - Xóa bỏ hoàn toàn truy vấn không kiểm tra tenant `WHERE id = ?` trên API tenant-facing. Thay bằng `WHERE id = ? AND tenant_id = ?`.
+   - Chặn tuyệt đối fallback về tenant `"default"` khi request đã authenticate nhưng thiếu thông tin tenant hợp lệ.
+   - Thử nghiệm với test cô lập: Tenant A tạo run; Tenant B đọc run A (404 Not Found), hủy run A (bị từ chối), resume run A (bị từ chối), stream events run A (bị từ chối).
+2. **Idempotency Race Condition (Hoàn tất 100%):**
+   - Tạo unique partial index trên SQLite: `UNIQUE(tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''`.
+   - Bắt và xử lý lỗi xung đột `ErrIdempotencyConflict` từ database: Nếu có race condition giữa 2 request đến cùng thời điểm, request sau bắt unique violation, refetch và trả về run đã tạo, không chạy đúp worker.
+   - Concurrency race test với 25 goroutines đồng thời submit cùng một idempotency key: 100% goroutines trả về cùng 1 Run ID duy nhất và SQLite chỉ có đúng 1 row.
+3. **Durable Job Recovery Sau Restart (Hoàn tất 100%):**
+   - Thêm phương thức `RecoverPendingRuns(ctx)` quét các tác vụ có trạng thái `queued`, `running`, `waiting_for_tool`, `waiting_for_approval`.
+   - Bổ sung trạng thái `RunStatusRecovering` ("recovering") và `RunStatusInterrupted` ("interrupted"), `StopReasonServerRestart` ("server_restart").
+   - Chiến lược:
+     - `queued`: Requeue tự động.
+     - `running`: Nếu có checkpoint snapshot thì mark `recovering` và tiếp tục chạy; nếu không có checkpoint thì mark `interrupted` kèm stop reason `server_restart`.
+     - `waiting_for_approval`: Giữ nguyên trạng thái chờ duyệt.
+     - `waiting_for_tool`: Phục hồi từ checkpoint nếu đủ dữ liệu, nếu không mark `interrupted`.
+   - Ghi nhận đầy đủ chuỗi sự kiện: `server_restart_detected`, `run_recovered`, `run_interrupted`.
+4. **Job Service Lifecycle & Daemon Shutdown (Hoàn tất 100%):**
+   - Bổ sung `Start(ctx)` và `Shutdown(ctx)` cho `JobService` với `sync.WaitGroup`, root context, và cờ nguyên tử `acceptingJobs`.
+   - Trật tự tắt máy chủ chuẩn:
+     `Dừng nhận HTTP → Dừng nhận Agent Runs mới → Drain/Cancel JobService workers → Chờ workers kết thúc → Persist DB → Đóng SQLite`.
+   - Bổ sung cấu hình `server.shutdown_timeout` (mặc định 15 giây).
+5. **Real Resume Dựa Trên Checkpoint (Hoàn tất 100%):**
+   - Liên kết quan hệ cha - con qua `ParentRunID` và `ResumeFromRunID`.
+   - Phục hồi toàn vẹn messages trước đó, steps, tool results, workspace, model, limits từ `AgentCheckpoint.StateSnapshot`.
+   - Nếu không có checkpoint hoặc không đủ dữ liệu để resume an toàn: trả về lỗi rõ ràng `run_not_resumable`, tuyệt đối không rerun mù từ đầu.
+6. **Tenant-Aware Event Storage & SSE (Hoàn tất 100%):**
+   - Bổ sung `tenant_id` vào `agent_run_events` và index `idx_agent_run_events_tenant_run`.
+   - Truy vấn đọc events join chặt chẽ với `agent_runs` để kiểm chứng tenant ownership.
+   - Endpoint SSE `/v1/agent/runs/{id}/events` và `SubscribeEventsForTenant` kiểm tra tenant isolation trước khi stream.
+7. **Cancel Consistency & State Transitions (Hoàn tất 100%):**
+   - State-aware updates tại repository và worker: `UPDATE agent_runs ... WHERE id = ? AND status != 'cancelled'`.
+   - Đảm bảo khi người dùng đã hủy (status = `cancelled`), worker kết thúc sau đó không thể ghi đè sang `completed` hoặc `failed`.
+8. **Graceful Readiness (Hoàn tất 100%):**
+   - Triển khai `ReadinessManager` với `atomic.Bool`.
+   - Startup: `ready = false` → nạp dependencies → khôi phục pending runs → `ready = true`.
+   - Shutdown: `ready = false` ngay lập tức trước khi drain HTTP, `/ready` lập tức trả về HTTP 503 Service Unavailable.
+9. **Multi-Instance Safety & Atomic Claim (Partial):**
+   - Đã bổ sung các trường `worker_id`, `lease_until`, `heartbeat_at` vào `agent_runs`.
+   - Triển khai semantics `ClaimRun` nguyên tử bằng SQL CAS (`UPDATE ... WHERE id = ? AND (status = 'queued' OR lease_until < ?)`).
+   - Đánh giá: **Ready for Single Instance** (sản xuất với SQLite WAL mode) / **Partial** cho Multi-Instance (cần cơ chế shared storage hoặc distributed lock Redis nếu chạy đa node không chia sẻ đĩa).

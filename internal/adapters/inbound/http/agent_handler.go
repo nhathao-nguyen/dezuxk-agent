@@ -3,12 +3,14 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"dezuxk-gateway/internal/adapters/outbound/sandbox"
+	"dezuxk-gateway/internal/adapters/outbound/session"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 
@@ -711,6 +713,14 @@ func (h *AgentHandler) HandleSandboxRollback(w http.ResponseWriter, r *http.Requ
 	})
 }
 
+func (h *AgentHandler) resolveTenant(r *http.Request) (string, error) {
+	identity, ok := domain.TenantIdentityFromContext(r.Context())
+	if !ok || strings.TrimSpace(identity.TenantID) == "" {
+		return "", errors.New("yêu cầu định danh tenant hợp lệ (thiếu thông tin tenant_id trong context xác thực)")
+	}
+	return strings.TrimSpace(identity.TenantID), nil
+}
+
 // HandleCreateRun xử lý POST /v1/agent/runs (Async Job Submission)
 func (h *AgentHandler) HandleCreateRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -775,12 +785,21 @@ func (h *AgentHandler) HandleGetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID, err := h.resolveTenant(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
 	runID := chi.URLParam(r, "id")
-	run, err := h.jobService.GetRun(r.Context(), runID)
+	run, err := h.jobService.GetRunForTenant(r.Context(), tenantID, runID)
 	if err != nil || run == nil {
 		w.WriteHeader(http.StatusNotFound)
 		msg := "Không tìm thấy agent run"
-		if err != nil {
+		if err != nil && !errors.Is(err, session.ErrRunNotFound) && !strings.Contains(err.Error(), "not found") {
 			msg = err.Error()
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{
@@ -804,9 +823,13 @@ func (h *AgentHandler) HandleListRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID := "default"
-	if id, ok := domain.TenantIdentityFromContext(r.Context()); ok && id.TenantID != "" {
-		tenantID = id.TenantID
+	tenantID, err := h.resolveTenant(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
 	}
 
 	runs, err := h.runRepo.List(r.Context(), tenantID, 50, 0)
@@ -840,8 +863,24 @@ func (h *AgentHandler) HandleCancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID, err := h.resolveTenant(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
 	runID := chi.URLParam(r, "id")
-	if err := h.jobService.CancelRun(r.Context(), runID); err != nil {
+	if err := h.jobService.CancelRunForTenant(r.Context(), tenantID, runID); err != nil {
+		if errors.Is(err, session.ErrRunNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "Không tìm thấy agent run hoặc không thuộc tenant này",
+			})
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": "Lỗi khi hủy agent run: " + err.Error(),
@@ -868,14 +907,30 @@ func (h *AgentHandler) HandleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID, err := h.resolveTenant(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"error": err.Error(),
+		})
+		return
+	}
+
 	runID := chi.URLParam(r, "id")
 	var req struct {
 		Feedback string `json:"feedback,omitempty"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	newRun, err := h.jobService.ResumeRun(r.Context(), runID, req.Feedback)
+	newRun, err := h.jobService.ResumeRunForTenant(r.Context(), tenantID, runID, req.Feedback)
 	if err != nil {
+		if errors.Is(err, session.ErrRunNotFound) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "Không tìm thấy agent run hoặc không thuộc tenant này",
+			})
+			return
+		}
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": "Không thể resume agent run: " + err.Error(),
@@ -894,8 +949,14 @@ func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	tenantID, err := h.resolveTenant(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
 	runID := chi.URLParam(r, "id")
-	run, err := h.jobService.GetRun(r.Context(), runID)
+	run, err := h.jobService.GetRunForTenant(r.Context(), tenantID, runID)
 	if err != nil || run == nil {
 		http.Error(w, "Không tìm thấy agent run", http.StatusNotFound)
 		return
@@ -913,8 +974,8 @@ func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// 1. Gửi các sự kiện lịch sử đã lưu trước đó
-	existingEvents, _ := h.runRepo.GetEvents(r.Context(), runID, 0)
+	// 1. Gửi các sự kiện lịch sử đã lưu trước đó có kiểm tra tenant isolation
+	existingEvents, _ := h.runRepo.GetEventsForTenant(r.Context(), tenantID, runID, 0)
 	var lastID int64
 	for _, ev := range existingEvents {
 		lastID = ev.ID
@@ -930,8 +991,8 @@ func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// 2. Subscribe sự kiện theo thời gian thực
-	eventsCh, unsubscribe, err := h.jobService.SubscribeEvents(r.Context(), runID)
+	// 2. Subscribe sự kiện theo thời gian thực có kiểm tra tenant isolation
+	eventsCh, unsubscribe, err := h.jobService.SubscribeEventsForTenant(r.Context(), tenantID, runID)
 	if err != nil {
 		return
 	}

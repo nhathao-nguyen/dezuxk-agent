@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"dezuxk-gateway/internal/adapters/inbound/web"
@@ -19,6 +20,25 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 )
+
+// ReadinessManager quản lý trạng thái sẵn sàng (Readiness State) của AI Gateway
+type ReadinessManager struct {
+	ready atomic.Bool
+}
+
+func NewReadinessManager() *ReadinessManager {
+	rm := &ReadinessManager{}
+	rm.ready.Store(false)
+	return rm
+}
+
+func (rm *ReadinessManager) SetReady(ready bool) {
+	rm.ready.Store(ready)
+}
+
+func (rm *ReadinessManager) IsReady() bool {
+	return rm.ready.Load()
+}
 
 type RouterDependencies struct {
 	Config                *config.Config
@@ -47,6 +67,7 @@ type RouterDependencies struct {
 	SubagentSupervisor ports.SubagentSupervisor
 	AgentJobService    ports.AgentJobService
 	AgentRunRepo       ports.AgentRunRepository
+	ReadinessManager   *ReadinessManager
 }
 
 func BuildRouter(deps RouterDependencies) http.Handler {
@@ -171,6 +192,13 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		checks := make(map[string]string)
 		isReady := true
+
+		if deps.ReadinessManager != nil && !deps.ReadinessManager.IsReady() {
+			checks["gateway"] = "server is starting up or shutting down"
+			isReady = false
+		} else {
+			checks["gateway"] = "ok"
+		}
 
 		if deps.ModelRegistry == nil || deps.ModelRegistry.Count() == 0 {
 			checks["models"] = "no active models registered"
