@@ -1,10 +1,15 @@
 package http
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -73,6 +78,12 @@ type RouterDependencies struct {
 	AgentRunRepo       ports.AgentRunRepository
 	ReadinessManager   *ReadinessManager
 	ClusterClient      ports.DistributedClusterClient
+}
+
+func randBytes(n int) []byte {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return b
 }
 
 func BuildRouter(deps RouterDependencies) http.Handler {
@@ -244,8 +255,6 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		checks := make(map[string]string)
 		isReady := true
 
-		isProd := deps.Config != nil && deps.Config.IsProduction()
-
 		if deps.ReadinessManager != nil && !deps.ReadinessManager.IsReady() {
 			checks["gateway"] = "server is starting up or shutting down"
 			isReady = false
@@ -264,24 +273,39 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			checks["models"] = "ok"
 		}
 
+		// 1. Kiểm tra cơ sở dữ liệu lưu trữ bắt buộc (PostgreSQL / SQLite)
 		if deps.SessionRepo == nil {
 			checks["storage"] = "storage repository not initialized"
 			isReady = false
+			if deps.Metrics != nil {
+				deps.Metrics.RecordDependencyHealth("postgres", false)
+			}
 		} else if pinger, ok := deps.SessionRepo.(interface{ Ping(context.Context) error }); ok {
 			pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
-			defer pingCancel()
 			if err := pinger.Ping(pingCtx); err != nil {
-				if isProd {
-					checks["storage"] = "unavailable"
-				} else {
-					checks["storage"] = fmt.Sprintf("database ping error: %v", err)
-				}
+				log.Printf("[Readiness] Database ping error: %v", err)
+				checks["storage"] = "unavailable"
 				isReady = false
+				if deps.Metrics != nil {
+					deps.Metrics.RecordDependencyHealth("postgres", false)
+				}
+			} else {
+				checks["storage"] = "ok"
+				if deps.Metrics != nil {
+					deps.Metrics.RecordDependencyHealth("postgres", true)
+				}
+			}
+			pingCancel()
+		} else {
+			if deps.Config != nil && deps.Config.Storage.Driver == "postgres" {
+				checks["storage"] = "unavailable"
+				isReady = false
+				if deps.Metrics != nil {
+					deps.Metrics.RecordDependencyHealth("postgres", false)
+				}
 			} else {
 				checks["storage"] = "ok"
 			}
-		} else {
-			checks["storage"] = "ok"
 		}
 
 		// Kiểm tra trạng thái tài khoản khả dụng nếu có session repo
@@ -312,47 +336,69 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				isReady = false
 			}
 		}
-		// Kiểm tra kết nối Redis trong môi trường phân tán nếu có
+
+		// 2. Kiểm tra kết nối Redis trong môi trường phân tán nếu có
 		if deps.ClusterClient != nil {
 			pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
 			if err := deps.ClusterClient.Ping(pingCtx); err != nil {
-				if isProd {
-					checks["redis"] = "unavailable"
-				} else {
-					checks["redis"] = fmt.Sprintf("redis ping error: %v", err)
-				}
+				log.Printf("[Readiness] Redis ping error: %v", err)
+				checks["redis"] = "unavailable"
 				isReady = false
+				if deps.Metrics != nil {
+					deps.Metrics.RecordDependencyHealth("redis", false)
+				}
 			} else {
 				checks["redis"] = "ok"
+				if deps.Metrics != nil {
+					deps.Metrics.RecordDependencyHealth("redis", true)
+				}
 			}
 			pingCancel()
+		} else if deps.Config != nil && deps.Config.Distributed.Enabled {
+			checks["redis"] = "unavailable"
+			isReady = false
+			if deps.Metrics != nil {
+				deps.Metrics.RecordDependencyHealth("redis", false)
+			}
 		}
 
-		// Kiểm tra kết nối S3/MinIO Shared Media nếu có
+		// 3. Kiểm tra kết nối S3/MinIO Shared Media nếu có
 		if deps.MediaStorage != nil {
 			if pinger, ok := deps.MediaStorage.(interface{ Ping(context.Context) error }); ok {
 				pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
 				if err := pinger.Ping(pingCtx); err != nil {
-					if isProd {
-						checks["media_storage"] = "unavailable"
-					} else {
-						checks["media_storage"] = fmt.Sprintf("media ping error: %v", err)
-					}
+					log.Printf("[Readiness] Media storage ping error: %v", err)
+					checks["media_storage"] = "unavailable"
 					isReady = false
+					if deps.Metrics != nil {
+						deps.Metrics.RecordDependencyHealth("s3", false)
+					}
 				} else {
 					checks["media_storage"] = "ok"
+					if deps.Metrics != nil {
+						deps.Metrics.RecordDependencyHealth("s3", true)
+					}
 				}
 				pingCancel()
+			}
+		} else if deps.Config != nil && deps.Config.Media.GetDriver() == "s3" {
+			checks["media_storage"] = "unavailable"
+			isReady = false
+			if deps.Metrics != nil {
+				deps.Metrics.RecordDependencyHealth("s3", false)
 			}
 		}
 
 		status := http.StatusOK
+		statusStr := "ready"
 		if !isReady {
 			status = http.StatusServiceUnavailable
+			statusStr = "not_ready"
 		}
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"ready":     isReady,
+			"status":    statusStr,
 			"checks":    checks,
 			"timestamp": time.Now().Format(time.RFC3339),
 		})
@@ -471,16 +517,141 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			}
 		}
 
-		// Layer B — Post-auth limiter: rate-limit và concurrency limit theo tenant, key, endpoint, model
-		if limiter != nil && limiter.LocalRateLimiter != nil {
-			v1.Use(AuthenticatedRateLimitMiddleware(limiter.LocalRateLimiter, limiter.LocalRateLimiter.ExtractClientIP, deps.Metrics))
+		// Layer B — Post-auth limiter: rate-limit và concurrency limit theo tenant, key, endpoint, model (Redis authority trong multi-node)
+		if limiter != nil {
+			v1.Use(AuthenticatedRateLimitMiddleware(limiter, limiter.LocalRateLimiter.ExtractClientIP, deps.Metrics))
 		}
 
-		// Phục vụ tệp Media qua API chuẩn /v1/media/{id}
+		// Phục vụ tệp Media qua API chuẩn GET /v1/media/{id} và tải lên qua POST /v1/media
 		if deps.MediaStorage != nil {
 			v1.Get("/media/{id}", func(w http.ResponseWriter, r *http.Request) {
 				id := chi.URLParam(r, "id")
 				_ = deps.MediaStorage.ServeAssetHTTP(w, r, id)
+			})
+
+			v1.Post("/media", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+
+				tenantID := "default"
+				if id, ok := domain.TenantIdentityFromContext(r.Context()); ok && id.TenantID != "" {
+					tenantID = id.TenantID
+				}
+
+				var (
+					assetID  = fmt.Sprintf("media_%d_%s", time.Now().UnixNano(), hex.EncodeToString(randBytes(4)))
+					fileName = "upload.bin"
+					kind     = domain.MediaKind("application/octet-stream")
+					isPublic = false
+					reader   io.Reader
+				)
+
+				ct := r.Header.Get("Content-Type")
+				if strings.HasPrefix(ct, "multipart/form-data") {
+					if err := r.ParseMultipartForm(32 << 20); err != nil { // 32MB
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid multipart form: " + err.Error()})
+						return
+					}
+					file, handler, err := r.FormFile("file")
+					if err != nil {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"error": "field 'file' is required"})
+						return
+					}
+					defer file.Close()
+
+					fileName = handler.Filename
+					if explicitID := strings.TrimSpace(r.FormValue("id")); explicitID != "" {
+						assetID = explicitID
+					}
+					if explicitKind := strings.TrimSpace(r.FormValue("kind")); explicitKind != "" {
+						kind = domain.MediaKind(explicitKind)
+					} else if hct := handler.Header.Get("Content-Type"); hct != "" {
+						kind = domain.MediaKind(hct)
+					}
+					if r.FormValue("is_public") == "true" {
+						isPublic = true
+					}
+					reader = file
+				} else if strings.Contains(ct, "application/json") {
+					var body struct {
+						ID         string `json:"id"`
+						FileName   string `json:"file_name"`
+						MimeType   string `json:"mime_type"`
+						Kind       string `json:"kind"`
+						DataBase64 string `json:"data_base64"`
+						IsPublic   bool   `json:"is_public"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DataBase64 == "" {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid json payload or empty data_base64"})
+						return
+					}
+					decoded, err := base64.StdEncoding.DecodeString(body.DataBase64)
+					if err != nil {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid base64 encoding"})
+						return
+					}
+					if body.ID != "" {
+						assetID = body.ID
+					}
+					if body.FileName != "" {
+						fileName = body.FileName
+					}
+					if body.Kind != "" {
+						kind = domain.MediaKind(body.Kind)
+					} else if body.MimeType != "" {
+						kind = domain.MediaKind(body.MimeType)
+					}
+					isPublic = body.IsPublic
+					reader = bytes.NewReader(decoded)
+				} else {
+					if explicitID := r.Header.Get("X-Media-ID"); explicitID != "" {
+						assetID = explicitID
+					}
+					if explicitName := r.Header.Get("X-File-Name"); explicitName != "" {
+						fileName = explicitName
+					}
+					if ct != "" {
+						kind = domain.MediaKind(ct)
+					}
+					if r.Header.Get("X-Is-Public") == "true" {
+						isPublic = true
+					}
+					rawBytes, err := io.ReadAll(r.Body)
+					if err != nil {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{"error": "failed to read request body: " + err.Error()})
+						return
+					}
+					reader = bytes.NewReader(rawBytes)
+				}
+
+				asset := &domain.MediaAsset{
+					ID:        assetID,
+					FileName:  fileName,
+					Kind:      kind,
+					TenantID:  tenantID,
+					IsPublic:  isPublic,
+					CreatedAt: time.Now(),
+				}
+
+				if err := deps.MediaStorage.SaveAsset(r.Context(), asset, reader); err != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					_ = json.NewEncoder(w).Encode(map[string]any{"error": "failed to save media asset: " + err.Error()})
+					return
+				}
+
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id":        asset.ID,
+					"file_name": asset.FileName,
+					"kind":      string(asset.Kind),
+					"tenant_id": asset.TenantID,
+					"is_public": asset.IsPublic,
+					"url":       "/v1/media/" + asset.ID,
+				})
 			})
 		}
 

@@ -118,6 +118,15 @@ type metricState struct {
 	toolExecutionErrors   map[string]map[string]uint64
 	agentRuns             map[string]uint64
 	agentRunFailures      map[string]uint64
+
+	// Multi-Node Cluster Observability Metrics (Section 13)
+	clusterRateLimitRejections map[string]uint64
+	dependencyHealth           map[string]int
+	agentReclaims              map[string]uint64
+	staleWorkerRejections      map[string]uint64
+	toolFencingRejections      map[string]uint64
+	agentLeaseExpirations      uint64
+	crossNodeEvents            map[string]uint64
 }
 
 func NewContractMetrics() *ContractMetrics {
@@ -136,13 +145,19 @@ func NewContractMetrics() *ContractMetrics {
 		agentRunDurationHist: newHistogramTracker([]float64{
 			1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0,
 		}),
-		rateLimitRejections:   make(map[string]uint64),
-		concurrencyRejections: make(map[string]uint64),
-		upstreamFailovers:     make(map[string]uint64),
-		toolExecutions:        make(map[string]uint64),
-		toolExecutionErrors:   make(map[string]map[string]uint64),
-		agentRuns:             make(map[string]uint64),
-		agentRunFailures:      make(map[string]uint64),
+		rateLimitRejections:        make(map[string]uint64),
+		concurrencyRejections:      make(map[string]uint64),
+		upstreamFailovers:          make(map[string]uint64),
+		toolExecutions:             make(map[string]uint64),
+		toolExecutionErrors:        make(map[string]map[string]uint64),
+		agentRuns:                  make(map[string]uint64),
+		agentRunFailures:           make(map[string]uint64),
+		clusterRateLimitRejections: make(map[string]uint64),
+		dependencyHealth:           make(map[string]int),
+		agentReclaims:              make(map[string]uint64),
+		staleWorkerRejections:      make(map[string]uint64),
+		toolFencingRejections:      make(map[string]uint64),
+		crossNodeEvents:            make(map[string]uint64),
 	}}
 }
 
@@ -721,6 +736,15 @@ type ContractSnapshot struct {
 	ToolExecutionErrors   map[string]map[string]uint64 `json:"tool_execution_errors"`
 	AgentRuns             map[string]uint64            `json:"agent_runs"`
 	AgentRunFailures      map[string]uint64            `json:"agent_run_failures"`
+
+	// Multi-Node Cluster Observability Metrics (Section 13)
+	ClusterRateLimitRejections map[string]uint64 `json:"cluster_rate_limit_rejections"`
+	DependencyHealth           map[string]int    `json:"dependency_health"`
+	AgentReclaims              map[string]uint64 `json:"agent_reclaims"`
+	StaleWorkerRejections      map[string]uint64 `json:"stale_worker_rejections"`
+	ToolFencingRejections      map[string]uint64 `json:"tool_fencing_rejections"`
+	AgentLeaseExpirations      uint64            `json:"agent_lease_expirations"`
+	CrossNodeEvents            map[string]uint64 `json:"cross_node_events"`
 }
 
 func (m *ContractMetrics) Snapshot() ContractSnapshot {
@@ -819,43 +843,175 @@ func (m *ContractMetrics) Snapshot() ContractSnapshot {
 		agentRunFailures[k] = v
 	}
 
-	return ContractSnapshot{
-		TotalRequests:         m.state.totalRequests,
-		RPM:                   int(rpm),
-		RPMHistory:            history,
-		SchemaUnexpected:      m.state.totals.schema,
-		UnmappedFields:        m.state.totals.unmapped,
-		Classes:               classMap(m.state.totals.classes),
-		Operations:            operations,
-		AvgRequestLatencyMs:   avgReqMs,
-		AvgUpstreamLatencyMs:  avgUpstreamMs,
-		AvgToolLatencyMs:      avgToolMs,
-		ModelRetries:          m.state.modelRetries,
-		Failovers:             m.state.failoverCount,
-		ActiveAgents:          m.state.activeAgents,
-		ToolErrors:            m.state.toolErrors,
-		MCPErrors:             m.state.mcpErrors,
-		CacheHits:             m.state.cacheHits,
-		CacheMisses:           m.state.cacheMisses,
-		CacheHitRatio:         hitRatio,
-		QuotaFailures:         m.state.quotaFailures,
-		SandboxFailures:       m.state.sandboxFailures,
-		ActiveRequests:        m.state.activeRequests,
-		ActiveStreams:         m.state.activeStreams,
-		AgentQueueDepth:       m.state.agentQueueDepth,
-		CircuitBreakerState:   m.state.circuitBreakerState,
-		ReqDurationHist:       reqHist,
-		UpstreamDurationHist:  upHist,
-		ToolDurationHist:      toolHist,
-		AgentRunDurationHist:  agentHist,
-		RateLimitRejections:   rateLimitRejections,
-		ConcurrencyRejections: concurrencyRejections,
-		UpstreamFailovers:     upstreamFailovers,
-		ToolExecutions:        toolExecutions,
-		ToolExecutionErrors:   toolExecutionErrors,
-		AgentRuns:             agentRuns,
-		AgentRunFailures:      agentRunFailures,
+	clusterRateLimitRejections := make(map[string]uint64, len(m.state.clusterRateLimitRejections))
+	for k, v := range m.state.clusterRateLimitRejections {
+		clusterRateLimitRejections[k] = v
 	}
+	dependencyHealth := make(map[string]int, len(m.state.dependencyHealth))
+	for k, v := range m.state.dependencyHealth {
+		dependencyHealth[k] = v
+	}
+	agentReclaims := make(map[string]uint64, len(m.state.agentReclaims))
+	for k, v := range m.state.agentReclaims {
+		agentReclaims[k] = v
+	}
+	staleWorkerRejections := make(map[string]uint64, len(m.state.staleWorkerRejections))
+	for k, v := range m.state.staleWorkerRejections {
+		staleWorkerRejections[k] = v
+	}
+	toolFencingRejections := make(map[string]uint64, len(m.state.toolFencingRejections))
+	for k, v := range m.state.toolFencingRejections {
+		toolFencingRejections[k] = v
+	}
+	crossNodeEvents := make(map[string]uint64, len(m.state.crossNodeEvents))
+	for k, v := range m.state.crossNodeEvents {
+		crossNodeEvents[k] = v
+	}
+
+	return ContractSnapshot{
+		TotalRequests:              m.state.totalRequests,
+		RPM:                        int(rpm),
+		RPMHistory:                 history,
+		SchemaUnexpected:           m.state.totals.schema,
+		UnmappedFields:             m.state.totals.unmapped,
+		Classes:                    classMap(m.state.totals.classes),
+		Operations:                 operations,
+		AvgRequestLatencyMs:        avgReqMs,
+		AvgUpstreamLatencyMs:       avgUpstreamMs,
+		AvgToolLatencyMs:           avgToolMs,
+		ModelRetries:               m.state.modelRetries,
+		Failovers:                  m.state.failoverCount,
+		ActiveAgents:               m.state.activeAgents,
+		ToolErrors:                 m.state.toolErrors,
+		MCPErrors:                  m.state.mcpErrors,
+		CacheHits:                  m.state.cacheHits,
+		CacheMisses:                m.state.cacheMisses,
+		CacheHitRatio:              hitRatio,
+		QuotaFailures:              m.state.quotaFailures,
+		SandboxFailures:            m.state.sandboxFailures,
+		ActiveRequests:             m.state.activeRequests,
+		ActiveStreams:              m.state.activeStreams,
+		AgentQueueDepth:            m.state.agentQueueDepth,
+		CircuitBreakerState:        m.state.circuitBreakerState,
+		ReqDurationHist:            reqHist,
+		UpstreamDurationHist:       upHist,
+		ToolDurationHist:           toolHist,
+		AgentRunDurationHist:       agentHist,
+		RateLimitRejections:        rateLimitRejections,
+		ConcurrencyRejections:      concurrencyRejections,
+		UpstreamFailovers:          upstreamFailovers,
+		ToolExecutions:             toolExecutions,
+		ToolExecutionErrors:        toolExecutionErrors,
+		AgentRuns:                  agentRuns,
+		AgentRunFailures:           agentRunFailures,
+		ClusterRateLimitRejections: clusterRateLimitRejections,
+		DependencyHealth:           dependencyHealth,
+		AgentReclaims:              agentReclaims,
+		StaleWorkerRejections:      staleWorkerRejections,
+		ToolFencingRejections:      toolFencingRejections,
+		AgentLeaseExpirations:      m.state.agentLeaseExpirations,
+		CrossNodeEvents:            crossNodeEvents,
+	}
+}
+
+func (m *ContractMetrics) RecordClusterRateLimitRejection(reason string) {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.clusterRateLimitRejections == nil {
+		m.state.clusterRateLimitRejections = make(map[string]uint64)
+	}
+	if reason == "" {
+		reason = "rate_limit_exceeded"
+	}
+	m.state.clusterRateLimitRejections[reason]++
+}
+
+func (m *ContractMetrics) RecordDependencyHealth(dep string, healthy bool) {
+	if m == nil || m.state == nil || dep == "" {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.dependencyHealth == nil {
+		m.state.dependencyHealth = make(map[string]int)
+	}
+	val := 0
+	if healthy {
+		val = 1
+	}
+	m.state.dependencyHealth[dep] = val
+}
+
+func (m *ContractMetrics) RecordAgentReclaim(reason string) {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.agentReclaims == nil {
+		m.state.agentReclaims = make(map[string]uint64)
+	}
+	if reason == "" {
+		reason = "lease_expired"
+	}
+	m.state.agentReclaims[reason]++
+}
+
+func (m *ContractMetrics) RecordStaleWorkerRejection(reason string) {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.staleWorkerRejections == nil {
+		m.state.staleWorkerRejections = make(map[string]uint64)
+	}
+	if reason == "" {
+		reason = "fencing_token_mismatch"
+	}
+	m.state.staleWorkerRejections[reason]++
+}
+
+func (m *ContractMetrics) RecordToolFencingRejection(toolClass string) {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.toolFencingRejections == nil {
+		m.state.toolFencingRejections = make(map[string]uint64)
+	}
+	if toolClass == "" {
+		toolClass = "destructive"
+	}
+	m.state.toolFencingRejections[toolClass]++
+}
+
+func (m *ContractMetrics) RecordAgentLeaseExpiration() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.agentLeaseExpirations++
+}
+
+func (m *ContractMetrics) RecordCrossNodeEvent(kind string) {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if m.state.crossNodeEvents == nil {
+		m.state.crossNodeEvents = make(map[string]uint64)
+	}
+	if kind == "" {
+		kind = "event"
+	}
+	m.state.crossNodeEvents[kind]++
 }
 
 func (c *opCounter) snapshot() OperationMetrics {

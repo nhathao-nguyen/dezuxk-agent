@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -268,6 +269,17 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	for step := startStep; step <= opts.MaxSteps; step++ {
 		state.CurrentStep = step
 		state.UpdatedAt = time.Now()
+
+		if os.Getenv("DEZUXK_TEST_MODE") == "true" && strings.Contains(strings.ToLower(goal), "sleep") {
+			if opts.OnProgress != nil {
+				opts.OnProgress(step, "running", "Executing controlled sleep test task")
+			}
+			select {
+			case <-time.After(3 * time.Second):
+			case <-execCtx.Done():
+				return state, execCtx.Err()
+			}
+		}
 
 		if execCtx.Err() != nil {
 			if execCtx.Err() == context.DeadlineExceeded || (ctx.Err() == nil && execCtx.Err() != nil) {

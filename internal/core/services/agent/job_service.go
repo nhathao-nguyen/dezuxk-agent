@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,8 @@ type JobService struct {
 	recoveryCancel   context.CancelFunc
 	recoveryStopCh   chan struct{}
 	recoveryWg       sync.WaitGroup
+
+	metrics *domain.ContractMetrics
 
 	wg         sync.WaitGroup
 	rootCtx    context.Context
@@ -93,6 +96,11 @@ func (s *JobService) SetCheckpointRepository(cp ports.CheckpointRepository) {
 	s.checkpointRepo = cp
 }
 
+// SetMetrics cấu hình contract metrics phục vụ quan sát phân tán
+func (s *JobService) SetMetrics(m *domain.ContractMetrics) {
+	s.metrics = m
+}
+
 // SetRecoveryInterval cấu hình chu kỳ quét phục hồi của Sweeper (phục vụ test hoặc cấu hình tùy biến)
 func (s *JobService) SetRecoveryInterval(d time.Duration) {
 	s.mu.Lock()
@@ -119,6 +127,9 @@ func (s *JobService) Start(ctx context.Context) error {
 	interval := s.recoveryInterval
 	if interval <= 0 {
 		interval = 15 * time.Second
+	}
+	if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+		interval = 2 * time.Second
 	}
 	s.startRecoveryLoopLocked(s.rootCtx, interval)
 	return nil
@@ -461,9 +472,18 @@ func (s *JobService) ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRu
 			}
 
 			// Atomic claim: cố gắng giành quyền sở hữu run
-			claimed, cErr := s.repo.ClaimRun(ctx, run.ID, s.workerID, 60*time.Second)
+			claimLease := 60 * time.Second
+			if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+				claimLease = 5 * time.Second
+			}
+			claimed, cErr := s.repo.ClaimRun(ctx, run.ID, s.workerID, claimLease)
 			if cErr != nil || !claimed {
 				continue
+			}
+
+			if s.metrics != nil {
+				s.metrics.RecordAgentReclaim("lease_expired")
+				s.metrics.RecordAgentLeaseExpiration()
 			}
 
 			// Đọc lại để lấy claim_generation mới nhất
@@ -696,6 +716,10 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 
 	leaseDuration := 60 * time.Second
 	heartbeatInterval := 20 * time.Second
+	if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+		leaseDuration = 5 * time.Second
+		heartbeatInterval = 1 * time.Second
+	}
 
 	// Atomic claim: nếu là queued thì claim một lần duy nhất. Nếu đã là recovering/running (đã claim bởi sweeper) thì giữ nguyên generation
 	workerClaimGen := run.ClaimGeneration
@@ -781,6 +805,9 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 				renewed, rErr := s.repo.RenewLease(execCtx, run.ID, s.workerID, workerClaimGen, leaseDuration)
 				if rErr != nil || !renewed {
 					log.Printf("[JobService] Mất quyền lease cho run %s (renewed=%v, err=%v), dừng thực thi an toàn", run.ID, renewed, rErr)
+					if s.metrics != nil {
+						s.metrics.RecordStaleWorkerRejection("lease_lost")
+					}
 					cancelExec()
 					return
 				}
@@ -802,6 +829,9 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 		appended, aErr := s.repo.AppendOwnedEvent(context.Background(), ev, s.workerID, workerClaimGen)
 		if aErr != nil || !appended {
 			log.Printf("[JobService] executeBackground: worker %s lost ownership (gen=%d) on run %s, progress event rejected", s.workerID, workerClaimGen, run.ID)
+			if s.metrics != nil {
+				s.metrics.RecordStaleWorkerRejection("fencing_token_mismatch")
+			}
 			cancelExec()
 			return
 		}
@@ -1200,6 +1230,9 @@ func (s *JobService) broadcastEvent(runID string, event domain.AgentRunEvent) {
 		if err == nil {
 			topic := fmt.Sprintf("agent:events:%s", runID)
 			_ = eb.Publish(context.Background(), topic, data)
+			if s.metrics != nil {
+				s.metrics.RecordCrossNodeEvent(event.Kind)
+			}
 		}
 	} else {
 		// Trong single-node mode (không có Redis), gửi trực tiếp vào local channels

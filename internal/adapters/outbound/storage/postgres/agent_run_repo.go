@@ -785,3 +785,11 @@ func (r *PostgresAgentRunRepository) MarkUnknownAfterRestart(ctx context.Context
 	_, err := r.pool.Exec(ctx, query, tenantID, runID, toolCallID)
 	return err
 }
+
+// Ping kiểm tra thực tế kết nối sống với PostgreSQL thông qua pool.Ping
+func (r *PostgresAgentRunRepository) Ping(ctx context.Context) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("postgres connection pool is nil")
+	}
+	return r.pool.Ping(ctx)
+}

@@ -263,6 +263,77 @@ func (e *PrometheusMetricsExporter) ServeHTTP(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// 10. Multi-Node Cluster Observability Metrics (Section 13)
+	sb.WriteString("# HELP gateway_cluster_rate_limit_rejections_total Total rate limit rejections enforced across cluster via Redis.\n")
+	sb.WriteString("# TYPE gateway_cluster_rate_limit_rejections_total counter\n")
+	if len(snap.ClusterRateLimitRejections) == 0 {
+		sb.WriteString("gateway_cluster_rate_limit_rejections_total{reason=\"rate_limit_exceeded\"} 0\n")
+	} else {
+		for _, r := range sortedKeys(snap.ClusterRateLimitRejections) {
+			sb.WriteString(fmt.Sprintf("gateway_cluster_rate_limit_rejections_total{reason=%q} %d\n", r, snap.ClusterRateLimitRejections[r]))
+		}
+	}
+
+	sb.WriteString("# HELP gateway_dependency_health Health status of infrastructure dependencies (1=healthy, 0=unhealthy).\n")
+	sb.WriteString("# TYPE gateway_dependency_health gauge\n")
+	if len(snap.DependencyHealth) == 0 {
+		sb.WriteString("gateway_dependency_health{dependency=\"postgres\"} 1\n")
+		sb.WriteString("gateway_dependency_health{dependency=\"redis\"} 1\n")
+	} else {
+		depKeys := make([]string, 0, len(snap.DependencyHealth))
+		for d := range snap.DependencyHealth {
+			depKeys = append(depKeys, d)
+		}
+		sort.Strings(depKeys)
+		for _, d := range depKeys {
+			sb.WriteString(fmt.Sprintf("gateway_dependency_health{dependency=%q} %d\n", d, snap.DependencyHealth[d]))
+		}
+	}
+
+	sb.WriteString("# HELP gateway_agent_reclaims_total Total expired lease reclaims executed by recovery sweeper.\n")
+	sb.WriteString("# TYPE gateway_agent_reclaims_total counter\n")
+	if len(snap.AgentReclaims) == 0 {
+		sb.WriteString("gateway_agent_reclaims_total{reason=\"lease_expired\"} 0\n")
+	} else {
+		for _, r := range sortedKeys(snap.AgentReclaims) {
+			sb.WriteString(fmt.Sprintf("gateway_agent_reclaims_total{reason=%q} %d\n", r, snap.AgentReclaims[r]))
+		}
+	}
+
+	sb.WriteString("# HELP gateway_stale_worker_rejections_total Total updates rejected from zombie/stale workers.\n")
+	sb.WriteString("# TYPE gateway_stale_worker_rejections_total counter\n")
+	if len(snap.StaleWorkerRejections) == 0 {
+		sb.WriteString("gateway_stale_worker_rejections_total{reason=\"fencing_token_mismatch\"} 0\n")
+	} else {
+		for _, r := range sortedKeys(snap.StaleWorkerRejections) {
+			sb.WriteString(fmt.Sprintf("gateway_stale_worker_rejections_total{reason=%q} %d\n", r, snap.StaleWorkerRejections[r]))
+		}
+	}
+
+	sb.WriteString("# HELP gateway_tool_fencing_rejections_total Total tool executions blocked by fencing or replay guards.\n")
+	sb.WriteString("# TYPE gateway_tool_fencing_rejections_total counter\n")
+	if len(snap.ToolFencingRejections) == 0 {
+		sb.WriteString("gateway_tool_fencing_rejections_total{tool_class=\"destructive\"} 0\n")
+	} else {
+		for _, c := range sortedKeys(snap.ToolFencingRejections) {
+			sb.WriteString(fmt.Sprintf("gateway_tool_fencing_rejections_total{tool_class=%q} %d\n", c, snap.ToolFencingRejections[c]))
+		}
+	}
+
+	sb.WriteString("# HELP gateway_agent_lease_expirations_total Total agent leases expired before completion.\n")
+	sb.WriteString("# TYPE gateway_agent_lease_expirations_total counter\n")
+	sb.WriteString(fmt.Sprintf("gateway_agent_lease_expirations_total %d\n", snap.AgentLeaseExpirations))
+
+	sb.WriteString("# HELP gateway_cross_node_events_total Total events propagated cross-node via Redis EventBus.\n")
+	sb.WriteString("# TYPE gateway_cross_node_events_total counter\n")
+	if len(snap.CrossNodeEvents) == 0 {
+		sb.WriteString("gateway_cross_node_events_total{kind=\"event\"} 0\n")
+	} else {
+		for _, k := range sortedKeys(snap.CrossNodeEvents) {
+			sb.WriteString(fmt.Sprintf("gateway_cross_node_events_total{kind=%q} %d\n", k, snap.CrossNodeEvents[k]))
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(sb.String()))
 }

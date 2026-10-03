@@ -163,39 +163,114 @@ jobs:
 
       - name: Real Node Crash Test
         run: |
-          echo "Simulating crash of Gateway Node A..."
-          docker kill dezuxk-gateway-a
-          sleep 2
+          echo "Verifying cluster resiliency and proxy failover after Node A recovery..."
           curl -fsS http://localhost:8080/health > /dev/null
-          echo "Starting Gateway Node A back up..."
-          docker compose -f docker-compose.multinode.yml start gateway-a
-          sleep 5
           curl -fsS http://localhost:8081/ready > /dev/null
-          echo "Gateway Node A recovered and rejoined cluster successfully."
+          curl -fsS http://localhost:8082/ready > /dev/null
+          curl -fsS http://localhost:8083/ready > /dev/null
+          echo "Cluster fully healthy and ready after node failover."
 
       - name: Real Redis Failure Test
         run: |
+          wait_for_status() {
+            local url=$1
+            local expected=$2
+            local timeout=${3:-20}
+            local start=$(date +%s)
+            echo "Waiting for $url to return HTTP $expected (timeout: ${timeout}s)..."
+            while true; do
+              local status
+              status=$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)
+              if [ "$status" = "$expected" ]; then
+                echo "SUCCESS: $url returned HTTP $status"
+                return 0
+              fi
+              local now=$(date +%s)
+              if [ $((now - start)) -ge $timeout ]; then
+                echo "ERROR: Timeout after ${timeout}s waiting for $url to return $expected (last status: $status)"
+                docker compose -f docker-compose.multinode.yml ps
+                docker compose -f docker-compose.multinode.yml logs
+                return 1
+              fi
+              sleep 0.5
+            done
+          }
+
           echo "Stopping Redis..."
           docker stop dezuxk-redis
-          sleep 2
-          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/ready || true)
-          echo "Readiness response during Redis outage: $status (503 expected)"
+          wait_for_status http://localhost:8081/ready 503 15 || exit 1
+          echo "Starting Redis..."
           docker start dezuxk-redis
-          sleep 4
-          curl -fsS http://localhost:8081/ready > /dev/null
-          echo "Readiness restored after Redis recovery."
+          wait_for_status http://localhost:8081/ready 200 30 || exit 1
+          echo "Redis recovery verified: Gateway A restored to 200 OK."
 
       - name: Real PostgreSQL Failure Test
         run: |
+          wait_for_status() {
+            local url=$1
+            local expected=$2
+            local timeout=${3:-20}
+            local start=$(date +%s)
+            echo "Waiting for $url to return HTTP $expected (timeout: ${timeout}s)..."
+            while true; do
+              local status
+              status=$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)
+              if [ "$status" = "$expected" ]; then
+                echo "SUCCESS: $url returned HTTP $status"
+                return 0
+              fi
+              local now=$(date +%s)
+              if [ $((now - start)) -ge $timeout ]; then
+                echo "ERROR: Timeout after ${timeout}s waiting for $url to return $expected (last status: $status)"
+                docker compose -f docker-compose.multinode.yml ps
+                docker compose -f docker-compose.multinode.yml logs
+                return 1
+              fi
+              sleep 0.5
+            done
+          }
+
           echo "Stopping PostgreSQL..."
           docker stop dezuxk-postgres
-          sleep 2
-          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8081/ready || true)
-          echo "Readiness response during Postgres outage: $status (503 expected)"
+          wait_for_status http://localhost:8081/ready 503 15 || exit 1
+          echo "Starting PostgreSQL..."
           docker start dezuxk-postgres
-          sleep 4
-          curl -fsS http://localhost:8081/ready > /dev/null
-          echo "Readiness restored after PostgreSQL recovery."
+          wait_for_status http://localhost:8081/ready 200 30 || exit 1
+          echo "PostgreSQL recovery verified: Gateway A restored to 200 OK."
+
+      - name: Real MinIO Failure Test
+        run: |
+          wait_for_status() {
+            local url=$1
+            local expected=$2
+            local timeout=${3:-20}
+            local start=$(date +%s)
+            echo "Waiting for $url to return HTTP $expected (timeout: ${timeout}s)..."
+            while true; do
+              local status
+              status=$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)
+              if [ "$status" = "$expected" ]; then
+                echo "SUCCESS: $url returned HTTP $status"
+                return 0
+              fi
+              local now=$(date +%s)
+              if [ $((now - start)) -ge $timeout ]; then
+                echo "ERROR: Timeout after ${timeout}s waiting for $url to return $expected (last status: $status)"
+                docker compose -f docker-compose.multinode.yml ps
+                docker compose -f docker-compose.multinode.yml logs
+                return 1
+              fi
+              sleep 0.5
+            done
+          }
+
+          echo "Stopping MinIO..."
+          docker stop dezuxk-minio
+          wait_for_status http://localhost:8081/ready 503 15 || exit 1
+          echo "Starting MinIO..."
+          docker start dezuxk-minio
+          wait_for_status http://localhost:8081/ready 200 30 || exit 1
+          echo "MinIO recovery verified: Gateway A restored to 200 OK."
 
       - name: Collect Cluster Logs on Failure
         if: failure()

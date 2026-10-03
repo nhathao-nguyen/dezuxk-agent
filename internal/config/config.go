@@ -832,6 +832,16 @@ func applyEnvOverrides(cfg *Config) {
 	if mt := os.Getenv("DEZUXK_METRICS_TOKEN"); mt != "" {
 		cfg.Server.MetricsToken = mt
 	}
+	if rlMax := os.Getenv("DEZUXK_RATE_LIMIT_MAX_REQUESTS"); rlMax != "" {
+		if val, err := strconv.Atoi(rlMax); err == nil && val > 0 {
+			cfg.Server.RateLimit.MaxRequests = val
+		}
+	}
+	if rlWin := os.Getenv("DEZUXK_RATE_LIMIT_WINDOW_SECONDS"); rlWin != "" {
+		if val, err := strconv.Atoi(rlWin); err == nil && val > 0 {
+			cfg.Server.RateLimit.WindowSeconds = val
+		}
+	}
 }
 
 // Validate kiểm tra tính hợp lệ của hạ tầng máy chủ

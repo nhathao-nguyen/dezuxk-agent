@@ -369,6 +369,7 @@ func PreAuthIPRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(*htt
 			if err == nil && !decision.Allowed {
 				if m != nil {
 					m.RecordRateLimitRejection("ip_limit")
+					m.RecordClusterRateLimitRejection("ip_limit")
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", fmt.Sprintf("%d", decision.RetryAfterSec))
@@ -456,6 +457,7 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 			if err == nil && !decision.Allowed {
 				if m != nil {
 					m.RecordRateLimitRejection("rate_limit_exceeded")
+					m.RecordClusterRateLimitRejection("rate_limit_exceeded")
 				}
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", fmt.Sprintf("%d", decision.RetryAfterSec))

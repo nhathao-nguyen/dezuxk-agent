@@ -281,6 +281,9 @@ func Run(configPath string, portOverride int) error {
 		agentJobService.SetEventBus(infra.EventBus)
 	}
 	agentJobService.SetWorkerID(infra.NodeID)
+	if metrics != nil {
+		agentJobService.SetMetrics(metrics)
+	}
 
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()

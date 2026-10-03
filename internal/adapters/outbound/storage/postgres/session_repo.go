@@ -733,3 +733,11 @@ func (r *PostgresSessionRepository) ClearAlerts(accountID string) {
 	r.alerts = filtered
 	_, _ = r.pool.Exec(context.Background(), `DELETE FROM session_alerts WHERE account_id = $1;`, accountID)
 }
+
+// Ping kiểm tra thực tế kết nối sống với PostgreSQL thông qua pool.Ping
+func (r *PostgresSessionRepository) Ping(ctx context.Context) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("postgres connection pool is nil")
+	}
+	return r.pool.Ping(ctx)
+}
