@@ -78,11 +78,7 @@ jobs:
           cache: true
 
       - name: Start MinIO Server
-        run: |
-          docker run -d --name minio -p 9000:9000 -p 9001:9001 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadminpassword \
-            minio/minio:latest server /data --console-address ":9001"
+        run: docker run -d --name minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadminpassword minio/minio:latest server /data
 
       - name: Initialize MinIO Test Buckets
         run: |
@@ -141,10 +137,15 @@ jobs:
       - name: Wait for Real Cluster Health
         run: |
           for i in $(seq 1 60); do
-            if curl -fsS http://localhost:8081/ready > /dev/null 2>&1 && \
-               curl -fsS http://localhost:8082/ready > /dev/null 2>&1 && \
-               curl -fsS http://localhost:8083/ready > /dev/null 2>&1 && \
-               curl -fsS http://localhost:8080/health > /dev/null 2>&1; then
+            ready_a=0
+            ready_b=0
+            ready_c=0
+            ready_lb=0
+            curl -fsS http://localhost:8081/ready > /dev/null 2>&1 && ready_a=1
+            curl -fsS http://localhost:8082/ready > /dev/null 2>&1 && ready_b=1
+            curl -fsS http://localhost:8083/ready > /dev/null 2>&1 && ready_c=1
+            curl -fsS http://localhost:8080/health > /dev/null 2>&1 && ready_lb=1
+            if [ $ready_a -eq 1 ] && [ $ready_b -eq 1 ] && [ $ready_c -eq 1 ] && [ $ready_lb -eq 1 ]; then
               echo "Cụm Gateway A/B/C và Nginx Load Balancer đã READY thành công!"
               exit 0
             fi
