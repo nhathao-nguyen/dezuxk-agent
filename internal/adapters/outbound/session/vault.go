@@ -39,6 +39,16 @@ func NewVault(passphraseOrKey string) *Vault {
 	return &Vault{key: key}
 }
 
+// Fingerprint trả về chuỗi băm rút gọn (16 ký tự hex) không thể đảo ngược,
+// dùng để đối chiếu tính nhất quán giữa các node trong cụm mà không làm lộ raw secret.
+func (v *Vault) Fingerprint() string {
+	if len(v.key) == 0 {
+		return "empty"
+	}
+	h := sha256.Sum256(v.key)
+	return hex.EncodeToString(h[:8])
+}
+
 // ResolveMasterKey phân giải Master Key theo thứ tự ưu tiên:
 // 1. Biến môi trường DEZUXK_MASTER_KEY
 // 2. Biến môi trường GATEWAY_MASTER_KEY

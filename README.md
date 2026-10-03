@@ -214,26 +214,44 @@ dezuxk-gateway/
 
 ---
 
-## 🌐 Mô hình Vận hành: Single-Node vs Multi-Node Cluster
+## 🌐 Mô hình Vận hành: Development/CI vs Production Real Data
 
-Dezuxk AI Gateway hỗ trợ 2 chế độ vận hành độc lập:
+Dezuxk AI Gateway phân tách rõ ràng giữa môi trường kiểm thử và môi trường triển khai sản xuất với dữ liệu thật:
 
-### 1. Chế độ Đơn Node (Single-Node Mode - Mặc định)
-- **Zero-Dependency**: Chạy độc lập trên 1 máy chủ vật lý, laptop hoặc VPS.
-- **Persistence**: SQLite WAL Mode với mã hóa AES-256-GCM Vault cho phiên và API keys.
-- **Khởi động**: Chỉ cần `go run main.go --config configs/config.yaml` hoặc `run.bat`.
-
-### 2. Chế độ Cụm Phân tán (Multi-Node Production Cluster)
-- **High Availability**: Chạy từ 2+ Gateway nodes song song sau Load Balancer (Nginx / HAProxy / ALB) không cần sticky session.
-- **State & Fencing**: PostgreSQL 16 là source-of-truth cho Agent Leases, Runs, Checkpoints với cơ chế Fencing Token đơn điệu tăng (`claim_generation`) ngăn ngừa zombie worker.
-- **Distributed Coordination**: Redis 7 phụ trách Shared Rate Limiting (Lua), Cross-Node SSE Fan-Out & Cancel signaling, và Singleton Leader Election (`leader.Coordinator`).
-- **Khởi động Cụm với Docker Compose**:
+### 1. Môi trường Phát triển & Kiểm thử CI (Development / CI Test Mode)
+- **Mục đích**: Chạy unit tests, kiểm thử tích hợp multi-node, chaos testing và CI/CD pipelines.
+- **Cấu hình**: Sử dụng `docker-compose.multinode.yml` với cờ `DEZUXK_TEST_MODE=true` và các secret giả lập (fake credentials).
+- **Khởi động**:
   ```bash
-  docker compose -f docker-compose.multinode.yml up -d
+  docker compose -f docker-compose.multinode.yml up -d --build
+  ```
+- *Lưu ý*: File này được thiết kế riêng cho CI tự động, TUYỆT ĐỐI không dùng cho môi trường production chứa dữ liệu thật.
+
+### 2. Môi trường Triển khai Sản xuất (Production Real Data Deployment)
+- **Mục đích**: Vận hành cụm Gateway phân tán chịu tải cao, sử dụng tài khoản Google/Gemini thật và lưu trữ dữ liệu thật.
+- **Kiến trúc**: 3 Gateway Nodes (A/B/C) cân bằng tải qua Nginx Load Balancer, dùng chung PostgreSQL (source-of-truth), Redis (distributed coordination) và S3/MinIO (shared media).
+- **Bảo mật**:
+  - Không hardcode secret vào compose hay git repository.
+  - Sử dụng file cấu hình môi trường `.env.production` (được gitignore).
+  - Khóa `DEZUXK_MASTER_KEY` đồng nhất giữa các node để mã hóa AES-256-GCM toàn bộ Google session/cookie vào PostgreSQL.
+  - Ngăn chặn tuyệt đối cờ `DEZUXK_TEST_MODE=true` trong production (fail-fast startup validation).
+- **Quy trình Khởi động Production**:
+  ```bash
+  # Bước 1: Sao chép file cấu hình mẫu và điền secret thực tế
+  cp configs/production.env.example .env.production
+
+  # Bước 2: Chạy kiểm tra tiền trạm bảo đảm tính hợp lệ của toàn bộ hạ tầng
+  ./scripts/production-preflight.sh
+
+  # Bước 3: Khởi động cụm production
+  docker compose \
+    --env-file .env.production \
+    -f docker-compose.production.yml \
+    up -d --build
   ```
 - **Tài liệu Chi tiết**:
+  - [Hướng Dẫn Triển Khai Production Real Data](file:///d:/nhathao/Vibe/dezuxk-agent/docs/PRODUCTION_REAL_DATA_SETUP.md)
   - [Kiến trúc Phân tán Multi-Node](file:///d:/nhathao/Vibe/dezuxk-agent/docs/MULTI_NODE_ARCHITECTURE.md)
-  - [Hướng dẫn Triển khai & Vận hành Cụm](file:///d:/nhathao/Vibe/dezuxk-agent/docs/MULTI_NODE_DEPLOYMENT.md)
   - [Quy trình Di chuyển Schema PostgreSQL](file:///d:/nhathao/Vibe/dezuxk-agent/docs/POSTGRES_MIGRATION.md)
 
 ---

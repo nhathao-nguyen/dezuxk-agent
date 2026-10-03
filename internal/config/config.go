@@ -19,6 +19,7 @@ import (
 // CHÚ Ý BẢO MẬT: Bất kỳ secret nào từng được commit lên Git phải được xoay (rotate) ngay lập tức!
 type Config struct {
 	Environment  string                       `yaml:"environment"` // "development", "staging", "production"
+	TestMode     bool                         `yaml:"test_mode"`   // Chế độ kiểm thử (chỉ dùng cho CI/dev test)
 	Server       ServerConfig                 `yaml:"server"`
 	Operations   Operations                   `yaml:"operations"`
 	Profiles     ProfilesConfig               `yaml:"profiles"`
@@ -842,6 +843,34 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.Server.RateLimit.WindowSeconds = val
 		}
 	}
+
+	if tm := os.Getenv("DEZUXK_TEST_MODE"); tm != "" {
+		cfg.TestMode = (tm == "true" || tm == "1")
+	}
+	if ao := os.Getenv("DEZUXK_ALLOWED_ORIGINS"); ao != "" {
+		parts := strings.Split(ao, ",")
+		var origins []string
+		for _, o := range parts {
+			if trimmed := strings.TrimSpace(o); trimmed != "" {
+				origins = append(origins, trimmed)
+			}
+		}
+		if len(origins) > 0 {
+			cfg.Server.AllowedOrigins = origins
+		}
+	}
+	if tp := os.Getenv("DEZUXK_TRUSTED_PROXIES"); tp != "" {
+		parts := strings.Split(tp, ",")
+		var proxies []string
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				proxies = append(proxies, trimmed)
+			}
+		}
+		if len(proxies) > 0 {
+			cfg.Server.TrustedProxies = proxies
+		}
+	}
 }
 
 // Validate kiểm tra tính hợp lệ của hạ tầng máy chủ
@@ -907,26 +936,52 @@ func (c *Config) Validate() error {
 	}
 
 	if c.IsProduction() {
-		if (c.Cluster.Enabled || storageDriver == "postgres") && mediaDriver == "local" && c.Cluster.Enabled {
-			return errors.New("cụm cluster multi-node production không được dùng media driver 'local' (yêu cầu shared media storage: media.driver='s3')")
+		// 1. Chặn tuyệt đối DEZUXK_TEST_MODE trong production (Requirement 11)
+		testModeEnv := strings.ToLower(strings.TrimSpace(os.Getenv("DEZUXK_TEST_MODE")))
+		if c.TestMode || testModeEnv == "true" || testModeEnv == "1" {
+			return errors.New("DEZUXK_TEST_MODE=true không được phép sử dụng trong môi trường production (bảo đảm không bypass upstream, authentication và session)")
 		}
-		if strings.TrimSpace(c.Server.APIKey) == "" {
+
+		// 2. Chặn thiếu hoặc placeholder API Key & Master Key (Requirement 10, 12)
+		if strings.TrimSpace(c.Server.APIKey) == "" || c.Server.APIKey == "CHANGE_ME" {
 			return errors.New("server.api_key bắt buộc phải được cấu hình trong môi trường production")
 		}
-		if strings.TrimSpace(c.Security.MasterKey) == "" {
+		if strings.TrimSpace(c.Security.MasterKey) == "" || c.Security.MasterKey == "CHANGE_ME" {
 			return errors.New("security.master_key bắt buộc phải được cấu hình trong môi trường production")
 		}
+
+		// 3. Chặn Admin credentials mặc định hoặc placeholder (Requirement 12)
 		if c.Admin.IsEnabled() {
-			if strings.TrimSpace(c.Admin.Password) == "" || c.Admin.Password == "dezuxk_admin_secret_pass" {
+			adminPass := strings.TrimSpace(c.Admin.Password)
+			if adminPass == "" || adminPass == "dezuxk_admin_secret_pass" || adminPass == "admin" || adminPass == "password" || adminPass == "CHANGE_ME" {
 				return errors.New("admin.password không được để trống hoặc dùng mật khẩu mặc định trong môi trường production")
 			}
-			if strings.TrimSpace(c.Admin.SessionToken) == "" || c.Admin.SessionToken == "dezuxk_admin_token" || c.Admin.SessionToken == "dezuxk_secure_admin_session_token_2026" {
+			adminToken := strings.TrimSpace(c.Admin.SessionToken)
+			if adminToken == "" || adminToken == "dezuxk_admin_token" || adminToken == "dezuxk_secure_admin_session_token_2026" || adminToken == "CHANGE_ME" {
 				return errors.New("admin.session_token không được để trống hoặc dùng token mặc định trong môi trường production")
 			}
 		}
+
+		// 4. Wildcard CORS bị cấm trong production (Requirement 12)
 		for _, origin := range c.Server.AllowedOrigins {
 			if strings.TrimSpace(origin) == "*" {
 				return errors.New("server.allowed_origins không được chứa wildcard '*' khi chạy trong môi trường production")
+			}
+		}
+
+		// 5. Cụm multi-node cluster trong production bắt buộc dùng Postgres, Redis và S3 (Requirement 5, 7, 8, 12)
+		if c.Cluster.Enabled {
+			if storageDriver != "postgres" {
+				return errors.New("chế độ cụm phân tán cluster.enabled yêu cầu storage.driver='postgres' (PostgreSQL là source-of-truth cho agent leases)")
+			}
+			if !c.Distributed.Enabled || len(c.Distributed.Redis.GetAddrs()) == 0 || c.Distributed.Redis.GetAddrs()[0] == "" {
+				return errors.New("chế độ cụm phân tán cluster.enabled yêu cầu distributed.enabled=true và cấu hình distributed.redis.addr hợp lệ")
+			}
+			if mediaDriver != "s3" {
+				return errors.New("cụm cluster multi-node production không được dùng media driver 'local' (yêu cầu shared media storage: media.driver='s3')")
+			}
+			if strings.TrimSpace(c.Media.S3.Bucket) == "" {
+				return errors.New("media.s3.bucket là bắt buộc khi chọn media driver 's3'")
 			}
 		}
 	}

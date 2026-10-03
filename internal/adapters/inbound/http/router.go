@@ -269,8 +269,10 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			checks["gateway"] = "ok"
 		}
 
+		isTestMode := os.Getenv("DEZUXK_TEST_MODE") == "true" && (deps.Config == nil || !deps.Config.IsProduction())
+
 		if deps.ModelRegistry == nil || deps.ModelRegistry.Count() == 0 {
-			if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+			if isTestMode {
 				checks["models"] = "ok (test_mode)"
 			} else {
 				checks["models"] = "no active models registered"
@@ -326,7 +328,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				}
 			}
 			if !hasUsable {
-				if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+				if isTestMode {
 					checks["accounts"] = "ok (test_mode)"
 				} else {
 					checks["accounts"] = "all upstream accounts are degraded or unavailable"
@@ -336,7 +338,7 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 				checks["accounts"] = "ok"
 			}
 		} else {
-			if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+			if isTestMode {
 				checks["accounts"] = "ok (test_mode)"
 			} else {
 				checks["accounts"] = "session repository not initialized"

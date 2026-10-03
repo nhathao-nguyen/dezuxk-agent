@@ -1,0 +1,207 @@
+services:
+  # ----------------------------------------------------------------------------
+  # TẦNG DỮ LIỆU TỰ HOST (Mode A: Profiles: self-hosted)
+  # Nếu dùng Managed Cloud Services (AWS RDS, ElastiCache, S3/R2), bỏ qua profile này
+  # ----------------------------------------------------------------------------
+
+  # 1. Cơ sở dữ liệu PostgreSQL - Source of Truth duy nhất (Session, Runs, Leases, Keys)
+  postgres:
+    profiles:
+      - self-hosted
+    image: postgres:16-alpine
+    container_name: dezuxk-prod-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DEZUXK_POSTGRES_DBNAME:-dezuxk}
+      POSTGRES_USER: ${DEZUXK_POSTGRES_USER:-dezuxk}
+      POSTGRES_PASSWORD: ${DEZUXK_POSTGRES_PASSWORD}
+    volumes:
+      - postgres-prod-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-dezuxk} -d $${POSTGRES_DB:-dezuxk}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dezuxk-backend
+
+  # 2. Redis - Điều phối phân tán (Locks, Shared Rate Limiting, Cross-Node Event Bus)
+  redis:
+    profiles:
+      - self-hosted
+    image: redis:7-alpine
+    container_name: dezuxk-prod-redis
+    restart: unless-stopped
+    command: >
+      sh -c "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-server --requirepass \"$$REDIS_PASSWORD\"; else redis-server; fi"
+    environment:
+      REDIS_PASSWORD: ${DEZUXK_REDIS_PASSWORD:-}
+    volumes:
+      - redis-prod-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping; else redis-cli ping; fi"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - dezuxk-backend
+
+  # 3. MinIO - Đối tượng lưu trữ media đa phương tiện S3 tương thích
+  minio:
+    profiles:
+      - self-hosted
+    image: cgr.dev/chainguard/minio:latest
+    container_name: dezuxk-prod-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${DEZUXK_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${DEZUXK_S3_SECRET_KEY}
+    volumes:
+      - minio-prod-data:/data
+    networks:
+      - dezuxk-backend
+
+  # ----------------------------------------------------------------------------
+  # TẦNG CỤM GATEWAY APPLICATION (Node A / Node B / Node C)
+  # Cả 3 node đều dùng chung Master Key, PostgreSQL, Redis và S3 Media Storage
+  # ----------------------------------------------------------------------------
+
+  # 4. Gateway Node A
+  gateway-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dezuxk-prod-gateway-a
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DEZUXK_CLUSTER_NODE_ID: gateway-node-a
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
+      minio:
+        condition: service_started
+        required: false
+    volumes:
+      - ./profiles:/app/profiles
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '1gb'
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - dezuxk-backend
+
+  # 5. Gateway Node B
+  gateway-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dezuxk-prod-gateway-b
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DEZUXK_CLUSTER_NODE_ID: gateway-node-b
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
+      minio:
+        condition: service_started
+        required: false
+    volumes:
+      - ./profiles:/app/profiles
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '1gb'
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - dezuxk-backend
+
+  # 6. Gateway Node C
+  gateway-c:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dezuxk-prod-gateway-c
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      DEZUXK_CLUSTER_NODE_ID: gateway-node-c
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      redis:
+        condition: service_healthy
+        required: false
+      minio:
+        condition: service_started
+        required: false
+    volumes:
+      - ./profiles:/app/profiles
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '1gb'
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - dezuxk-backend
+
+  # ----------------------------------------------------------------------------
+  # TẦNG CÂN BẰNG TẢI NGINX LOAD BALANCER
+  # Cổng công khai duy nhất ra ngoài host
+  # ----------------------------------------------------------------------------
+
+  # 7. Nginx Production Load Balancer
+  loadbalancer:
+    image: nginx:alpine
+    container_name: dezuxk-prod-loadbalancer
+    restart: unless-stopped
+    ports:
+      - "${DEZUXK_LB_PORT:-8080}:80"
+    volumes:
+      - ./deployments/nginx/nginx.production.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      gateway-a:
+        condition: service_healthy
+      gateway-b:
+        condition: service_healthy
+      gateway-c:
+        condition: service_healthy
+    networks:
+      - dezuxk-backend
+
+networks:
+  dezuxk-backend:
+    name: dezuxk-backend
+    driver: bridge
+
+volumes:
+  postgres-prod-data:
+  redis-prod-data:
+  minio-prod-data:

@@ -128,40 +128,66 @@ sudo certbot --nginx -d ai.yourdomain.com
 
 ## 🔑 5. Quản Lý Profile Google trên VPS Headless (Không Có Màn Hình)
 
-Khi chạy trên VPS Linux không có giao diện đồ họa (headless), có 2 cách để nạp Cookie và kích hoạt tài khoản:
+Khi chạy trên VPS Linux không có giao diện đồ họa (headless), có 2 flow chuẩn:
 
-### Cách 1: Nạp Cookie Trực Tiếp qua API (Khuyến nghị cho Headless)
-Sau khi lấy cookie `__Secure-1PSID` và `__Secure-1PSIDTS` từ trình duyệt của bạn (dùng DevTools F12 trên máy tính cá nhân):
+### Flow A: Điều Khiển Trình Duyệt Tự Động (Chrome Remote Debugging / CDP)
+1. Tạo profile: `POST /v1/profiles` với `{"id":"acc_01"}`
+2. Khởi chạy Chrome: `POST /v1/profiles/acc_01/launch`
+3. Đăng nhập Google trên cửa sổ Chrome được mở.
+4. Đồng bộ session: `POST /v1/profiles/acc_01/sync`
+   - Gateway tự động trích xuất cookie và CSRF token `SNlM0e`.
+   - Dữ liệu được mã hóa bằng AES-256-GCM qua Secret Vault và lưu trữ an toàn vào PostgreSQL.
+
+### Flow B: Nạp Cookie Trực Tiếp qua API Ingest (Khuyến nghị cho Server Headless)
+Sau khi lấy chuỗi cookie xác thực từ trình duyệt cá nhân (chứa tối thiểu `__Secure-1PSID` và `__Secure-1PSIDTS` cho Gemini, cùng `OSID` cho Flow):
+
 ```bash
-curl -X POST http://<IP_VPS>:8080/v1/profiles/acc_01/ingest \
-  -H "Authorization: Bearer <MASTER_API_KEY>" \
+curl -X POST http://<IP_GATEWAY>:8080/v1/profiles/acc_01/ingest \
+  -H "Authorization: Bearer <DEZUXK_API_KEY>" \
   -H "Content-Type: application/json" \
   -d '{
-    "cookies": "__Secure-1PSID=...; __Secure-1PSIDTS=...;",
-    "set_default": true
+    "email": "your_account@gmail.com",
+    "cookie_str": "__Secure-1PSID=YOUR_PSID_HERE; __Secure-1PSIDTS=YOUR_PSIDTS_HERE; OSID=YOUR_OSID_HERE;",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "proxy": "http://user:pass@proxy.example.com:8080"
   }'
 ```
 
-### Cách 2: Nhập Cookie Trực Tiếp trên Web Dashboard UI
-1. Truy cập `http://<IP_VPS>:8080/admin/`
-2. Chọn tab **"Profiles & CDP"** $\rightarrow$ bấm **"+ Thêm Profile Mới"**.
-3. Điền Account ID và dán chuỗi Cookie $\rightarrow$ Bấm **"Lưu & Kích Hoạt"**. Hệ thống sẽ tự động handshake và trích xuất token `SNlM0e`.
+Payload chấp nhận các trường:
+- `email` (string): Địa chỉ email Google của tài khoản.
+- `cookie_str` (string): Chuỗi cookie định dạng thô `Key=Val; Key2=Val2;`.
+- `cookies` (array/object): Mảng CDP JSON `[{"name":"...", "value":"...", "domain":"..."}]` hoặc Map JSON `{"__Secure-1PSID":"..."}`.
+- `user_agent` (string, tùy chọn): User-Agent của trình duyệt nguồn.
+- `proxy` (string, tùy chọn): HTTP/SOCKS5 proxy riêng cho profile này.
+
+> **NGUYÊN TẮC BẢO MẬT BẮT BUỘC:**
+> - Tuyệt đối **KHÔNG commit** cookie hoặc lưu cookie trong file `.env`.
+> - Gateway không in giá trị cookie thô ra log, và không trả về cookie trong API response.
+> - Sau khi nạp thành công, session được mã hóa bằng AES-256-GCM và lưu trữ bền vững trong PostgreSQL.
 
 ---
 
 ## 🛠️ 6. Các Lệnh Vận Hành Thường Dùng
 
+### Khởi động Cụm Multi-Node Production:
 ```bash
-# Xem logs container liên tục
-docker compose logs -f dezuxk-gateway
+# 1. Kiểm tra tiền trạm cấu hình trước khi chạy
+./scripts/production-preflight.sh
 
-# Khởi động lại Gateway
-docker compose restart dezuxk-gateway
+# 2. Khởi động cụm 3 Gateway + Nginx Load Balancer
+docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
 
-# Dừng Gateway mà không mất dữ liệu
-docker compose down
+# 3. Theo dõi trạng thái cụm
+docker compose -f docker-compose.production.yml ps
+docker compose -f docker-compose.production.yml logs -f loadbalancer gateway-a
+```
+
+### Dừng hoặc Cập Nhật Cụm:
+```bash
+# Dừng cụm mà không mất dữ liệu bền vững
+docker compose -f docker-compose.production.yml down
 
 # Cập nhật code mới nhất và build lại
 git pull
-docker compose up -d --build
+docker compose --env-file .env.production -f docker-compose.production.yml up -d --build
 ```

@@ -138,7 +138,7 @@ func Run(configPath string, portOverride int) error {
 
 	// 4. Khởi tạo Outbound Adapters với lớp bọc Upstream Resilience (Circuit Breaker, Backoff, Jitter, Retry-After)
 	var upstreamTransport ports.UpstreamGoogleTransport
-	if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+	if os.Getenv("DEZUXK_TEST_MODE") == "true" && !cfg.IsProduction() {
 		log.Println("[Test Mode] DEZUXK_TEST_MODE=true: Kích hoạt Fake Upstream Transport cho kiểm thử cụm CI")
 		upstreamTransport = google.NewFakeUpstreamTransport()
 	} else {
@@ -162,7 +162,7 @@ func Run(configPath string, portOverride int) error {
 	}
 
 	// Khi chạy kiểm thử phân tán trong CI (DEZUXK_TEST_MODE=true), tự động nạp mock model và mock account
-	if os.Getenv("DEZUXK_TEST_MODE") == "true" {
+	if os.Getenv("DEZUXK_TEST_MODE") == "true" && !cfg.IsProduction() {
 		log.Println("[Test Mode] Đăng ký mock models & test account cho môi trường kiểm thử cluster")
 		if modelRegistry.Count() == 0 {
 			modelRegistry.Register(domain.ModelDescriptor{

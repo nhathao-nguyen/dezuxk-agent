@@ -284,3 +284,165 @@ func TestStorageAndDistributedConfig(t *testing.T) {
 		t.Errorf("sanitized DSN must NOT contain real password, got: %s", sanitized)
 	}
 }
+
+func TestProductionSafety_StrictValidation(t *testing.T) {
+	validProdConfig := func() *config.Config {
+		return &config.Config{
+			Environment: "production",
+			TestMode:    false,
+			Server: config.ServerConfig{
+				Host:           "0.0.0.0",
+				Port:           8080,
+				APIKey:         "sk-dez-prod-valid-api-key-test-12345",
+				AllowedOrigins: []string{"https://ai.example.com"},
+			},
+			Profiles: config.ProfilesConfig{
+				BaseDir: "./profiles",
+			},
+			Security: config.SecurityConfig{
+				MasterKey: "super-secure-production-master-key-32b",
+			},
+			Admin: config.AdminConfig{
+				Username:     "admin",
+				Password:     "strong-production-admin-pass-2026",
+				SessionToken: "strong-production-admin-session-token-9988",
+			},
+			Cluster: config.ClusterConfig{
+				Enabled: true,
+				NodeID:  "node-a",
+			},
+			Storage: config.StorageConfig{
+				Driver: "postgres",
+				Postgres: config.PostgresConfig{
+					Host:   "db.internal",
+					DBName: "dezuxk_prod",
+				},
+			},
+			Distributed: config.DistributedConfig{
+				Enabled: true,
+				Driver:  "redis",
+				Redis: config.RedisConfig{
+					Addr: "redis.internal:6379",
+				},
+			},
+			Media: config.MediaConfig{
+				Driver: "s3",
+				S3: config.S3MediaConfig{
+					Bucket: "production-media-bucket",
+				},
+			},
+		}
+	}
+
+	// 0. Base valid config must pass
+	cfg := validProdConfig()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected baseline production config to pass, got: %v", err)
+	}
+
+	// 1. production + TEST_MODE=true → FAIL
+	t.Run("production + TEST_MODE=true fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.TestMode = true
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when TestMode=true in production, but got nil")
+		}
+
+		c2 := validProdConfig()
+		_ = os.Setenv("DEZUXK_TEST_MODE", "true")
+		defer os.Unsetenv("DEZUXK_TEST_MODE")
+		if err := c2.Validate(); err == nil {
+			t.Error("expected error when DEZUXK_TEST_MODE=true in production, but got nil")
+		}
+	})
+
+	// 2. production missing API key → FAIL
+	t.Run("production missing API key fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.Server.APIKey = ""
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when API key is missing in production, but got nil")
+		}
+		c.Server.APIKey = "CHANGE_ME"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when API key is CHANGE_ME placeholder in production, but got nil")
+		}
+	})
+
+	// 3. production missing master key → FAIL
+	t.Run("production missing master key fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.Security.MasterKey = ""
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when master key is missing in production, but got nil")
+		}
+		c.Security.MasterKey = "CHANGE_ME"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when master key is CHANGE_ME placeholder in production, but got nil")
+		}
+	})
+
+	// 4. production cluster + local media → FAIL
+	t.Run("production cluster + local media fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.Media.Driver = "local"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when cluster uses local media driver in production, but got nil")
+		}
+	})
+
+	// 5. production cluster without Redis → FAIL
+	t.Run("production cluster without Redis fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.Distributed.Enabled = false
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when cluster is enabled without distributed/redis, but got nil")
+		}
+		c.Distributed.Enabled = true
+		c.Distributed.Redis.Addr = ""
+		c.Distributed.Redis.Addrs = nil
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when cluster has empty redis addr, but got nil")
+		}
+	})
+
+	// 6. production cluster without Postgres → FAIL
+	t.Run("production cluster without Postgres fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.Storage.Driver = "sqlite"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when cluster uses sqlite instead of postgres, but got nil")
+		}
+	})
+
+	// 7. production default admin password → FAIL
+	t.Run("production default admin password fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.Admin.Password = "admin"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when admin password is 'admin', but got nil")
+		}
+		c.Admin.Password = "dezuxk_admin_secret_pass"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when admin password is default 'dezuxk_admin_secret_pass', but got nil")
+		}
+		c.Admin.Password = "CHANGE_ME"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when admin password is 'CHANGE_ME', but got nil")
+		}
+		c.Admin.Password = "valid-pass"
+		c.Admin.SessionToken = "CHANGE_ME"
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when admin session token is 'CHANGE_ME', but got nil")
+		}
+	})
+
+	// 8. production wildcard CORS → FAIL
+	t.Run("production wildcard CORS fails", func(t *testing.T) {
+		c := validProdConfig()
+		c.Server.AllowedOrigins = []string{"*"}
+		if err := c.Validate(); err == nil {
+			t.Error("expected error when allowed_origins contains wildcard '*' in production, but got nil")
+		}
+	})
+}

@@ -1,0 +1,76 @@
+# ==============================================================================
+# DEZUXK AI GATEWAY - PRODUCTION CONFIGURATION TEMPLATE
+# ==============================================================================
+# File này chỉ chứa các giá trị mặc định phi bí mật (non-secret defaults).
+# Tất cả secret (API keys, Master key, passwords, tokens) được nạp thông qua
+# biến môi trường từ .env.production.
+# ==============================================================================
+
+environment: production
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  allowed_origins:
+    - "https://YOUR_DOMAIN"
+  trusted_proxies:
+    - "127.0.0.1"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  read_timeout: 300s
+  write_timeout: 300s
+  upstream_short_timeout: 20s
+  upstream_stream_timeout: 300s
+  max_header_bytes: 65536
+  enable_request_log: true
+  rate_limit:
+    max_requests: 120
+    window_seconds: 60
+
+storage:
+  driver: postgres
+  allow_memory_fallback: false # Production bắt buộc fail-closed nếu cơ sở dữ liệu gặp sự cố!
+
+distributed:
+  enabled: true
+  driver: redis
+
+cluster:
+  enabled: true
+
+media:
+  driver: s3
+
+profiles:
+  base_dir: "./profiles"
+  chrome_binary: "/usr/bin/chromium"
+  cdp_port_start: 9222
+
+admin:
+  enabled: true
+  username: admin
+
+keep_alive:
+  enabled: true
+  interval: 4h
+
+golden_job:
+  enabled: true
+  interval: 5m
+  lab_account_prefix: "lab"
+
+vision:
+  enabled: true
+  max_image_size_bytes: 10485760 # 10MB
+  allowed_mime_types:
+    - "image/jpeg"
+    - "image/png"
+    - "image/webp"
+    - "image/gif"
+  http_download_timeout: 30s
+  upload_timeout: 60s
+  upload_method: "scotty"
+
+operations:
+  chat_completions: true

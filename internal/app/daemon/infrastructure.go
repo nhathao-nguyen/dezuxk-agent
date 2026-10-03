@@ -87,7 +87,11 @@ func BuildInfrastructure(ctx context.Context, cfg *config.Config, tokenExtractor
 	log.Printf("[Cluster] Node Identity: %s (Cluster Enabled: %v)", nodeID, cfg.Cluster.IsEnabled())
 
 	masterKey := session.ResolveMasterKey(cfg.Security.MasterKey)
+	if cfg.IsProduction() && (strings.TrimSpace(masterKey) == "" || masterKey == "CHANGE_ME") {
+		return nil, errors.New("security.master_key bắt buộc phải được cấu hình hợp lệ trong môi trường production")
+	}
 	vault := session.NewVault(masterKey)
+	log.Printf("[Security Vault] Đã khởi tạo AES-256-GCM Vault (vault_key_fingerprint=%s)", vault.Fingerprint())
 	refresher := google.NewDerivedSecretRefresher(tokenExtractor)
 
 	infra := &Infrastructure{
