@@ -657,7 +657,16 @@ func LoadConfig(path string) (*Config, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("không thể đọc file cấu hình tại %s: %w", path, err)
+		if os.IsNotExist(err) && (path == "configs/config.yaml" || path == "./configs/config.yaml") {
+			examplePath := "configs/config.example.yaml"
+			if exData, exErr := os.ReadFile(examplePath); exErr == nil {
+				data = exData
+				err = nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("không thể đọc file cấu hình tại %s: %w", path, err)
+		}
 	}
 
 	var cfg Config

@@ -35,6 +35,9 @@ RUN addgroup -S -g 10001 dezuxk && \
 # Sao chép binary từ builder stage
 COPY --from=builder /app/dezuxk /app/dezuxk
 COPY configs/ /app/configs/
+RUN if [ ! -f /app/configs/config.yaml ] && [ -f /app/configs/config.example.yaml ]; then \
+        cp /app/configs/config.example.yaml /app/configs/config.yaml; \
+    fi
 
 # Tạo các thư mục lưu trữ bền vững và phân quyền cho user non-root
 RUN mkdir -p /app/storage /app/profiles /app/workspaces && \
