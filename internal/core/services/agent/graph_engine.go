@@ -93,7 +93,10 @@ func (g *GraphEngine) RunGraph(ctx context.Context, goal string, opts domain.Age
 		opts.Supervised = true
 	}
 
-	taskID := generateTaskID()
+	taskID := opts.TaskID
+	if taskID == "" {
+		taskID = generateTaskID()
+	}
 	state := &domain.AgentGraphState{
 		TaskID:      taskID,
 		Goal:        goal,

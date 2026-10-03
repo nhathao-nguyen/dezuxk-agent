@@ -225,9 +225,10 @@ func Run(configPath string, portOverride int) error {
 			memoryRepo = mRepo
 		}
 		arRepo, err := session.NewSqliteAgentRunRepository(sqliteRepo.DB())
-		if err == nil {
-			agentRunRepo = arRepo
+		if err != nil {
+			log.Fatalf("[FATAL] Khởi tạo SqliteAgentRunRepository thất bại (migration fail): %v", err)
 		}
+		agentRunRepo = arRepo
 	}
 	if checkpointRepo == nil {
 		checkpointRepo = session.NewMemoryCheckpointRepository()
@@ -372,26 +373,43 @@ func Run(configPath string, portOverride int) error {
 	// 1. Chuyển /ready sang 503 ngay lập tức trước khi drain
 	readinessManager.SetReady(false)
 
-	shutdownTimeout := cfg.Server.GetShutdownTimeout()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-
-	// 2. Dừng nhận HTTP và drain kết nối
-	log.Printf("[Server] Dừng tiếp nhận HTTP và drain kết nối (timeout: %v)...", shutdownTimeout)
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[Server Warning] Lỗi khi dừng HTTP server: %v", err)
+	totalShutdown := cfg.Server.GetShutdownTimeout()
+	if totalShutdown <= 0 {
+		totalShutdown = 30 * time.Second
 	}
 
+	httpBudget := totalShutdown / 3
+	if httpBudget > 10*time.Second {
+		httpBudget = 10 * time.Second
+	}
+	agentBudget := totalShutdown - httpBudget
+
+	// 2. Dừng nhận HTTP và drain kết nối
+	log.Printf("[Server] Dừng tiếp nhận HTTP và drain kết nối (budget: %v)...", httpBudget)
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), httpBudget)
+	if err := httpServer.Shutdown(httpCtx); err != nil {
+		log.Printf("[Server Warning] Lỗi khi dừng HTTP server: %v", err)
+	}
+	cancelHTTP()
+
 	// 3. Dừng tiếp nhận Agent Runs mới và drain / cancel JobService workers
-	log.Println("[Agent] Dừng tiếp nhận Agent Runs mới và chờ hoàn tất các tác vụ nền...")
-	if err := agentJobService.Shutdown(shutdownCtx); err != nil {
-		log.Printf("[Agent Warning] Lỗi khi shutdown Agent Job Service: %v", err)
+	log.Printf("[Agent] Dừng tiếp nhận Agent Runs mới và drain workers (budget: %v)...", agentBudget)
+	agentCtx, cancelAgent := context.WithTimeout(context.Background(), agentBudget)
+	agentErr := agentJobService.Shutdown(agentCtx)
+	cancelAgent()
+	if agentErr != nil {
+		log.Printf("[Agent Alert] Timeout khi chờ Agent Job Service shutdown: %v", agentErr)
 	}
 
 	// 4. Đóng kết nối cơ sở dữ liệu SQLite sau khi tất cả worker đã hoàn tất ghi trạng thái
+	// TUYỆT ĐỐI không close SQLite nếu JobService workers chưa dừng!
 	if sqliteRepo != nil {
-		log.Println("[Database] Đóng cơ sở dữ liệu SQLite...")
-		_ = sqliteRepo.Close()
+		if agentErr == nil {
+			log.Println("[Database] Đóng cơ sở dữ liệu SQLite...")
+			_ = sqliteRepo.Close()
+		} else {
+			log.Printf("[Database Protection] Bỏ qua đóng SQLite vì JobService workers chưa dừng hẳn (tránh database write after close).")
+		}
 	}
 
 	log.Println("[Server] Gateway đã dừng hoàn toàn sạch sẽ.")

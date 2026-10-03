@@ -68,6 +68,7 @@ const (
 
 // AgentRunOptions tùy chọn khi khởi chạy Agent
 type AgentRunOptions struct {
+	TaskID                 string               `json:"task_id,omitempty"`
 	Model                  string               `json:"model"`
 	MaxSteps               int                  `json:"max_steps"`
 	MaxToolCalls           int                  `json:"max_tool_calls,omitempty"`           // Giới hạn tổng số tool calls cho cả run (mặc định 50)

@@ -166,6 +166,9 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		if state.MaxSteps < opts.MaxSteps {
 			state.MaxSteps = opts.MaxSteps
 		}
+		if opts.TaskID != "" && state.TaskID == "" {
+			state.TaskID = opts.TaskID
+		}
 		if state.Model != "" && opts.Model == "gemini-3.8-flash" {
 			opts.Model = state.Model
 		}
@@ -176,8 +179,12 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		state.IsCompleted = false
 		state.StopReason = ""
 	} else {
+		taskID := opts.TaskID
+		if taskID == "" {
+			taskID = generateTaskID()
+		}
 		state = &domain.AgentState{
-			TaskID:      generateTaskID(),
+			TaskID:      taskID,
 			Goal:        goal,
 			Model:       opts.Model,
 			Workspace:   opts.Workspace,

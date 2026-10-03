@@ -94,7 +94,7 @@ func (e *PrometheusMetricsExporter) ServeHTTP(w http.ResponseWriter, r *http.Req
 	if e.agentRunRepo != nil {
 		sb.WriteString("# HELP agent_runs_total Total durable agent runs submitted.\n")
 		sb.WriteString("# TYPE agent_runs_total counter\n")
-		runs, err := e.agentRunRepo.List(context.Background(), "all", 100, 0)
+		runs, err := e.agentRunRepo.List(context.Background(), "", 100, 0)
 		if err == nil {
 			statusCounts := make(map[string]int)
 			for _, r := range runs {

@@ -179,3 +179,66 @@ func TestChatHandler_StreamWithUsage(t *testing.T) {
 		t.Errorf("expected [DONE] in stream output")
 	}
 }
+
+func TestChatHandler_StreamThroughTraceMiddleware(t *testing.T) {
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	metrics := domain.NewContractMetrics()
+
+	mockCU := &mockChatUseCase{
+		onStreamDo: func(ctx context.Context, w io.Writer, flusher func()) error {
+			chunk := domain.OpenAIChatResponse{
+				ID:      "chatcmpl-test-stream",
+				Object:  "chat.completion.chunk",
+				Created: 1234567890,
+				Model:   "gemini-3.8-flash",
+				Choices: []domain.OpenAIChoice{
+					{
+						Index: 0,
+						Delta: domain.OpenAIDelta{
+							Content: "Hello from stream",
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			if flusher != nil {
+				flusher()
+			}
+			return nil
+		},
+	}
+
+	chatHandler := adaptersHTTP.NewChatHandler(mockCU, mr, metrics)
+	// Bọc qua RequestTraceMiddleware (chính là middleware gây lỗi 502 máy chủ không hỗ trợ luồng trước đó)
+	pipeline := adaptersHTTP.RequestTraceMiddleware(false)(http.HandlerFunc(chatHandler.HandleChatCompletions))
+
+	reqBody := `{
+		"model": "gemini-3.8-flash",
+		"stream": true,
+		"messages": [
+			{"role": "user", "content": "Test streaming through middleware"}
+		]
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	pipeline.ServeHTTP(rec, req)
+
+	// Phải trả về HTTP 200 OK, TUYỆT ĐỐI KHÔNG ĐƯỢC 502
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got: %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "Hello from stream") {
+		t.Errorf("expected stream content, got: %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Errorf("expected [DONE], got: %s", body)
+	}
+}
+

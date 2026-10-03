@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,8 +15,8 @@ import (
 )
 
 var (
-	ErrRunNotFound           = errors.New("agent run not found")
-	ErrIdempotencyConflict   = errors.New("idempotency conflict: a run with the same key already exists")
+	ErrRunNotFound             = errors.New("agent run not found")
+	ErrIdempotencyConflict     = errors.New("idempotency conflict: a run with the same key already exists")
 	ErrInvalidStatusTransition = errors.New("invalid status transition")
 )
 
@@ -41,8 +42,48 @@ func NewSqliteAgentRunRepository(db *sql.DB) (*SqliteAgentRunRepository, error) 
 
 var _ ports.AgentRunRepository = (*SqliteAgentRunRepository)(nil)
 
+func getTableColumns(db *sql.DB, tableName string) (map[string]bool, error) {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s);", tableName))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return nil, err
+		}
+		cols[strings.ToLower(name)] = true
+	}
+	return cols, nil
+}
+
+func addColumnIfNotExists(db *sql.DB, table, colName, colDef string) error {
+	cols, err := getTableColumns(db, table)
+	if err != nil {
+		return err
+	}
+	if cols[strings.ToLower(colName)] {
+		return nil
+	}
+	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s;", table, colName, colDef)
+	if _, err := db.Exec(query); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return nil
+		}
+		return fmt.Errorf("không thể thêm cột %s vào bảng %s: %w", colName, table, err)
+	}
+	return nil
+}
+
 func (r *SqliteAgentRunRepository) migrate() error {
-	schema := `
+	// 1. CREATE TABLE IF NOT EXISTS (tạo cấu trúc cơ bản nếu chưa có)
+	createRuns := `
 	CREATE TABLE IF NOT EXISTS agent_runs (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL DEFAULT 'default',
@@ -63,16 +104,16 @@ func (r *SqliteAgentRunRepository) migrate() error {
 		worker_id TEXT,
 		lease_until DATETIME,
 		heartbeat_at DATETIME,
+		security_context TEXT,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
 		finished_at DATETIME
-	);
-	CREATE UNIQUE INDEX IF NOT EXISTS uidx_agent_runs_tenant_idemp 
-		ON agent_runs(tenant_id, idempotency_key) 
-		WHERE idempotency_key IS NOT NULL AND idempotency_key != '';
-	CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status ON agent_runs(tenant_id, status);
-	CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status);
+	);`
+	if _, err := r.db.Exec(createRuns); err != nil {
+		return fmt.Errorf("lỗi khởi tạo bảng agent_runs: %w", err)
+	}
 
+	createEvents := `
 	CREATE TABLE IF NOT EXISTS agent_run_events (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		tenant_id TEXT NOT NULL DEFAULT 'default',
@@ -81,31 +122,87 @@ func (r *SqliteAgentRunRepository) migrate() error {
 		kind TEXT NOT NULL,
 		message TEXT NOT NULL,
 		timestamp DATETIME NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_agent_run_events_tenant_run ON agent_run_events(tenant_id, run_id, id ASC);
-	CREATE INDEX IF NOT EXISTS idx_agent_run_events_run ON agent_run_events(run_id, id ASC);
-	`
-	if _, err := r.db.Exec(schema); err != nil {
-		return err
+	);`
+	if _, err := r.db.Exec(createEvents); err != nil {
+		return fmt.Errorf("lỗi khởi tạo bảng agent_run_events: %w", err)
 	}
 
-	// Chạy migration bổ sung cho các database đã tồn tại từ phiên bản cũ
-	columns := []string{
-		"ALTER TABLE agent_runs ADD COLUMN parent_run_id TEXT;",
-		"ALTER TABLE agent_runs ADD COLUMN resume_from_run_id TEXT;",
-		"ALTER TABLE agent_runs ADD COLUMN worker_id TEXT;",
-		"ALTER TABLE agent_runs ADD COLUMN lease_until DATETIME;",
-		"ALTER TABLE agent_runs ADD COLUMN heartbeat_at DATETIME;",
-		"ALTER TABLE agent_run_events ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';",
+	// 2, 3, 4. Kiểm tra PRAGMA table_info và ALTER TABLE ADD COLUMN cho các trường thiếu
+	runColsToAdd := []struct {
+		name string
+		def  string
+	}{
+		{"tenant_id", "TEXT NOT NULL DEFAULT 'default'"},
+		{"idempotency_key", "TEXT"},
+		{"parent_run_id", "TEXT"},
+		{"resume_from_run_id", "TEXT"},
+		{"worker_id", "TEXT"},
+		{"lease_until", "DATETIME"},
+		{"heartbeat_at", "DATETIME"},
+		{"security_context", "TEXT"},
 	}
-	for _, alter := range columns {
-		_, _ = r.db.Exec(alter)
+	for _, col := range runColsToAdd {
+		if err := addColumnIfNotExists(r.db, "agent_runs", col.name, col.def); err != nil {
+			return err
+		}
 	}
 
-	// Đảm bảo UNIQUE index được kích hoạt
-	_, _ = r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uidx_agent_runs_tenant_idemp 
+	eventColsToAdd := []struct {
+		name string
+		def  string
+	}{
+		{"tenant_id", "TEXT NOT NULL DEFAULT 'default'"},
+	}
+	for _, col := range eventColsToAdd {
+		if err := addColumnIfNotExists(r.db, "agent_run_events", col.name, col.def); err != nil {
+			return err
+		}
+	}
+
+	// 5. Backfill: giá trị default đã được SQLite áp dụng qua DEFAULT 'default'
+
+	// 6. CREATE INDEX IF NOT EXISTS (sau khi tất cả các cột đã được đảm bảo tồn tại)
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_agent_runs_tenant_status ON agent_runs(tenant_id, status);",
+		"CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status);",
+		"CREATE INDEX IF NOT EXISTS idx_agent_run_events_tenant_run ON agent_run_events(tenant_id, run_id, id ASC);",
+		"CREATE INDEX IF NOT EXISTS idx_agent_run_events_run ON agent_run_events(run_id, id ASC);",
+	}
+	for _, idx := range indexes {
+		if _, err := r.db.Exec(idx); err != nil {
+			return fmt.Errorf("lỗi tạo index: %w", err)
+		}
+	}
+
+	// 7. CREATE UNIQUE INDEX IF NOT EXISTS
+	uniqueIdx := `CREATE UNIQUE INDEX IF NOT EXISTS uidx_agent_runs_tenant_idemp 
 		ON agent_runs(tenant_id, idempotency_key) 
-		WHERE idempotency_key IS NOT NULL AND idempotency_key != '';`)
+		WHERE idempotency_key IS NOT NULL AND idempotency_key != '';`
+	if _, err := r.db.Exec(uniqueIdx); err != nil {
+		return fmt.Errorf("lỗi tạo unique index: %w", err)
+	}
+
+	// 8. Verify schema
+	runsCols, err := getTableColumns(r.db, "agent_runs")
+	if err != nil {
+		return fmt.Errorf("lỗi kiểm tra schema agent_runs: %w", err)
+	}
+	for _, col := range runColsToAdd {
+		if !runsCols[strings.ToLower(col.name)] {
+			return fmt.Errorf("xác thực schema thất bại: thiếu cột %s trong bảng agent_runs", col.name)
+		}
+	}
+
+	eventCols, err := getTableColumns(r.db, "agent_run_events")
+	if err != nil {
+		return fmt.Errorf("lỗi kiểm tra schema agent_run_events: %w", err)
+	}
+	for _, col := range eventColsToAdd {
+		if !eventCols[strings.ToLower(col.name)] {
+			return fmt.Errorf("xác thực schema thất bại: thiếu cột %s trong bảng agent_run_events", col.name)
+		}
+	}
+
 	return nil
 }
 
@@ -132,20 +229,27 @@ func (r *SqliteAgentRunRepository) Create(ctx context.Context, run *domain.Agent
 		idempKeyVal = strings.TrimSpace(run.IdempotencyKey)
 	}
 
+	var secCtxVal any = nil
+	if run.SecurityContext != nil {
+		if b, err := json.Marshal(run.SecurityContext); err == nil {
+			secCtxVal = string(b)
+		}
+	}
+
 	query := `
 	INSERT INTO agent_runs (
 		id, tenant_id, idempotency_key, goal, status, model, workspace,
 		current_step, max_steps, total_tool_calls, stop_reason, final_answer,
 		error, git_diff, parent_run_id, resume_from_run_id, worker_id, lease_until, heartbeat_at,
-		created_at, updated_at, finished_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+		security_context, created_at, updated_at, finished_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 	`
 	_, err := r.db.ExecContext(ctx, query,
 		run.ID, run.TenantID, idempKeyVal, run.Goal, string(run.Status),
 		run.Model, run.Workspace, run.CurrentStep, run.MaxSteps, run.TotalToolCalls,
 		run.StopReason, run.FinalAnswer, run.Error, run.GitDiff,
 		run.ParentRunID, run.ResumeFromRunID, run.WorkerID, run.LeaseUntil, run.HeartbeatAt,
-		run.CreatedAt, run.UpdatedAt, run.FinishedAt,
+		secCtxVal, run.CreatedAt, run.UpdatedAt, run.FinishedAt,
 	)
 	if err != nil {
 		errLower := strings.ToLower(err.Error())
@@ -250,12 +354,13 @@ func scanAgentRun(scanner interface{ Scan(dest ...any) error }) (*domain.AgentRu
 	var idempKey, stopReason, finalAns, errStr, gitDiff sql.NullString
 	var parentID, resumeID, workerID sql.NullString
 	var leaseUntil, heartbeatAt, finAt sql.NullTime
+	var secCtxStr sql.NullString
 
 	err := scanner.Scan(
 		&run.ID, &run.TenantID, &idempKey, &run.Goal, &statusStr, &run.Model, &run.Workspace,
 		&run.CurrentStep, &run.MaxSteps, &run.TotalToolCalls, &stopReason, &finalAns,
 		&errStr, &gitDiff, &parentID, &resumeID, &workerID, &leaseUntil, &heartbeatAt,
-		&run.CreatedAt, &run.UpdatedAt, &finAt,
+		&secCtxStr, &run.CreatedAt, &run.UpdatedAt, &finAt,
 	)
 	if err != nil {
 		return nil, err
@@ -295,6 +400,12 @@ func scanAgentRun(scanner interface{ Scan(dest ...any) error }) (*domain.AgentRu
 	if finAt.Valid {
 		run.FinishedAt = &finAt.Time
 	}
+	if secCtxStr.Valid && secCtxStr.String != "" {
+		var sec domain.AgentSecurityContext
+		if err := json.Unmarshal([]byte(secCtxStr.String), &sec); err == nil {
+			run.SecurityContext = &sec
+		}
+	}
 
 	return &run, nil
 }
@@ -302,7 +413,7 @@ func scanAgentRun(scanner interface{ Scan(dest ...any) error }) (*domain.AgentRu
 const selectRunCols = `id, tenant_id, idempotency_key, goal, status, model, workspace,
 	current_step, max_steps, total_tool_calls, stop_reason, final_answer,
 	error, git_diff, parent_run_id, resume_from_run_id, worker_id, lease_until, heartbeat_at,
-	created_at, updated_at, finished_at`
+	security_context, created_at, updated_at, finished_at`
 
 func (r *SqliteAgentRunRepository) Get(ctx context.Context, runID string) (*domain.AgentRun, error) {
 	query := fmt.Sprintf("SELECT %s FROM agent_runs WHERE id = ?;", selectRunCols)
@@ -321,18 +432,8 @@ func (r *SqliteAgentRunRepository) Get(ctx context.Context, runID string) (*doma
 }
 
 func (r *SqliteAgentRunRepository) GetForTenant(ctx context.Context, tenantID, runID string) (*domain.AgentRun, error) {
-	var query string
-	var args []any
-
-	if tenantID != "" && tenantID != "all" {
-		query = fmt.Sprintf("SELECT %s FROM agent_runs WHERE id = ? AND tenant_id = ?;", selectRunCols)
-		args = []any{runID, tenantID}
-	} else {
-		query = fmt.Sprintf("SELECT %s FROM agent_runs WHERE id = ?;", selectRunCols)
-		args = []any{runID}
-	}
-
-	row := r.db.QueryRowContext(ctx, query, args...)
+	query := fmt.Sprintf("SELECT %s FROM agent_runs WHERE id = ? AND tenant_id = ?;", selectRunCols)
+	row := r.db.QueryRowContext(ctx, query, runID, tenantID)
 	run, err := scanAgentRun(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -361,7 +462,7 @@ func (r *SqliteAgentRunRepository) List(ctx context.Context, tenantID string, li
 	var rows *sql.Rows
 	var err error
 
-	if tenantID != "" && tenantID != "all" {
+	if tenantID != "" {
 		query = fmt.Sprintf("SELECT %s FROM agent_runs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?;", selectRunCols)
 		rows, err = r.db.QueryContext(ctx, query, tenantID, limit, offset)
 	} else {
@@ -468,29 +569,14 @@ func (r *SqliteAgentRunRepository) GetEvents(ctx context.Context, runID string, 
 }
 
 func (r *SqliteAgentRunRepository) GetEventsForTenant(ctx context.Context, tenantID, runID string, afterID int64) ([]domain.AgentRunEvent, error) {
-	var query string
-	var args []any
-
-	if tenantID != "" && tenantID != "all" {
-		query = `
-		SELECT e.id, e.tenant_id, e.run_id, e.step, e.kind, e.message, e.timestamp
-		FROM agent_run_events e
-		JOIN agent_runs r ON r.id = e.run_id
-		WHERE e.run_id = ? AND r.tenant_id = ? AND e.id > ?
-		ORDER BY e.id ASC;
-		`
-		args = []any{runID, tenantID, afterID}
-	} else {
-		query = `
-		SELECT e.id, e.tenant_id, e.run_id, e.step, e.kind, e.message, e.timestamp
-		FROM agent_run_events e
-		WHERE e.run_id = ? AND e.id > ?
-		ORDER BY e.id ASC;
-		`
-		args = []any{runID, afterID}
-	}
-
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	query := `
+	SELECT e.id, e.tenant_id, e.run_id, e.step, e.kind, e.message, e.timestamp
+	FROM agent_run_events e
+	JOIN agent_runs r ON r.id = e.run_id
+	WHERE e.run_id = ? AND r.tenant_id = ? AND e.id > ?
+	ORDER BY e.id ASC;
+	`
+	rows, err := r.db.QueryContext(ctx, query, runID, tenantID, afterID)
 	if err != nil {
 		return nil, err
 	}
@@ -511,13 +597,27 @@ func (r *SqliteAgentRunRepository) Cancel(ctx context.Context, runID string) err
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var currentStatus string
+	err := r.db.QueryRowContext(ctx, "SELECT status FROM agent_runs WHERE id = ?", runID).Scan(&currentStatus)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", ErrRunNotFound, runID)
+		}
+		return err
+	}
+
+	st := domain.AgentRunStatus(currentStatus)
+	if st == domain.RunStatusCompleted || st == domain.RunStatusFailed || st == domain.RunStatusCancelled {
+		return fmt.Errorf("%w: không thể hủy tác vụ đang ở trạng thái %s", ErrInvalidStatusTransition, currentStatus)
+	}
+
 	now := time.Now()
 	query := `
 	UPDATE agent_runs
 	SET status = ?, stop_reason = ?, updated_at = ?, finished_at = ?
 	WHERE id = ? AND status IN ('queued', 'running', 'waiting_for_tool', 'waiting_for_approval', 'recovering');
 	`
-	_, err := r.db.ExecContext(ctx, query, string(domain.RunStatusCancelled), domain.StopReasonCancelled, now, now, runID)
+	_, err = r.db.ExecContext(ctx, query, string(domain.RunStatusCancelled), domain.StopReasonCancelled, now, now, runID)
 	return err
 }
 
@@ -525,49 +625,32 @@ func (r *SqliteAgentRunRepository) CancelForTenant(ctx context.Context, tenantID
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	now := time.Now()
-	var query string
-	var args []any
-
-	if tenantID != "" && tenantID != "all" {
-		query = `
-		UPDATE agent_runs
-		SET status = ?, stop_reason = ?, updated_at = ?, finished_at = ?
-		WHERE id = ? AND tenant_id = ? AND status IN ('queued', 'running', 'waiting_for_tool', 'waiting_for_approval', 'recovering');
-		`
-		args = []any{string(domain.RunStatusCancelled), domain.StopReasonCancelled, now, now, runID, tenantID}
-	} else {
-		query = `
-		UPDATE agent_runs
-		SET status = ?, stop_reason = ?, updated_at = ?, finished_at = ?
-		WHERE id = ? AND status IN ('queued', 'running', 'waiting_for_tool', 'waiting_for_approval', 'recovering');
-		`
-		args = []any{string(domain.RunStatusCancelled), domain.StopReasonCancelled, now, now, runID}
-	}
-
-	res, err := r.db.ExecContext(ctx, query, args...)
+	var currentTenant, currentStatus string
+	err := r.db.QueryRowContext(ctx, "SELECT tenant_id, status FROM agent_runs WHERE id = ?", runID).Scan(&currentTenant, &currentStatus)
 	if err != nil {
-		return err
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		// Kiểm tra xem run có tồn tại cho tenant không
-		var exists int
-		checkQuery := "SELECT COUNT(1) FROM agent_runs WHERE id = ?"
-		checkArgs := []any{runID}
-		if tenantID != "" && tenantID != "all" {
-			checkQuery += " AND tenant_id = ?"
-			checkArgs = append(checkArgs, tenantID)
-		}
-		_ = r.db.QueryRowContext(ctx, checkQuery, checkArgs...).Scan(&exists)
-		if exists == 0 {
+		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
 		}
+		return err
 	}
-	return nil
+
+	if currentTenant != tenantID {
+		return fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
+	}
+
+	st := domain.AgentRunStatus(currentStatus)
+	if st == domain.RunStatusCompleted || st == domain.RunStatusFailed || st == domain.RunStatusCancelled {
+		return fmt.Errorf("%w: không thể hủy tác vụ đang ở trạng thái %s", ErrInvalidStatusTransition, currentStatus)
+	}
+
+	now := time.Now()
+	query := `
+	UPDATE agent_runs
+	SET status = ?, stop_reason = ?, updated_at = ?, finished_at = ?
+	WHERE id = ? AND tenant_id = ? AND status IN ('queued', 'running', 'waiting_for_tool', 'waiting_for_approval', 'recovering');
+	`
+	_, err = r.db.ExecContext(ctx, query, string(domain.RunStatusCancelled), domain.StopReasonCancelled, now, now, runID, tenantID)
+	return err
 }
 
 func (r *SqliteAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error) {
@@ -580,9 +663,36 @@ func (r *SqliteAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 	query := `
 	UPDATE agent_runs
 	SET status = 'running', worker_id = ?, lease_until = ?, heartbeat_at = ?, updated_at = ?
-	WHERE id = ? AND (status = 'queued' OR (status = 'running' AND lease_until < ?));
+	WHERE id = ? AND (
+		status = 'queued' 
+		OR (status = 'recovering' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
+		OR (status = 'running' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
+	);
 	`
-	res, err := r.db.ExecContext(ctx, query, workerID, leaseUntil, now, now, runID, now)
+	res, err := r.db.ExecContext(ctx, query, workerID, leaseUntil, now, now, runID, workerID, now, workerID, now)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
+}
+
+func (r *SqliteAgentRunRepository) RenewLease(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now()
+	leaseUntil := now.Add(leaseDuration)
+
+	query := `
+	UPDATE agent_runs
+	SET lease_until = ?, heartbeat_at = ?, updated_at = ?
+	WHERE id = ? AND worker_id = ? AND status = 'running';
+	`
+	res, err := r.db.ExecContext(ctx, query, leaseUntil, now, now, runID, workerID)
 	if err != nil {
 		return false, err
 	}

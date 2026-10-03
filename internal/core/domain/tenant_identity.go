@@ -88,6 +88,74 @@ type TenantIdentity struct {
 	NetworkPolicy         NetworkPolicy `json:"network_policy"`
 }
 
+// AgentSecurityContext lưu trữ snapshot phân quyền hiệu lực của TenantIdentity gắn liền với AgentRun
+type AgentSecurityContext struct {
+	TenantID              string        `json:"tenant_id"`
+	KeyID                 string        `json:"key_id"`
+	Role                  string        `json:"role"`
+	Scopes                []string      `json:"scopes"`
+	AllowedModels         []string      `json:"allowed_models"`
+	AllowedTools          []string      `json:"allowed_tools"`
+	AllowedWorkspaceRoots []string      `json:"allowed_workspace_roots"`
+	MaxAgentSteps         int           `json:"max_agent_steps"`
+	MaxConcurrentRuns     int           `json:"max_concurrent_runs"`
+	MaxToolRuntime        time.Duration `json:"max_tool_runtime"`
+	RequireApproval       bool          `json:"require_approval"`
+	AllowShell            bool          `json:"allow_shell"`
+	EnforceSandbox        bool          `json:"enforce_sandbox"`
+	AutoMergeAllowed      bool          `json:"auto_merge_allowed"`
+	NetworkPolicy         NetworkPolicy `json:"network_policy"`
+}
+
+// SecurityContextFromTenantIdentity tạo snapshot an toàn các chính sách ủy quyền từ TenantIdentity
+func SecurityContextFromTenantIdentity(id TenantIdentity) *AgentSecurityContext {
+	return &AgentSecurityContext{
+		TenantID:              id.TenantID,
+		KeyID:                 id.KeyID,
+		Role:                  id.Role,
+		Scopes:                append([]string(nil), id.Scopes...),
+		AllowedModels:         append([]string(nil), id.AllowedModels...),
+		AllowedTools:          append([]string(nil), id.AllowedTools...),
+		AllowedWorkspaceRoots: append([]string(nil), id.AllowedWorkspaceRoots...),
+		MaxAgentSteps:         id.MaxAgentSteps,
+		MaxConcurrentRuns:     id.MaxConcurrentRuns,
+		MaxToolRuntime:        id.MaxToolRuntime,
+		RequireApproval:       id.RequireApproval,
+		AllowShell:            id.AllowShell,
+		EnforceSandbox:        id.EnforceSandbox,
+		AutoMergeAllowed:      id.AutoMergeAllowed,
+		NetworkPolicy:         id.NetworkPolicy,
+	}
+}
+
+// ToTenantIdentity khôi phục đầy đủ ngữ cảnh TenantIdentity từ AgentSecurityContext
+func (s *AgentSecurityContext) ToTenantIdentity() TenantIdentity {
+	if s == nil {
+		return TenantIdentity{
+			TenantID: "default",
+			Role:     "user",
+			Scopes:   []string{ScopeAgent},
+		}
+	}
+	return TenantIdentity{
+		TenantID:              s.TenantID,
+		KeyID:                 s.KeyID,
+		Role:                  s.Role,
+		Scopes:                append([]string(nil), s.Scopes...),
+		AllowedModels:         append([]string(nil), s.AllowedModels...),
+		AllowedTools:          append([]string(nil), s.AllowedTools...),
+		AllowedWorkspaceRoots: append([]string(nil), s.AllowedWorkspaceRoots...),
+		MaxAgentSteps:         s.MaxAgentSteps,
+		MaxConcurrentRuns:     s.MaxConcurrentRuns,
+		MaxToolRuntime:        s.MaxToolRuntime,
+		RequireApproval:       s.RequireApproval,
+		AllowShell:            s.AllowShell,
+		EnforceSandbox:        s.EnforceSandbox,
+		AutoMergeAllowed:      s.AutoMergeAllowed,
+		NetworkPolicy:         s.NetworkPolicy,
+	}
+}
+
 // HasScope kiểm tra xem identity có scope yêu cầu hay không
 func (id TenantIdentity) HasScope(scope string) bool {
 	if id.Role == "admin" {

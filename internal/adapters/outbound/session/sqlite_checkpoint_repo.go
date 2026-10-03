@@ -36,6 +36,7 @@ func NewSqliteCheckpointRepository(db *sql.DB) (*SqliteCheckpointRepository, err
 var _ ports.CheckpointRepository = (*SqliteCheckpointRepository)(nil)
 
 func (r *SqliteCheckpointRepository) migrate() error {
+	// 1. CREATE TABLE IF NOT EXISTS
 	schema := `
 	CREATE TABLE IF NOT EXISTS agent_checkpoints (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,13 +47,21 @@ func (r *SqliteCheckpointRepository) migrate() error {
 		state_snapshot TEXT NOT NULL,
 		plan_snapshot TEXT NOT NULL,
 		created_at DATETIME NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_agent_checkpoints_task ON agent_checkpoints(tenant_id, task_id, id DESC);
-	`
+	);`
 	if _, err := r.db.Exec(schema); err != nil {
+		return fmt.Errorf("lỗi tạo bảng agent_checkpoints: %w", err)
+	}
+
+	// 2, 3, 4. Kiểm tra PRAGMA table_info và ALTER TABLE nếu thiếu tenant_id
+	if err := addColumnIfNotExists(r.db, "agent_checkpoints", "tenant_id", "TEXT NOT NULL DEFAULT 'default'"); err != nil {
 		return err
 	}
-	_, _ = r.db.Exec("ALTER TABLE agent_checkpoints ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';")
+
+	// 5. CREATE INDEX IF NOT EXISTS (sau khi chắc chắn cột tenant_id tồn tại)
+	if _, err := r.db.Exec("CREATE INDEX IF NOT EXISTS idx_agent_checkpoints_task ON agent_checkpoints(tenant_id, task_id, id DESC);"); err != nil {
+		return fmt.Errorf("lỗi tạo index cho agent_checkpoints: %w", err)
+	}
+
 	return nil
 }
 
@@ -86,7 +95,6 @@ func (r *SqliteCheckpointRepository) SaveCheckpoint(ctx context.Context, cp *dom
 	INSERT INTO agent_checkpoints (tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at)
 	VALUES (?, ?, ?, ?, ?, ?, ?);
 	`
-
 	res, err := r.db.ExecContext(ctx, query, cp.TenantID, cp.TaskID, string(cp.NodeKind), cp.StepIndex, string(stateJSON), string(planJSON), cp.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("lỗi khi lưu checkpoint vào SQLite: %w", err)
@@ -112,7 +120,7 @@ func (r *SqliteCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 		query = `
 		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
 		FROM agent_checkpoints
-		WHERE task_id = ? AND (tenant_id = ? OR tenant_id = 'default')
+		WHERE task_id = ? AND tenant_id = ?
 		ORDER BY id DESC
 		LIMIT 1;
 		`
@@ -165,7 +173,7 @@ func (r *SqliteCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 		query = `
 		SELECT id, tenant_id, task_id, node_kind, step_index, state_snapshot, plan_snapshot, created_at
 		FROM agent_checkpoints
-		WHERE task_id = ? AND (tenant_id = ? OR tenant_id = 'default')
+		WHERE task_id = ? AND tenant_id = ?
 		ORDER BY id ASC;
 		`
 		args = []any{taskID, identity.TenantID}
@@ -210,7 +218,7 @@ func (r *SqliteCheckpointRepository) DeleteCheckpoints(ctx context.Context, task
 
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
 	if hasID && identity.Role != "admin" && identity.TenantID != "" {
-		query := `DELETE FROM agent_checkpoints WHERE task_id = ? AND (tenant_id = ? OR tenant_id = 'default');`
+		query := `DELETE FROM agent_checkpoints WHERE task_id = ? AND tenant_id = ?;`
 		_, err := r.db.ExecContext(ctx, query, taskID, identity.TenantID)
 		return err
 	}
@@ -266,7 +274,7 @@ func (m *MemoryCheckpointRepository) GetLatestCheckpoint(ctx context.Context, ta
 	list := m.checkpoints[taskID]
 	for i := len(list) - 1; i >= 0; i-- {
 		cp := list[i]
-		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID || cp.TenantID == "default" || cp.TenantID == "" {
+		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID {
 			return cp, nil
 		}
 	}
@@ -280,7 +288,7 @@ func (m *MemoryCheckpointRepository) ListCheckpoints(ctx context.Context, taskID
 	identity, hasID := domain.TenantIdentityFromContext(ctx)
 	var res []*domain.AgentCheckpoint
 	for _, cp := range m.checkpoints[taskID] {
-		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID || cp.TenantID == "default" || cp.TenantID == "" {
+		if !hasID || identity.Role == "admin" || cp.TenantID == identity.TenantID {
 			res = append(res, cp)
 		}
 	}
@@ -299,7 +307,7 @@ func (m *MemoryCheckpointRepository) DeleteCheckpoints(ctx context.Context, task
 
 	var remaining []*domain.AgentCheckpoint
 	for _, cp := range m.checkpoints[taskID] {
-		if cp.TenantID != identity.TenantID && cp.TenantID != "default" && cp.TenantID != "" {
+		if cp.TenantID != identity.TenantID {
 			remaining = append(remaining, cp)
 		}
 	}

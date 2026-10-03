@@ -90,6 +90,7 @@ type AgentRunRepository interface {
 	Cancel(ctx context.Context, runID string) error
 	CancelForTenant(ctx context.Context, tenantID, runID string) error
 	ClaimRun(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error)
+	RenewLease(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error)
 	FindByTenantAndIdempotencyKey(ctx context.Context, tenantID, key string) (*domain.AgentRun, error)
 }
 

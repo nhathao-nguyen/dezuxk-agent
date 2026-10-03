@@ -1,7 +1,10 @@
 package http
 
 import (
+	"bufio"
+	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -14,9 +17,32 @@ type responseWriterInterceptor struct {
 	statusCode int
 }
 
+var (
+	_ http.ResponseWriter = (*responseWriterInterceptor)(nil)
+	_ http.Flusher        = (*responseWriterInterceptor)(nil)
+	_ http.Hijacker       = (*responseWriterInterceptor)(nil)
+)
+
 func (w *responseWriterInterceptor) WriteHeader(code int) {
 	w.statusCode = code
 	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *responseWriterInterceptor) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (w *responseWriterInterceptor) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *responseWriterInterceptor) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, errors.New("underlying ResponseWriter does not implement http.Hijacker")
 }
 
 // RequestTraceMiddleware khởi tạo và truyền bá TraceContext xuyên suốt chu kỳ xử lý request

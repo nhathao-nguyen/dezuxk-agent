@@ -133,10 +133,7 @@ func (m *MemoryAgentRunRepository) GetForTenant(ctx context.Context, tenantID, r
 	defer m.mu.RUnlock()
 
 	run, ok := m.runs[runID]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
-	}
-	if tenantID != "" && tenantID != "all" && run.TenantID != tenantID {
+	if !ok || run.TenantID != tenantID {
 		return nil, fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
 	}
 
@@ -151,7 +148,12 @@ func (m *MemoryAgentRunRepository) List(ctx context.Context, tenantID string, li
 
 	var result []*domain.AgentRun
 	for _, r := range m.runs {
-		if tenantID == "" || tenantID == "all" || r.TenantID == tenantID {
+		if tenantID != "" {
+			if r.TenantID == tenantID {
+				copied := *r
+				result = append(result, &copied)
+			}
+		} else {
 			copied := *r
 			result = append(result, &copied)
 		}
@@ -216,10 +218,7 @@ func (m *MemoryAgentRunRepository) GetEventsForTenant(ctx context.Context, tenan
 	defer m.mu.RUnlock()
 
 	run, ok := m.runs[runID]
-	if !ok {
-		return nil, fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
-	}
-	if tenantID != "" && tenantID != "all" && run.TenantID != tenantID {
+	if !ok || run.TenantID != tenantID {
 		return nil, fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
 	}
 
@@ -241,6 +240,9 @@ func (m *MemoryAgentRunRepository) Cancel(ctx context.Context, runID string) err
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrRunNotFound, runID)
 	}
+	if run.Status == domain.RunStatusCompleted || run.Status == domain.RunStatusFailed || run.Status == domain.RunStatusCancelled {
+		return fmt.Errorf("%w: không thể hủy tác vụ đang ở trạng thái %s", ErrInvalidStatusTransition, run.Status)
+	}
 	now := time.Now()
 	run.Status = domain.RunStatusCancelled
 	run.StopReason = domain.StopReasonCancelled
@@ -254,11 +256,11 @@ func (m *MemoryAgentRunRepository) CancelForTenant(ctx context.Context, tenantID
 	defer m.mu.Unlock()
 
 	run, ok := m.runs[runID]
-	if !ok {
+	if !ok || run.TenantID != tenantID {
 		return fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
 	}
-	if tenantID != "" && tenantID != "all" && run.TenantID != tenantID {
-		return fmt.Errorf("%w: %s cho tenant %s", ErrRunNotFound, runID, tenantID)
+	if run.Status == domain.RunStatusCompleted || run.Status == domain.RunStatusFailed || run.Status == domain.RunStatusCancelled {
+		return fmt.Errorf("%w: không thể hủy tác vụ đang ở trạng thái %s", ErrInvalidStatusTransition, run.Status)
 	}
 
 	now := time.Now()
@@ -279,9 +281,33 @@ func (m *MemoryAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 	}
 
 	now := time.Now()
-	if run.Status == domain.RunStatusQueued || (run.Status == domain.RunStatusRunning && run.LeaseUntil != nil && run.LeaseUntil.Before(now)) {
+	isExpired := run.LeaseUntil == nil || run.LeaseUntil.Before(now)
+	isOwner := run.WorkerID == workerID
+	if run.Status == domain.RunStatusQueued ||
+		(run.Status == domain.RunStatusRunning && (isOwner || isExpired)) ||
+		(run.Status == domain.RunStatusRecovering && (isOwner || isExpired)) {
 		run.Status = domain.RunStatusRunning
 		run.WorkerID = workerID
+		lease := now.Add(leaseDuration)
+		run.LeaseUntil = &lease
+		run.HeartbeatAt = &now
+		run.UpdatedAt = now
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *MemoryAgentRunRepository) RenewLease(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, ok := m.runs[runID]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrRunNotFound, runID)
+	}
+
+	if run.Status == domain.RunStatusRunning && run.WorkerID == workerID {
+		now := time.Now()
 		lease := now.Add(leaseDuration)
 		run.LeaseUntil = &lease
 		run.HeartbeatAt = &now

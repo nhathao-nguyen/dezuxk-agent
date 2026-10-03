@@ -150,6 +150,11 @@ func (h *ChatHandler) HandleChatCompletions(w http.ResponseWriter, r *http.Reque
 	if req.Stream {
 		flusher, ok := w.(http.Flusher)
 		if !ok {
+			if u, hasUnwrap := w.(interface{ Unwrap() http.ResponseWriter }); hasUnwrap {
+				flusher, ok = u.Unwrap().(http.Flusher)
+			}
+		}
+		if !ok {
 			writeChatError(w, r, h.metrics, domain.UpstreamRejected(domain.OpChatCompletions, "", domain.ServiceGemini, "máy chủ không hỗ trợ luồng"), false)
 			return
 		}
@@ -398,6 +403,11 @@ func (h *ChatHandler) HandleResponses(w http.ResponseWriter, r *http.Request) {
 	if isStream {
 		chatReq.Stream = true
 		flusher, ok := w.(http.Flusher)
+		if !ok {
+			if u, hasUnwrap := w.(interface{ Unwrap() http.ResponseWriter }); hasUnwrap {
+				flusher, ok = u.Unwrap().(http.Flusher)
+			}
+		}
 		if !ok {
 			http.Error(w, `{"error":{"message":"máy chủ không hỗ trợ luồng","type":"upstream_error"}}`, http.StatusInternalServerError)
 			return

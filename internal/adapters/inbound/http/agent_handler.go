@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -211,6 +212,11 @@ func (h *AgentHandler) HandleRun(w http.ResponseWriter, r *http.Request) {
 // HandleRunStream xử lý POST /v1/agent/run/stream qua Server-Sent Events (SSE)
 func (h *AgentHandler) HandleRunStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
+	if !ok {
+		if u, hasUnwrap := w.(interface{ Unwrap() http.ResponseWriter }); hasUnwrap {
+			flusher, ok = u.Unwrap().(http.Flusher)
+		}
+	}
 	if !ok {
 		http.Error(w, "Streaming không được hỗ trợ bởi server", http.StatusInternalServerError)
 		return
@@ -881,6 +887,13 @@ func (h *AgentHandler) HandleCancelRun(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		if errors.Is(err, session.ErrInvalidStatusTransition) || strings.Contains(strings.ToLower(err.Error()), "invalid status transition") {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": "invalid_status_transition: " + err.Error(),
+			})
+			return
+		}
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": "Lỗi khi hủy agent run: " + err.Error(),
@@ -964,6 +977,11 @@ func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Requ
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		if u, hasUnwrap := w.(interface{ Unwrap() http.ResponseWriter }); hasUnwrap {
+			flusher, ok = u.Unwrap().(http.Flusher)
+		}
+	}
+	if !ok {
 		http.Error(w, "Streaming không được hỗ trợ", http.StatusInternalServerError)
 		return
 	}
@@ -974,44 +992,90 @@ func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// 1. Gửi các sự kiện lịch sử đã lưu trước đó có kiểm tra tenant isolation
-	existingEvents, _ := h.runRepo.GetEventsForTenant(r.Context(), tenantID, runID, 0)
-	var lastID int64
+	// Parse Last-Event-ID nếu client gửi để khôi phục stream sau khi đứt kết nối
+	var startAfterID int64 = 0
+	if lastEventIDStr := r.Header.Get("Last-Event-ID"); lastEventIDStr != "" {
+		if val, parseErr := strconv.ParseInt(strings.TrimSpace(lastEventIDStr), 10, 64); parseErr == nil && val > 0 {
+			startAfterID = val
+		}
+	}
+
+	// 1. Subscribe realtime TRƯỚC để không bỏ lỡ bất kỳ event nào xảy ra giữa lịch sử và đăng ký
+	eventsCh, unsubscribe, err := h.jobService.SubscribeEventsForTenant(r.Context(), tenantID, runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer unsubscribe()
+
+	// 2. Gửi các sự kiện lịch sử đã lưu trước đó có kiểm tra tenant isolation và Last-Event-ID
+	existingEvents, _ := h.runRepo.GetEventsForTenant(r.Context(), tenantID, runID, startAfterID)
+	lastSentID := startAfterID
 	for _, ev := range existingEvents {
-		lastID = ev.ID
+		if ev.ID > lastSentID {
+			lastSentID = ev.ID
+		}
 		data, _ := json.Marshal(ev)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", ev.ID, data)
 		flusher.Flush()
 	}
 
-	// Nếu run đã kết thúc thì dừng SSE stream luôn
-	if run.Status == domain.RunStatusCompleted || run.Status == domain.RunStatusFailed || run.Status == domain.RunStatusCancelled {
+	// Nếu run đã kết thúc, kiểm tra lần cuối từ DB và kết thúc stream
+	latestRun, _ := h.jobService.GetRunForTenant(r.Context(), tenantID, runID)
+	if latestRun != nil && (latestRun.Status == domain.RunStatusCompleted || latestRun.Status == domain.RunStatusFailed || latestRun.Status == domain.RunStatusCancelled) {
+		moreEvents, _ := h.runRepo.GetEventsForTenant(r.Context(), tenantID, runID, lastSentID)
+		for _, ev := range moreEvents {
+			if ev.ID > lastSentID {
+				lastSentID = ev.ID
+				data, _ := json.Marshal(ev)
+				_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", ev.ID, data)
+				flusher.Flush()
+			}
+		}
 		_, _ = fmt.Fprintf(w, "event: done\ndata: [DONE]\n\n")
 		flusher.Flush()
 		return
 	}
 
-	// 2. Subscribe sự kiện theo thời gian thực có kiểm tra tenant isolation
-	eventsCh, unsubscribe, err := h.jobService.SubscribeEventsForTenant(r.Context(), tenantID, runID)
-	if err != nil {
-		return
-	}
-	defer unsubscribe()
-
+	// 3. Xử lý các sự kiện realtime từ channel với cơ chế khử trùng lặp và tự động backfill nếu có gap
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case ev, ok := <-eventsCh:
 			if !ok {
+				// Kênh channel đã đóng (run hoàn tất) -> backfill kiểm tra các sự kiện cuối cùng từ DB
+				finalEvents, _ := h.runRepo.GetEventsForTenant(r.Context(), tenantID, runID, lastSentID)
+				for _, fev := range finalEvents {
+					if fev.ID > lastSentID {
+						lastSentID = fev.ID
+						data, _ := json.Marshal(fev)
+						_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", fev.ID, data)
+						flusher.Flush()
+					}
+				}
 				_, _ = fmt.Fprintf(w, "event: done\ndata: [DONE]\n\n")
 				flusher.Flush()
 				return
 			}
-			if ev.ID > lastID {
-				lastID = ev.ID
+
+			// Nếu phát hiện gap giữa lastSentID và ev.ID (do channel đầy hoặc broadcast drop) -> backfill từ DB
+			if ev.ID > lastSentID+1 {
+				missed, _ := h.runRepo.GetEventsForTenant(r.Context(), tenantID, runID, lastSentID)
+				for _, mEv := range missed {
+					if mEv.ID > lastSentID && mEv.ID < ev.ID {
+						lastSentID = mEv.ID
+						data, _ := json.Marshal(mEv)
+						_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", mEv.ID, data)
+						flusher.Flush()
+					}
+				}
+			}
+
+			if ev.ID > lastSentID {
+				lastSentID = ev.ID
 				data, _ := json.Marshal(ev)
-				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+				_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", ev.ID, data)
 				flusher.Flush()
 			}
 		}

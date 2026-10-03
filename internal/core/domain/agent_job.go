@@ -42,10 +42,11 @@ type AgentRun struct {
 	GitDiff         string          `json:"git_diff,omitempty"`
 	ParentRunID     string          `json:"parent_run_id,omitempty"`
 	ResumeFromRunID string          `json:"resume_from_run_id,omitempty"`
-	WorkerID        string          `json:"worker_id,omitempty"`
-	LeaseUntil      *time.Time      `json:"lease_until,omitempty"`
-	HeartbeatAt     *time.Time      `json:"heartbeat_at,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
+	WorkerID        string                `json:"worker_id,omitempty"`
+	LeaseUntil      *time.Time            `json:"lease_until,omitempty"`
+	HeartbeatAt     *time.Time            `json:"heartbeat_at,omitempty"`
+	SecurityContext *AgentSecurityContext `json:"security_context,omitempty"`
+	CreatedAt       time.Time             `json:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at"`
 	FinishedAt      *time.Time      `json:"finished_at,omitempty"`
 	Events          []AgentRunEvent `json:"events,omitempty"`
