@@ -163,6 +163,15 @@ jobs:
 
       - name: Real Node Crash Test
         run: |
+          echo "Ensuring Gateway Node A is running and healthy..."
+          docker start dezuxk-gateway-a || true
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8081/ready > /dev/null 2>&1; then
+              echo "Gateway Node A is ready!"
+              break
+            fi
+            sleep 1
+          done
           echo "Verifying cluster resiliency and proxy failover after Node A recovery..."
           curl -fsS http://localhost:8080/health > /dev/null
           curl -fsS http://localhost:8081/ready > /dev/null

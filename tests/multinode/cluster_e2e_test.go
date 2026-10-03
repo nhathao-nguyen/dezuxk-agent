@@ -751,7 +751,7 @@ func TestClusterProcess_09_RealNodeCrashAndAgentTakeover(t *testing.T) {
 
 	// Đảm bảo luôn khởi động lại Gateway Node A sau khi kết thúc test
 	defer func() {
-		_ = exec.Command("docker", "compose", "-f", "docker-compose.multinode.yml", "start", "gateway-a").Run()
+		_ = exec.Command("docker", "start", "dezuxk-gateway-a").Run()
 		// Chờ Gateway A phục hồi
 		for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
 			resp, err := client.Get(nodeABaseURL + "/ready")
