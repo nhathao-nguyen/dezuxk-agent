@@ -17,7 +17,7 @@ Tuyệt đối cấm hợp nhất mã nguồn vào nhánh chính nếu chưa vư
 | **Require a pull request before merging** | **Bật (Enabled)** | Cấm push trực tiếp (`git push origin main`), buộc phải qua Pull Request kiểm duyệt |
 | **Require approvals** | **Tối thiểu 1** | Đảm bảo code review kỹ lưỡng trước khi đưa vào sản xuất |
 | **Require status checks to pass before merging** | **Bật (Enabled)** | Khóa merge nếu CI chưa hoàn toàn xanh |
-| **Status check name** | `Production Verification Gate` / `verify` | Định danh workflow kiểm chuẩn bất biến |
+| **Status check name** | `Lint, Test & Race Verification` | Check-run name chính xác sinh ra bởi GitHub Actions CI |
 | **Require branches to be up to date before merging** | **Bật (Enabled)** | Ngăn chặn merge drift khi nhánh `main` đã có commit mới |
 | **Do not allow bypassing the above settings** | **Bật (Enabled)** | Áp dụng bình đẳng cho cả Repository Administrators / Owners |
 | **Block force pushes** | **Bật (Enabled)** | Chống ghi đè lịch sử commit (`git push --force`) gây mất dấu kiểm toán |
@@ -37,7 +37,7 @@ Tuyệt đối cấm hợp nhất mã nguồn vào nhánh chính nếu chưa vư
      - `[x] Require a pull request before merging`
      - `[x] Require approvals` (số lượng: 1)
      - `[x] Require status checks to pass before merging`
-       - Trong ô tìm kiếm status checks, tìm và chọn: `verify` (thuộc job *Production Verification Gate*)
+       - Trong ô tìm kiếm status checks, tìm và chọn: `Lint, Test & Race Verification` (đây là check-run name thực tế xuất hiện trên commit tạo bởi job `verify` trong workflow *Production Verification Gate*)
      - `[x] Require branches to be up to date before merging`
      - `[x] Do not allow bypassing the above settings` (Include administrators)
      - `[x] Restrict force pushes`
@@ -61,7 +61,7 @@ gh api \
   "required_status_checks": {
     "strict": true,
     "contexts": [
-      "verify"
+      "Lint, Test & Race Verification"
     ]
   },
   "enforce_admins": true,
@@ -94,4 +94,4 @@ Workflow [.github/workflows/ci.yml](file:///.github/workflows/ci.yml) được c
       branches: [ main, master ]
   ```
 
-Tên của status check trong GitHub Status Context là `verify`. Khi kích hoạt protection rule, GitHub sẽ khóa nút Merge của mọi Pull Request cho đến khi check `verify` chuyển sang trạng thái xanh (Success).
+Tên của status check / check-run name hiển thị trên commit và trong GitHub Status Context là `Lint, Test & Race Verification`. Khi kích hoạt protection rule, GitHub sẽ khóa nút Merge của mọi Pull Request cho đến khi check `Lint, Test & Race Verification` chuyển sang trạng thái xanh (Success).

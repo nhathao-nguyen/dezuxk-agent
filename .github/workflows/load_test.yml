@@ -15,6 +15,10 @@ on:
         description: 'Số lượng tác vụ Agent chạy nền đồng thời'
         required: true
         default: '50'
+      soak_seconds:
+        description: 'Thời lượng ngâm tải (giây) - 0 cho burst đơn'
+        required: true
+        default: '0'
   schedule:
     # Chạy tự động hàng tuần (Chủ nhật lúc 02:00 UTC) để phát hiện regression và leak
     - cron: '0 2 * * 0'
@@ -33,17 +37,31 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Run Tier B Load, Chaos & Resource Leak Verification (with Race Detector)
+      - name: Run Tier B Load, Chaos & Resource Leak Verification
         run: |
           CHAT_CONC="${{ github.event.inputs.chat_concurrency || '500' }}"
           STREAM_CONC="${{ github.event.inputs.stream_concurrency || '50' }}"
           AGENT_BURST="${{ github.event.inputs.agent_burst || '50' }}"
-          echo "Starting Tier B Load Test with Race Detector..."
+          SOAK_SECS="${{ github.event.inputs.soak_seconds || '0' }}"
+          echo "Starting Tier B Load Test..."
           echo "Chat Concurrency:   $CHAT_CONC"
           echo "Stream Concurrency: $STREAM_CONC"
           echo "Agent Burst:        $AGENT_BURST"
-          go run -race ./cmd/loadtest \
-            -chat-concurrency "$CHAT_CONC" \
-            -stream-concurrency "$STREAM_CONC" \
-            -agent-burst "$AGENT_BURST" \
-            -max-error-rate 0.05
+          echo "Soak Seconds:       $SOAK_SECS"
+          if [ "$SOAK_SECS" -gt 60 ]; then
+            echo "Long soak mode ($SOAK_SECS s): running high-throughput soak test..."
+            go run ./cmd/loadtest \
+              -chat-concurrency "$CHAT_CONC" \
+              -stream-concurrency "$STREAM_CONC" \
+              -agent-burst "$AGENT_BURST" \
+              -soak-seconds "$SOAK_SECS" \
+              -max-error-rate 0.05
+          else
+            echo "Standard load mode: running with Race Detector enabled..."
+            go run -race ./cmd/loadtest \
+              -chat-concurrency "$CHAT_CONC" \
+              -stream-concurrency "$STREAM_CONC" \
+              -agent-burst "$AGENT_BURST" \
+              -soak-seconds "$SOAK_SECS" \
+              -max-error-rate 0.05
+          fi

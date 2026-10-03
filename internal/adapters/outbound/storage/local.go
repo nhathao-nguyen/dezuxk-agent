@@ -5,10 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +16,7 @@ import (
 	"time"
 
 	"dezuxk-gateway/internal/core/domain"
+	"dezuxk-gateway/internal/security/netguard"
 )
 
 type mediaAssetMetadata struct {
@@ -39,6 +38,7 @@ type LocalStorageAdapter struct {
 	baseURL    string
 	assets     map[string]*domain.MediaAsset
 	httpClient *http.Client
+	urlGuard   netguard.URLGuard
 }
 
 func sanitizeExtension(rawExt string, kind domain.MediaKind) string {
@@ -92,67 +92,9 @@ func isTrustedGoogleHost(host string) bool {
 	return false
 }
 
-func isRestrictedIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	if ipv4 := ip.To4(); ipv4 != nil {
-		if ipv4[0] == 169 && ipv4[1] == 254 {
-			return true
-		}
-		if ipv4[0] == 100 && (ipv4[1] >= 64 && ipv4[1] <= 127) {
-			return true
-		}
-		if ipv4[0] == 0 {
-			return true
-		}
-	}
-	return false
-}
-
 func validateSafeMediaURL(rawURL string) (*url.URL, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, fmt.Errorf("URL media không hợp lệ: %w", err)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return nil, fmt.Errorf("giao thức URL không được phép: %s (chỉ hỗ trợ http/https)", u.Scheme)
-	}
-	hostname := strings.ToLower(u.Hostname())
-	if hostname == "" {
-		return nil, fmt.Errorf("URL thiếu hostname")
-	}
-
-	// Chặn các hostname nội bộ nguy hiểm
-	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") ||
-		hostname == "metadata.google.internal" || strings.HasSuffix(hostname, ".internal") ||
-		hostname == "169.254.169.254" {
-		return nil, fmt.Errorf("ssrf blocked: host %s không được phép truy cập", hostname)
-	}
-
-	// Nếu hostname là IP trực tiếp
-	if ip := net.ParseIP(hostname); ip != nil {
-		if isRestrictedIP(ip) {
-			return nil, fmt.Errorf("ssrf blocked: IP %s thuộc dải IP nội bộ/hạn chế", ip.String())
-		}
-		return u, nil
-	}
-
-	// Đối soát phân giải DNS để chống DNS rebinding / DNS SSRF
-	ips, err := net.LookupIP(hostname)
-	if err != nil {
-		return nil, fmt.Errorf("không thể phân giải DNS cho %s: %w", hostname, err)
-	}
-	for _, ip := range ips {
-		if isRestrictedIP(ip) {
-			return nil, fmt.Errorf("ssrf blocked: host %s phân giải ra IP nội bộ/hạn chế %s", hostname, ip.String())
-		}
-	}
-	return u, nil
+	guard := netguard.NewDefaultGuard(false)
+	return guard.Validate(context.Background(), rawURL)
 }
 
 func NewLocalStorageAdapter(storageDir, baseURL string) (*LocalStorageAdapter, error) {
@@ -164,26 +106,22 @@ func NewLocalStorageAdapter(storageDir, baseURL string) (*LocalStorageAdapter, e
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 
+	guard := netguard.NewDefaultGuard(false)
 	adapter := &LocalStorageAdapter{
 		storageDir: storageDir,
 		baseURL:    baseURL,
 		assets:     make(map[string]*domain.MediaAsset),
-		httpClient: &http.Client{
+		urlGuard:   guard,
+		httpClient: netguard.NewSafeHTTPClient(netguard.SafeHTTPConfig{
 			Timeout: 60 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 10 {
-					return errors.New("stopped after 10 redirects")
-				}
-				if _, err := validateSafeMediaURL(req.URL.String()); err != nil {
-					return fmt.Errorf("ssrf redirect blocked: %w", err)
-				}
 				if !isTrustedGoogleHost(req.URL.Hostname()) {
 					req.Header.Del("Cookie")
 					req.Header.Del("Authorization")
 				}
 				return nil
 			},
-		},
+		}),
 	}
 
 	// Nạp trước các asset metadata bền vững đã lưu từ trước (sidecar metadata)

@@ -13,6 +13,7 @@ import (
 	"dezuxk-gateway/internal/config"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/services"
+	"dezuxk-gateway/internal/security/netguard"
 )
 
 type mockUploadService struct {
@@ -180,6 +181,12 @@ func TestVisionResolver_HTTPURLDownload(t *testing.T) {
 	}
 	mockUpload := &mockUploadService{returnToken: "/contrib_service/ttl_1d/http_image_token"}
 	vr := services.NewVisionResolver(cfg, mockUpload)
+	// Cho phép loopback trong test với httptest server cục bộ
+	vr.SetURLGuard(netguard.NewDefaultGuard(true))
+	vr.SetHTTPClient(netguard.NewSafeHTTPClient(netguard.SafeHTTPConfig{
+		Timeout:                 5 * time.Second,
+		AllowLoopbackForTesting: true,
+	}))
 	acc := &domain.ManagedAccount{ID: "acc-1"}
 
 	req := &domain.OpenAIChatRequest{
@@ -202,6 +209,44 @@ func TestVisionResolver_HTTPURLDownload(t *testing.T) {
 	}
 	if attachments[0].StorageToken != "/contrib_service/ttl_1d/http_image_token" {
 		t.Errorf("expected storage token from http download, got %s", attachments[0].StorageToken)
+	}
+}
+
+func TestVisionResolver_SSRFProtection(t *testing.T) {
+	cfg := config.VisionConfig{
+		MaxImageSizeBytes:   1024 * 1024,
+		AllowedMimeTypes:    []string{"image/jpeg", "image/png"},
+		HTTPDownloadTimeout: 5 * time.Second,
+		UploadMethod:        "scotty",
+	}
+	mockUpload := &mockUploadService{returnToken: "token"}
+	vr := services.NewVisionResolver(cfg, mockUpload) // default production config
+
+	blockedTargets := []string{
+		"http://127.0.0.1/evil.png",
+		"http://127.0.0.1:8080/image.jpg",
+		"http://localhost/image.png",
+		"http://sub.localhost/image.png",
+		"http://[::1]/image.png",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.1/image.png",
+		"http://172.16.0.1/image.png",
+		"http://192.168.1.1/image.png",
+		"http://100.64.0.1/image.png",
+		"http://metadata.google.internal/computeMetadata/v1/",
+		"http://vault.internal/secret.png",
+	}
+
+	for _, target := range blockedTargets {
+		t.Run(target, func(t *testing.T) {
+			_, err := vr.ResolveImage(context.Background(), target, 0)
+			if err == nil {
+				t.Fatalf("expected SSRF error for %s, but ResolveImage succeeded", target)
+			}
+			if !strings.Contains(err.Error(), "SSRF") && !strings.Contains(err.Error(), "restricted") {
+				t.Fatalf("expected SSRF error message for %s, got: %v", target, err)
+			}
+		})
 	}
 }
 

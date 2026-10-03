@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"dezuxk-gateway/internal/adapters/outbound/google"
 	"dezuxk-gateway/internal/core/domain"
@@ -142,5 +143,52 @@ func TestGeminiChatGoldenJob_LiveLabAccount(t *testing.T) {
 	}
 	if cookie == "" {
 		t.Skip("bỏ qua live chat lab test: không có biến môi trường GEMINI_LAB_COOKIE / DEZUXK_LAB_COOKIE")
+	}
+
+	cookieMap := make(map[string]string)
+	for _, pair := range strings.Split(cookie, ";") {
+		pair = strings.TrimSpace(pair)
+		if idx := strings.Index(pair, "="); idx != -1 {
+			k := strings.TrimSpace(pair[:idx])
+			v := strings.TrimSpace(pair[idx+1:])
+			if k != "" {
+				cookieMap[k] = v
+			}
+		}
+	}
+
+	labAcc := &domain.ManagedAccount{
+		ID:  "lab_gemini_tester",
+		Jar: domain.NewCookieJar(cookieMap),
+	}
+
+	extractor := google.NewTokenExtractorAdapter("", "", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+
+	sn, _, err := extractor.ExtractTokens(ctx, labAcc, domain.ServiceGemini)
+	if err != nil {
+		t.Fatalf("[CLASSIFICATION: CREDENTIAL_EXPIRED] Không thể trích xuất SNlM0e từ cookie lab: %v", err)
+	}
+	labAcc.GeminiSNlM0e = sn
+
+	transport := google.NewGoogleTransportAdapter(nil)
+	wire := google.NewWireAdapter(domain.DefaultRpcRegistry())
+	metrics := domain.NewContractMetrics()
+
+	job := google.NewGeminiChatGoldenJob(wire, transport, metrics, nil)
+	report, err := job.Run(ctx, labAcc, "Hello from Gemini Live Smoke Test")
+	if err != nil {
+		if strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") || strings.Contains(strings.ToLower(err.Error()), "auth") {
+			t.Fatalf("[CLASSIFICATION: CREDENTIAL_EXPIRED] Live test bị từ chối xác thực tài khoản lab: %v", err)
+		}
+		t.Fatalf("[CLASSIFICATION: UPSTREAM_CONTRACT_DRIFT] Lỗi giao thức kết nối upstream: %v", err)
+	}
+
+	if report.DriftDetected {
+		t.Fatalf("[CLASSIFICATION: UPSTREAM_CONTRACT_DRIFT] Phát hiện schema/protocol drift: %s", report.AlertMessage)
+	}
+	if !report.Passed || !report.TextExtracted {
+		t.Fatalf("[CLASSIFICATION: UPSTREAM_CONTRACT_DRIFT] Live test không trích xuất được phản hồi hợp lệ")
 	}
 }

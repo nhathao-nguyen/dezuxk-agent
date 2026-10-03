@@ -12,6 +12,7 @@ import (
 	"dezuxk-gateway/internal/config"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
+	"dezuxk-gateway/internal/security/netguard"
 )
 
 // ResolvedImageData chứa dữ liệu nhị phân của ảnh sau khi phân giải từ Data URL hoặc HTTP URL
@@ -28,16 +29,39 @@ type VisionResolver struct {
 	cfg           config.VisionConfig
 	uploadService ports.GeminiUploadUseCase
 	httpClient    *http.Client
+	urlGuard      netguard.URLGuard
 }
 
-// NewVisionResolver khởi tạo VisionResolver
-func NewVisionResolver(cfg config.VisionConfig, uploadService ports.GeminiUploadUseCase) *VisionResolver {
+// NewVisionResolver khởi tạo VisionResolver với safe HTTP client và SSRF protection
+func NewVisionResolver(cfg config.VisionConfig, uploadService ports.GeminiUploadUseCase, customClient ...*http.Client) *VisionResolver {
 	timeout := cfg.GetHTTPDownloadTimeout()
+	var client *http.Client
+	guard := netguard.NewDefaultGuard(false)
+
+	if len(customClient) > 0 && customClient[0] != nil {
+		client = customClient[0]
+	} else {
+		client = netguard.NewSafeHTTPClient(netguard.SafeHTTPConfig{
+			Timeout: timeout,
+		})
+	}
+
 	return &VisionResolver{
 		cfg:           cfg,
 		uploadService: uploadService,
-		httpClient:    &http.Client{Timeout: timeout},
+		httpClient:    client,
+		urlGuard:      guard,
 	}
+}
+
+// SetURLGuard cập nhật URLGuard (phục vụ unit testability kiểm thử an toàn)
+func (vr *VisionResolver) SetURLGuard(guard netguard.URLGuard) {
+	vr.urlGuard = guard
+}
+
+// SetHTTPClient cập nhật HTTP Client (phục vụ unit testability kiểm thử an toàn)
+func (vr *VisionResolver) SetHTTPClient(client *http.Client) {
+	vr.httpClient = client
 }
 
 // ResolveImage tải hoặc giải mã ảnh từ URL (Base64 Data URL hoặc HTTP URL) và xác thực theo cấu hình
@@ -101,6 +125,13 @@ func (vr *VisionResolver) ResolveImage(ctx context.Context, rawURL string, index
 
 	// 2. Xử lý HTTP / HTTPS URL
 	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+		// Thẩm định an toàn chống SSRF trước khi khởi tạo kết nối mạng
+		if vr.urlGuard != nil {
+			if _, err := vr.urlGuard.Validate(ctx, rawURL); err != nil {
+				return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, fmt.Sprintf("SSRF blocked: %v", err))
+			}
+		}
+
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 		if err != nil {
 			return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini, fmt.Sprintf("URL ảnh không hợp lệ: %v", err))
@@ -130,12 +161,24 @@ func (vr *VisionResolver) ResolveImage(ctx context.Context, rawURL string, index
 				fmt.Sprintf("dung lượng ảnh tải về (%d bytes) vượt quá giới hạn cấu hình (%d bytes)", size, maxBytes))
 		}
 
-		mimeType := resp.Header.Get("Content-Type")
-		if idx := strings.Index(mimeType, ";"); idx != -1 {
-			mimeType = strings.TrimSpace(mimeType[:idx])
+		headerMime := resp.Header.Get("Content-Type")
+		if idx := strings.Index(headerMime, ";"); idx != -1 {
+			headerMime = strings.TrimSpace(headerMime[:idx])
 		}
+		detectedMime := http.DetectContentType(data)
+		if idx := strings.Index(detectedMime, ";"); idx != -1 {
+			detectedMime = strings.TrimSpace(detectedMime[:idx])
+		}
+
+		mimeType := headerMime
 		if mimeType == "" || mimeType == "application/octet-stream" {
-			mimeType = http.DetectContentType(data)
+			mimeType = detectedMime
+		}
+
+		// Security: Nếu Content-Type khai báo là image/* nhưng magic bytes phát hiện lại là HTML hoặc script nguy hiểm
+		if strings.HasPrefix(mimeType, "image/") && strings.HasPrefix(detectedMime, "text/html") {
+			return nil, domain.InvalidRequest(domain.OpChatCompletions, "", domain.ServiceGemini,
+				fmt.Sprintf("tệp tải về bị từ chối do xung đột định dạng (khai báo: %s, nội dung thực tế: %s)", mimeType, detectedMime))
 		}
 
 		if !isMimeAllowed(mimeType, allowedMimes) {
