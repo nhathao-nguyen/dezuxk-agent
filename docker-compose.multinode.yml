@@ -37,7 +37,7 @@ services:
 
   # 3. MinIO - Lưu trữ đối tượng S3 dùng chung cho media đa phương tiện
   minio:
-    image: quay.io/minio/minio:latest
+    image: cgr.dev/chainguard/minio:latest
     container_name: dezuxk-minio
     restart: unless-stopped
     ports:
@@ -49,24 +49,6 @@ services:
       MINIO_ROOT_PASSWORD: minioadminpassword
     volumes:
       - minio-data:/data
-
-  # Khởi tạo bucket dezuxk-media và dezuxk-test tự động
-  minio-init:
-    image: quay.io/minio/mc:latest
-    container_name: dezuxk-minio-init
-    depends_on:
-      - minio
-    entrypoint: >
-      /bin/sh -c "
-      until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadminpassword; do
-        echo 'Chờ MinIO sẵn sàng...'
-        sleep 1
-      done
-      /usr/bin/mc mb --ignore-existing local/dezuxk-media
-      /usr/bin/mc mb --ignore-existing local/dezuxk-test
-      echo 'MinIO buckets đã sẵn sàng!'
-      exit 0
-      "
 
   # 4. Gateway Node A
   gateway-a:
@@ -104,8 +86,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      minio:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ready"]
       interval: 10s
@@ -149,8 +131,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      minio:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ready"]
       interval: 10s
@@ -194,8 +176,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      minio:
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ready"]
       interval: 10s

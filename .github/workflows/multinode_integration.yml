@@ -78,18 +78,18 @@ jobs:
           cache: true
 
       - name: Start MinIO Server
-        run: docker run -d --name minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadminpassword quay.io/minio/minio:latest server /data
+        run: docker run -d --name minio -p 9000:9000 -p 9001:9001 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadminpassword cgr.dev/chainguard/minio:latest server /data
 
-      - name: Initialize MinIO Test Buckets
+      - name: Wait for MinIO Server Ready
         run: |
-          curl -sS https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
-          chmod +x /usr/local/bin/mc
-          until mc alias set local http://localhost:9000 minioadmin minioadminpassword; do
-            echo "Chờ MinIO sẵn sàng..."
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+              echo "MinIO server sẵn sàng!"
+              break
+            fi
+            echo "Chờ MinIO server..."
             sleep 1
           done
-          mc mb --ignore-existing local/dezuxk-test
-          mc mb --ignore-existing local/dezuxk-media
 
       - name: Real PostgreSQL Integration & Migration Concurrency
         env:

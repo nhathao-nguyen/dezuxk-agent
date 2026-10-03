@@ -188,6 +188,9 @@ func SetupTestCluster(t *testing.T) *TestCluster {
 		if err != nil {
 			t.Fatalf("Khởi tạo S3StorageAdapter với TEST_S3_ENDPOINT %s thất bại: %v", s3Endpoint, err)
 		}
+		if err := s3Adapter.EnsureBucketExists(context.Background()); err != nil {
+			t.Fatalf("EnsureBucketExists cho S3StorageAdapter (%s) thất bại: %v", s3Bucket, err)
+		}
 		sharedMedia = s3Adapter
 		isRealS3 = true
 	} else {

@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 
 	"dezuxk-gateway/internal/adapters/outbound/storage/postgres"
 	"dezuxk-gateway/internal/config"
@@ -87,6 +88,28 @@ func NewS3StorageAdapter(cfg config.S3MediaConfig, baseURL string, metaRepo *pos
 			},
 		}),
 	}, nil
+}
+
+// EnsureBucketExists kiểm tra nếu bucket chưa tồn tại thì tự động tạo mới qua AWS S3 API
+func (s *S3StorageAdapter) EnsureBucketExists(ctx context.Context) error {
+	_, err := s.s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(s.bucket),
+	})
+	if err == nil {
+		return nil
+	}
+	_, createErr := s.s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket: aws.String(s.bucket),
+	})
+	if createErr != nil {
+		var bfe *s3types.BucketAlreadyOwnedByYou
+		var bae *s3types.BucketAlreadyExists
+		if errors.As(createErr, &bfe) || errors.As(createErr, &bae) {
+			return nil
+		}
+		return fmt.Errorf("không thể tạo S3/MinIO bucket (%s): %w", s.bucket, createErr)
+	}
+	return nil
 }
 
 // Ping kiểm tra kết nối với S3/MinIO bucket

@@ -105,6 +105,10 @@ func TestS3_LiveIntegration(t *testing.T) {
 		t.Fatalf("Khởi tạo S3 adapter thất bại: %v", err)
 	}
 
+	if err := adapter.EnsureBucketExists(ctx); err != nil {
+		t.Fatalf("EnsureBucketExists MinIO bucket (%s) thất bại: %v", bucket, err)
+	}
+
 	if err := adapter.Ping(ctx); err != nil {
 		t.Fatalf("Ping MinIO bucket (%s) thất bại: %v", bucket, err)
 	}

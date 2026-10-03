@@ -270,6 +270,9 @@ func BuildInfrastructure(ctx context.Context, cfg *config.Config, tokenExtractor
 			_ = infra.Close()
 			return nil, fmt.Errorf("khởi tạo S3StorageAdapter thất bại: %w", err)
 		}
+		if err := s3Adapter.EnsureBucketExists(ctx); err != nil {
+			log.Printf("[Media Warning] Không thể tự động tạo S3/MinIO bucket (%s): %v", cfg.Media.S3.Bucket, err)
+		}
 		infra.Media = s3Adapter
 		log.Println("[Media] Đã kích hoạt S3/MinIO Shared Media Adapter.")
 	} else {
