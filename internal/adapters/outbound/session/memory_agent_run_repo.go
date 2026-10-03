@@ -13,21 +13,24 @@ import (
 
 // MemoryAgentRunRepository triển khai in-memory ports.AgentRunRepository cho kiểm thử
 type MemoryAgentRunRepository struct {
-	mu     sync.RWMutex
-	runs   map[string]*domain.AgentRun
-	events map[string][]domain.AgentRunEvent
-	seq    int64
+	mu        sync.RWMutex
+	runs      map[string]*domain.AgentRun
+	events    map[string][]domain.AgentRunEvent
+	toolExecs map[string]*domain.ToolExecutionRecord
+	seq       int64
 }
 
 // NewMemoryAgentRunRepository khởi tạo in-memory agent run repository
 func NewMemoryAgentRunRepository() *MemoryAgentRunRepository {
 	return &MemoryAgentRunRepository{
-		runs:   make(map[string]*domain.AgentRun),
-		events: make(map[string][]domain.AgentRunEvent),
+		runs:      make(map[string]*domain.AgentRun),
+		events:    make(map[string][]domain.AgentRunEvent),
+		toolExecs: make(map[string]*domain.ToolExecutionRecord),
 	}
 }
 
 var _ ports.AgentRunRepository = (*MemoryAgentRunRepository)(nil)
+var _ ports.ToolExecutionLedger = (*MemoryAgentRunRepository)(nil)
 
 func (m *MemoryAgentRunRepository) Create(ctx context.Context, run *domain.AgentRun) error {
 	m.mu.Lock()
@@ -281,12 +284,14 @@ func (m *MemoryAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 	}
 
 	now := time.Now()
-	isExpired := run.LeaseUntil == nil || run.LeaseUntil.Before(now)
-	isOwner := run.WorkerID == workerID
+	// Active lease: ALWAYS false regardless of workerID!
+	if run.LeaseUntil != nil && run.LeaseUntil.After(now) {
+		return false, nil
+	}
+
+	isExpiredOrNull := run.LeaseUntil == nil || !run.LeaseUntil.After(now)
 	if run.Status == domain.RunStatusQueued ||
-		(run.Status == domain.RunStatusRunning && (isOwner || isExpired)) ||
-		(run.Status == domain.RunStatusRecovering && (isOwner || isExpired)) ||
-		(run.Status == domain.RunStatusWaitingForTool && (isOwner || isExpired)) {
+		((run.Status == domain.RunStatusRunning || run.Status == domain.RunStatusRecovering || run.Status == domain.RunStatusWaitingForTool) && isExpiredOrNull) {
 		run.Status = domain.RunStatusRunning
 		run.WorkerID = workerID
 		run.ClaimGeneration++
@@ -299,7 +304,7 @@ func (m *MemoryAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 	return false, nil
 }
 
-func (m *MemoryAgentRunRepository) RenewLease(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error) {
+func (m *MemoryAgentRunRepository) RenewLease(ctx context.Context, runID, workerID string, claimGeneration int64, leaseDuration time.Duration) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -308,7 +313,7 @@ func (m *MemoryAgentRunRepository) RenewLease(ctx context.Context, runID, worker
 		return false, fmt.Errorf("%w: %s", ErrRunNotFound, runID)
 	}
 
-	if (run.Status == domain.RunStatusRunning || run.Status == domain.RunStatusRecovering) && run.WorkerID == workerID {
+	if (run.Status == domain.RunStatusRunning || run.Status == domain.RunStatusRecovering) && run.WorkerID == workerID && run.ClaimGeneration == claimGeneration {
 		now := time.Now()
 		lease := now.Add(leaseDuration)
 		run.LeaseUntil = &lease
@@ -366,3 +371,111 @@ func (m *MemoryAgentRunRepository) FindByTenantAndIdempotencyKey(ctx context.Con
 	}
 	return nil, nil
 }
+
+func (m *MemoryAgentRunRepository) AppendOwnedEvent(ctx context.Context, event *domain.AgentRunEvent, workerID string, claimGeneration int64) (bool, error) {
+	if event == nil || event.RunID == "" {
+		return false, fmt.Errorf("event không hợp lệ hoặc thiếu RunID")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	run, ok := m.runs[event.RunID]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrRunNotFound, event.RunID)
+	}
+
+	if run.WorkerID != workerID || run.ClaimGeneration != claimGeneration {
+		return false, nil // Ownership lost!
+	}
+
+	if event.TenantID == "" {
+		event.TenantID = run.TenantID
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+
+	m.seq++
+	event.ID = m.seq
+	m.events[event.RunID] = append(m.events[event.RunID], *event)
+	return true, nil
+}
+
+// ToolExecutionLedger implementation
+func (m *MemoryAgentRunRepository) makeToolExecKey(tenantID, runID, toolCallID string) string {
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	return tenantID + ":" + runID + ":" + toolCallID
+}
+
+func (m *MemoryAgentRunRepository) RecordPlannedOrRunning(ctx context.Context, exec *domain.ToolExecutionRecord) error {
+	if exec == nil || exec.RunID == "" || exec.ToolCallID == "" {
+		return fmt.Errorf("record không hợp lệ")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	k := m.makeToolExecKey(exec.TenantID, exec.RunID, exec.ToolCallID)
+	now := time.Now()
+	if exec.StartedAt == nil {
+		exec.StartedAt = &now
+	}
+	copied := *exec
+	m.toolExecs[k] = &copied
+	return nil
+}
+
+func (m *MemoryAgentRunRepository) RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	k := m.makeToolExecKey(tenantID, runID, toolCallID)
+	existing, ok := m.toolExecs[k]
+	now := time.Now()
+	if !ok {
+		m.toolExecs[k] = &domain.ToolExecutionRecord{
+			TenantID:   tenantID,
+			RunID:      runID,
+			ToolCallID: toolCallID,
+			Status:     status,
+			ResultJSON: resultJSON,
+			Error:      errStr,
+			FinishedAt: &now,
+		}
+		return nil
+	}
+
+	existing.Status = status
+	existing.ResultJSON = resultJSON
+	existing.Error = errStr
+	existing.FinishedAt = &now
+	return nil
+}
+
+func (m *MemoryAgentRunRepository) GetExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	k := m.makeToolExecKey(tenantID, runID, toolCallID)
+	existing, ok := m.toolExecs[k]
+	if !ok {
+		return nil, nil
+	}
+	copied := *existing
+	return &copied, nil
+}
+
+func (m *MemoryAgentRunRepository) MarkUnknownAfterRestart(ctx context.Context, tenantID, runID, toolCallID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	k := m.makeToolExecKey(tenantID, runID, toolCallID)
+	if existing, ok := m.toolExecs[k]; ok {
+		existing.Status = domain.ToolExecutionUnknownAfterRestart
+	}
+	return nil
+}
+

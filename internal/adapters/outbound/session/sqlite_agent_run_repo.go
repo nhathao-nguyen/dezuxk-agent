@@ -130,6 +130,26 @@ func (r *SqliteAgentRunRepository) migrate() error {
 		return fmt.Errorf("lỗi khởi tạo bảng agent_run_events: %w", err)
 	}
 
+	createToolExecutions := `
+	CREATE TABLE IF NOT EXISTS agent_tool_executions (
+		tenant_id TEXT NOT NULL,
+		run_id TEXT NOT NULL,
+		tool_call_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		args_hash TEXT,
+		status TEXT NOT NULL,
+		result_json TEXT,
+		error TEXT,
+		worker_id TEXT,
+		claim_generation INTEGER,
+		started_at DATETIME,
+		finished_at DATETIME,
+		PRIMARY KEY (tenant_id, run_id, tool_call_id)
+	);`
+	if _, err := r.db.Exec(createToolExecutions); err != nil {
+		return fmt.Errorf("lỗi khởi tạo bảng agent_tool_executions: %w", err)
+	}
+
 	// 2, 3, 4. Kiểm tra PRAGMA table_info và ALTER TABLE ADD COLUMN cho các trường thiếu
 	runColsToAdd := []struct {
 		name string
@@ -688,12 +708,10 @@ func (r *SqliteAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 	SET status = 'running', worker_id = ?, claim_generation = claim_generation + 1, lease_until = ?, heartbeat_at = ?, updated_at = ?
 	WHERE id = ? AND (
 		status = 'queued' 
-		OR (status = 'recovering' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
-		OR (status = 'running' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
-		OR (status = 'waiting_for_tool' AND (worker_id = ? OR lease_until IS NULL OR lease_until < ?))
+		OR (status IN ('running', 'recovering', 'waiting_for_tool') AND (lease_until IS NULL OR lease_until <= ?))
 	);
 	`
-	res, err := r.db.ExecContext(ctx, query, workerID, leaseUntil, now, now, runID, workerID, now, workerID, now, workerID, now)
+	res, err := r.db.ExecContext(ctx, query, workerID, leaseUntil, now, now, runID, now)
 	if err != nil {
 		return false, err
 	}
@@ -704,7 +722,7 @@ func (r *SqliteAgentRunRepository) ClaimRun(ctx context.Context, runID, workerID
 	return rows > 0, nil
 }
 
-func (r *SqliteAgentRunRepository) RenewLease(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error) {
+func (r *SqliteAgentRunRepository) RenewLease(ctx context.Context, runID, workerID string, claimGeneration int64, leaseDuration time.Duration) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -714,9 +732,9 @@ func (r *SqliteAgentRunRepository) RenewLease(ctx context.Context, runID, worker
 	query := `
 	UPDATE agent_runs
 	SET lease_until = ?, heartbeat_at = ?, updated_at = ?
-	WHERE id = ? AND worker_id = ? AND status IN ('running', 'recovering');
+	WHERE id = ? AND worker_id = ? AND claim_generation = ? AND status IN ('running', 'recovering');
 	`
-	res, err := r.db.ExecContext(ctx, query, leaseUntil, now, now, runID, workerID)
+	res, err := r.db.ExecContext(ctx, query, leaseUntil, now, now, runID, workerID, claimGeneration)
 	if err != nil {
 		return false, err
 	}
@@ -779,3 +797,184 @@ func (r *SqliteAgentRunRepository) FindByTenantAndIdempotencyKey(ctx context.Con
 	}
 	return run, nil
 }
+
+func (r *SqliteAgentRunRepository) AppendOwnedEvent(ctx context.Context, event *domain.AgentRunEvent, workerID string, claimGeneration int64) (bool, error) {
+	if event == nil || event.RunID == "" {
+		return false, errors.New("event không hợp lệ hoặc thiếu RunID")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if event.TenantID == "" {
+		var tid string
+		_ = r.db.QueryRowContext(ctx, "SELECT tenant_id FROM agent_runs WHERE id = ?", event.RunID).Scan(&tid)
+		if tid != "" {
+			event.TenantID = tid
+		} else {
+			event.TenantID = "default"
+		}
+	}
+
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+
+	query := `
+	INSERT INTO agent_run_events (tenant_id, run_id, step, kind, message, timestamp)
+	SELECT ?, ?, ?, ?, ?, ?
+	WHERE EXISTS (
+		SELECT 1
+		FROM agent_runs
+		WHERE id = ?
+		  AND worker_id = ?
+		  AND claim_generation = ?
+	);
+	`
+	res, err := r.db.ExecContext(ctx, query, event.TenantID, event.RunID, event.Step, event.Kind, event.Message, event.Timestamp, event.RunID, workerID, claimGeneration)
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows == 0 {
+		return false, nil
+	}
+	id, err := res.LastInsertId()
+	if err == nil {
+		event.ID = id
+	}
+	return true, nil
+}
+
+// ToolExecutionLedger implementation
+func (r *SqliteAgentRunRepository) RecordPlannedOrRunning(ctx context.Context, exec *domain.ToolExecutionRecord) error {
+	if exec == nil || exec.RunID == "" || exec.ToolCallID == "" {
+		return errors.New("record không hợp lệ hoặc thiếu RunID/ToolCallID")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if exec.TenantID == "" {
+		exec.TenantID = "default"
+	}
+	now := time.Now()
+	if exec.StartedAt == nil {
+		exec.StartedAt = &now
+	}
+
+	query := `
+	INSERT INTO agent_tool_executions (tenant_id, run_id, tool_call_id, tool_name, args_hash, status, result_json, error, worker_id, claim_generation, started_at, finished_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(tenant_id, run_id, tool_call_id) DO UPDATE SET
+		status = excluded.status,
+		worker_id = excluded.worker_id,
+		claim_generation = excluded.claim_generation,
+		started_at = excluded.started_at;
+	`
+	_, err := r.db.ExecContext(ctx, query,
+		exec.TenantID, exec.RunID, exec.ToolCallID, exec.ToolName, exec.ArgsHash,
+		string(exec.Status), exec.ResultJSON, exec.Error, exec.WorkerID, exec.ClaimGeneration,
+		exec.StartedAt, exec.FinishedAt,
+	)
+	return err
+}
+
+func (r *SqliteAgentRunRepository) RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	now := time.Now()
+	query := `
+	UPDATE agent_tool_executions
+	SET status = ?, result_json = ?, error = ?, finished_at = ?
+	WHERE tenant_id = ? AND run_id = ? AND tool_call_id = ?;
+	`
+	_, err := r.db.ExecContext(ctx, query, string(status), resultJSON, errStr, now, tenantID, runID, toolCallID)
+	return err
+}
+
+func (r *SqliteAgentRunRepository) GetExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	query := `
+	SELECT tenant_id, run_id, tool_call_id, tool_name, args_hash, status, result_json, error, worker_id, claim_generation, started_at, finished_at
+	FROM agent_tool_executions
+	WHERE tenant_id = ? AND run_id = ? AND tool_call_id = ?;
+	`
+	row := r.db.QueryRowContext(ctx, query, tenantID, runID, toolCallID)
+
+	var rec domain.ToolExecutionRecord
+	var (
+		argsHash, resultJSON, errStr, workerID sql.NullString
+		claimGen                               sql.NullInt64
+		startedAt, finishedAt                  sql.NullTime
+		statusStr                              string
+	)
+
+	err := row.Scan(
+		&rec.TenantID, &rec.RunID, &rec.ToolCallID, &rec.ToolName,
+		&argsHash, &statusStr, &resultJSON, &errStr,
+		&workerID, &claimGen, &startedAt, &finishedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	rec.Status = domain.ToolExecutionStatus(statusStr)
+	if argsHash.Valid {
+		rec.ArgsHash = argsHash.String
+	}
+	if resultJSON.Valid {
+		rec.ResultJSON = resultJSON.String
+	}
+	if errStr.Valid {
+		rec.Error = errStr.String
+	}
+	if workerID.Valid {
+		rec.WorkerID = workerID.String
+	}
+	if claimGen.Valid {
+		rec.ClaimGeneration = claimGen.Int64
+	}
+	if startedAt.Valid {
+		rec.StartedAt = &startedAt.Time
+	}
+	if finishedAt.Valid {
+		rec.FinishedAt = &finishedAt.Time
+	}
+
+	return &rec, nil
+}
+
+func (r *SqliteAgentRunRepository) MarkUnknownAfterRestart(ctx context.Context, tenantID, runID, toolCallID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if tenantID == "" {
+		tenantID = "default"
+	}
+	query := `
+	UPDATE agent_tool_executions
+	SET status = 'unknown_after_restart'
+	WHERE tenant_id = ? AND run_id = ? AND tool_call_id = ?;
+	`
+	_, err := r.db.ExecContext(ctx, query, tenantID, runID, toolCallID)
+	return err
+}
+
+var _ ports.AgentRunRepository = (*SqliteAgentRunRepository)(nil)
+var _ ports.ToolExecutionLedger = (*SqliteAgentRunRepository)(nil)
+

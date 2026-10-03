@@ -90,9 +90,18 @@ type AgentRunRepository interface {
 	Cancel(ctx context.Context, runID string) error
 	CancelForTenant(ctx context.Context, tenantID, runID string) error
 	ClaimRun(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error)
-	RenewLease(ctx context.Context, runID, workerID string, leaseDuration time.Duration) (bool, error)
+	RenewLease(ctx context.Context, runID, workerID string, claimGeneration int64, leaseDuration time.Duration) (bool, error)
+	AppendOwnedEvent(ctx context.Context, event *domain.AgentRunEvent, workerID string, claimGeneration int64) (bool, error)
 	UpdateOwned(ctx context.Context, run *domain.AgentRun, workerID string, claimGeneration int64) (bool, error)
 	FindByTenantAndIdempotencyKey(ctx context.Context, tenantID, key string) (*domain.AgentRun, error)
+}
+
+// ToolExecutionLedger quản lý nhật ký thực thi công cụ durable để tránh side-effect replay sau crash
+type ToolExecutionLedger interface {
+	RecordPlannedOrRunning(ctx context.Context, exec *domain.ToolExecutionRecord) error
+	RecordFinished(ctx context.Context, tenantID, runID, toolCallID string, status domain.ToolExecutionStatus, resultJSON, errStr string) error
+	GetExecution(ctx context.Context, tenantID, runID, toolCallID string) (*domain.ToolExecutionRecord, error)
+	MarkUnknownAfterRestart(ctx context.Context, tenantID, runID, toolCallID string) error
 }
 
 // AgentJobService giao diện điều phối hàng đợi và thực thi tác vụ Agent chạy nền (Async Job Engine)

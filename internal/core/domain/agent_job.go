@@ -21,11 +21,13 @@ const (
 )
 
 const (
-	StopReasonServerRestart          = "server_restart"
+	StopReasonServerRestart           = "server_restart"
 	StopReasonReauthorizationRequired = "reauthorization_required"
-	StopReasonAuthorizationRevoked   = "authorization_revoked"
-	StopReasonQuotaExceeded          = "quota_exceeded"
-	StopReasonOwnershipLost          = "ownership_lost"
+	StopReasonAuthorizationRevoked    = "authorization_revoked"
+	StopReasonQuotaExceeded           = "quota_exceeded"
+	StopReasonOwnershipLost           = "ownership_lost"
+	StopReasonRateLimited             = "rate_limited"
+	StopReasonServerShuttingDown      = "server_shutting_down"
 )
 
 // AgentExecutionConfig lưu trữ snapshot cấu hình thực thi của AgentRun để phục hồi đầy đủ ngữ cảnh sau restart

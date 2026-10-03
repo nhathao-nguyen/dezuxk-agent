@@ -35,6 +35,7 @@ type Runner struct {
 	policyEngine   ports.ToolExecutionService
 	memorySvc      ports.MemoryService
 	checkpointRepo ports.CheckpointRepository
+	toolLedger     ports.ToolExecutionLedger
 }
 
 // NewRunner khởi tạo một Agent Runner
@@ -54,6 +55,11 @@ func (r *Runner) SetKeyUseCase(k ports.KeyUseCase) {
 // SetCheckpointRepository thiết lập repository lưu trữ checkpoint cho Runner
 func (r *Runner) SetCheckpointRepository(cp ports.CheckpointRepository) {
 	r.checkpointRepo = cp
+}
+
+// SetToolExecutionLedger thiết lập ledger lưu vết công cụ bền vững
+func (r *Runner) SetToolExecutionLedger(ledger ports.ToolExecutionLedger) {
+	r.toolLedger = ledger
 }
 
 // SetPolicyEngine thiết lập engine chính sách điều phối kiểm soát tool
@@ -285,6 +291,9 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 				vKey, valErr := r.keyUseCase.ValidateKeyByID(execCtx, keyID, opts.Model)
 				if valErr != nil {
 					switch {
+					case errors.Is(valErr, domain.ErrRateLimitRPMExceeded):
+						state.StopReason = domain.StopReasonRateLimited
+						state.Error = fmt.Sprintf("Tần suất yêu cầu vượt quá giới hạn RPM: %v", valErr)
 					case errors.Is(valErr, domain.ErrKeyRevoked), errors.Is(valErr, domain.ErrKeyExpired):
 						state.StopReason = domain.StopReasonAuthorizationRevoked
 						state.Error = fmt.Sprintf("Quyền thực thi bị thu hồi hoặc khóa đã hết hạn: %v", valErr)
@@ -462,8 +471,73 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 				}
 			}
 
+			// Kiểm tra ledger trước khi thực thi công cụ (Issue 5: Tool side-effect replay safety)
+			if r.toolLedger != nil && state.TaskID != "" && tc.ID != "" {
+				existing, gErr := r.toolLedger.GetExecution(execCtx, identity.TenantID, state.TaskID, tc.ID)
+				if gErr == nil && existing != nil {
+					switch existing.Status {
+					case domain.ToolExecutionSucceeded:
+						// 1. Công cụ đã thực thi thành công từ trước crash -> TÁI SỬ DỤNG kết quả, TUYỆT ĐỐI không chạy lại
+						toolOutput := existing.ResultJSON
+						stepRecord.ToolResults = append(stepRecord.ToolResults, toolOutput)
+						state.Messages = append(state.Messages, domain.OpenAIMessage{
+							Role:       "tool",
+							ToolCallID: tc.ID,
+							Content:    toolOutput,
+						})
+						if opts.OnProgress != nil {
+							opts.OnProgress(step, "tool_cached", fmt.Sprintf("Tái sử dụng kết quả công cụ %s từ ledger bền vững", toolName))
+						}
+						continue
+
+					case domain.ToolExecutionRunning:
+						// 2. Công cụ đang chạy dở khi server crash
+						var targetTool domain.AgentTool
+						if r.tools != nil {
+							targetTool, _ = r.tools.GetTool(toolName)
+						}
+						sem := domain.ResolveToolSemantics(targetTool)
+						if !sem.ReadOnly && !sem.Idempotent {
+							// Công cụ destructive / side-effect -> KHÔNG tự động replay!
+							_ = r.toolLedger.MarkUnknownAfterRestart(execCtx, identity.TenantID, state.TaskID, tc.ID)
+							state.StopReason = domain.StopReasonVerificationFailed
+							state.Error = fmt.Sprintf("Công cụ nhạy cảm [%s] đang thực thi khi hệ thống tắt/khởi động lại; từ chối tự động replay side-effect để đảm bảo an toàn", toolName)
+							stepRecord.ToolResults = append(stepRecord.ToolResults, state.Error)
+							state.Steps = append(state.Steps, stepRecord)
+							return state, nil
+						}
+						// Safe / Read-Only / Idempotent tool: cho phép thử lại
+					case domain.ToolExecutionUnknownAfterRestart:
+						state.StopReason = domain.StopReasonVerificationFailed
+						state.Error = fmt.Sprintf("Công cụ nhạy cảm [%s] ở trạng thái unknown_after_restart", toolName)
+						stepRecord.ToolResults = append(stepRecord.ToolResults, state.Error)
+						state.Steps = append(state.Steps, stepRecord)
+						return state, nil
+					}
+				}
+
+				// Ghi nhận trạng thái running vào ledger
+				now := time.Now()
+				_ = r.toolLedger.RecordPlannedOrRunning(execCtx, &domain.ToolExecutionRecord{
+					TenantID:   identity.TenantID,
+					RunID:      state.TaskID,
+					ToolCallID: tc.ID,
+					ToolName:   toolName,
+					ArgsHash:   domain.HashKey(toolArgs),
+					Status:     domain.ToolExecutionRunning,
+					StartedAt:  &now,
+				})
+			}
+
 			// Thực thi công cụ tuyệt đối thông qua Policy Engine với ngữ cảnh có thời hạn
 			toolOutput, execErr := r.getPolicyEngine().ExecuteTool(execCtx, toolName, toolArgs)
+			if r.toolLedger != nil && state.TaskID != "" && tc.ID != "" {
+				if execErr != nil {
+					_ = r.toolLedger.RecordFinished(execCtx, identity.TenantID, state.TaskID, tc.ID, domain.ToolExecutionFailed, toolOutput, execErr.Error())
+				} else {
+					_ = r.toolLedger.RecordFinished(execCtx, identity.TenantID, state.TaskID, tc.ID, domain.ToolExecutionSucceeded, toolOutput, "")
+				}
+			}
 			if execErr != nil {
 				consecutiveFailures++
 				if toolOutput == "" {

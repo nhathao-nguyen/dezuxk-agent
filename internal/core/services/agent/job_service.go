@@ -61,6 +61,11 @@ func NewJobService(repo ports.AgentRunRepository, runner ports.AgentRunner) *Job
 		accepting:        true,
 		recoveryInterval: 15 * time.Second,
 	}
+	if r, ok := runner.(*Runner); ok {
+		if l, ok := repo.(ports.ToolExecutionLedger); ok {
+			r.SetToolExecutionLedger(l)
+		}
+	}
 	return js
 }
 
@@ -311,8 +316,8 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 
 		case domain.RunStatusRunning, domain.RunStatusRecovering, domain.RunStatusWaitingForTool:
 			now := time.Now()
-			// 1. Nếu worker khác đang giữ lease active -> BỎ QUA (skip)
-			if run.WorkerID != "" && run.WorkerID != s.workerID && run.LeaseUntil != nil && run.LeaseUntil.After(now) {
+			// 1. TUYỆT ĐỐI BỎ QUA nếu lease còn active (bất kể worker ID)
+			if run.LeaseUntil != nil && run.LeaseUntil.After(now) {
 				continue
 			}
 
@@ -339,7 +344,11 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 			if cp != nil && len(cp.StateSnapshot.Messages) > 0 {
 				run.Status = domain.RunStatusRecovering
 				run.UpdatedAt = time.Now()
-				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				updated, uErr := s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				if uErr != nil || !updated {
+					log.Printf("[JobService] RecoverPendingRuns: UpdateOwned thất bại hoặc mất quyền sở hữu run %s (gen=%d)", run.ID, claimGen)
+					continue
+				}
 
 				recovEv := domain.AgentRunEvent{
 					TenantID:  run.TenantID,
@@ -349,7 +358,7 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 					Message:   fmt.Sprintf("Tác vụ được phục hồi thành công từ Checkpoint #%d sau restart", cp.StepIndex),
 					Timestamp: time.Now(),
 				}
-				_ = s.repo.AppendEvent(ctx, &recovEv)
+				_, _ = s.repo.AppendOwnedEvent(ctx, &recovEv, s.workerID, claimGen)
 
 				opts := reconstructOptions(run, cp)
 				_ = s.launchBackgroundWorker(run, opts)
@@ -362,7 +371,11 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 				run.Error = "Server khởi động lại và tác vụ chưa kịp lưu checkpoint an toàn để tiếp tục"
 				run.UpdatedAt = now
 				run.FinishedAt = &now
-				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				updated, uErr := s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				if uErr != nil || !updated {
+					log.Printf("[JobService] RecoverPendingRuns: UpdateOwned thất bại hoặc mất quyền sở hữu run %s (gen=%d)", run.ID, claimGen)
+					continue
+				}
 
 				interEv := domain.AgentRunEvent{
 					TenantID:  run.TenantID,
@@ -372,7 +385,7 @@ func (s *JobService) RecoverPendingRuns(ctx context.Context) ([]*domain.AgentRun
 					Message:   "Tác vụ bị gián đoạn do server khởi động lại (Stop reason: server_restart)",
 					Timestamp: now,
 				}
-				_ = s.repo.AppendEvent(ctx, &interEv)
+				_, _ = s.repo.AppendOwnedEvent(ctx, &interEv, s.workerID, claimGen)
 				processed = append(processed, run)
 			}
 
@@ -423,8 +436,8 @@ func (s *JobService) ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRu
 
 		// 3. Chỉ reclaim các trạng thái running / recovering / waiting_for_tool mà LEASE ĐÃ HẾT HẠN
 		if run.Status == domain.RunStatusRunning || run.Status == domain.RunStatusRecovering || run.Status == domain.RunStatusWaitingForTool {
-			// TUYỆT ĐỐI KHÔNG ĐỤNG JOB CÓ LEASE ACTIVE
-			if run.WorkerID != "" && run.WorkerID != s.workerID && run.LeaseUntil != nil && run.LeaseUntil.After(now) {
+			// TUYỆT ĐỐI KHÔNG ĐỤNG JOB CÓ LEASE ACTIVE (bất kể worker ID)
+			if run.LeaseUntil != nil && run.LeaseUntil.After(now) {
 				continue
 			}
 
@@ -453,7 +466,11 @@ func (s *JobService) ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRu
 			if cp != nil && len(cp.StateSnapshot.Messages) > 0 {
 				run.Status = domain.RunStatusRecovering
 				run.UpdatedAt = time.Now()
-				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				updated, uErr := s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				if uErr != nil || !updated {
+					log.Printf("[JobService] ScanRecoverableRuns: UpdateOwned thất bại hoặc mất quyền sở hữu run %s (gen=%d)", run.ID, claimGen)
+					continue
+				}
 
 				recovEv := domain.AgentRunEvent{
 					TenantID:  run.TenantID,
@@ -463,7 +480,7 @@ func (s *JobService) ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRu
 					Message:   fmt.Sprintf("Sweeper phát hiện lease hết hạn và đã phục hồi tác vụ thành công từ Checkpoint #%d", cp.StepIndex),
 					Timestamp: time.Now(),
 				}
-				_ = s.repo.AppendEvent(ctx, &recovEv)
+				_, _ = s.repo.AppendOwnedEvent(ctx, &recovEv, s.workerID, claimGen)
 
 				opts := reconstructOptions(run, cp)
 				_ = s.launchBackgroundWorker(run, opts)
@@ -475,7 +492,11 @@ func (s *JobService) ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRu
 				run.Error = "Worker cũ mất kết nối và tác vụ không có checkpoint hợp lệ để tiếp tục"
 				run.UpdatedAt = staleNow
 				run.FinishedAt = &staleNow
-				_, _ = s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				updated, uErr := s.repo.UpdateOwned(ctx, run, s.workerID, claimGen)
+				if uErr != nil || !updated {
+					log.Printf("[JobService] ScanRecoverableRuns: UpdateOwned thất bại hoặc mất quyền sở hữu run %s (gen=%d)", run.ID, claimGen)
+					continue
+				}
 
 				interEv := domain.AgentRunEvent{
 					TenantID:  run.TenantID,
@@ -485,7 +506,7 @@ func (s *JobService) ScanRecoverableRuns(ctx context.Context) ([]*domain.AgentRu
 					Message:   "Sweeper thu hồi tác vụ lease hết hạn không có checkpoint (Stop reason: server_restart)",
 					Timestamp: staleNow,
 				}
-				_ = s.repo.AppendEvent(ctx, &interEv)
+				_, _ = s.repo.AppendOwnedEvent(ctx, &interEv, s.workerID, claimGen)
 				processed = append(processed, run)
 			}
 		}
@@ -582,6 +603,13 @@ func (s *JobService) SubmitRun(ctx context.Context, goal string, opts domain.Age
 
 	// 2. Khởi chạy goroutine nền kế thừa từ root context của JobService
 	if err := s.launchBackgroundWorker(run, opts); err != nil {
+		now := time.Now()
+		run.Status = domain.RunStatusCancelled
+		run.StopReason = domain.StopReasonServerShuttingDown
+		run.Error = "máy chủ đang trong quá trình tắt, từ chối nhận thêm tác vụ mới"
+		run.UpdatedAt = now
+		run.FinishedAt = &now
+		_ = s.repo.Update(context.Background(), run)
 		return nil, err
 	}
 
@@ -650,31 +678,35 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 	leaseDuration := 60 * time.Second
 	heartbeatInterval := 20 * time.Second
 
-	// Atomic claim: nếu không claim được, worker khác đang sở hữu -> DỪNG NGAY
-	claimed, err := s.repo.ClaimRun(ctx, run.ID, s.workerID, leaseDuration)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			now := time.Now()
-			run.Status = domain.RunStatusCancelled
-			run.StopReason = domain.StopReasonCancelled
-			run.Error = "Tác vụ bị hủy do máy chủ tắt trong lúc đang nhận việc"
-			run.UpdatedAt = now
-			run.FinishedAt = &now
-			_ = s.repo.Update(context.Background(), run)
-		} else {
-			log.Printf("[JobService] Lỗi khi claim run %s: %v", run.ID, err)
-		}
-		return
-	}
-	if !claimed {
-		// Worker khác đang sở hữu run hoặc run không thể claim -> STOP
-		return
-	}
-
-	// Đọc lại để lấy claim_generation mới nhất được sinh ra từ ClaimRun
-	claimedRun, gErr := s.repo.Get(context.Background(), run.ID)
+	// Atomic claim: nếu là queued thì claim một lần duy nhất. Nếu đã là recovering/running (đã claim bởi sweeper) thì giữ nguyên generation
 	workerClaimGen := run.ClaimGeneration
-	if gErr == nil && claimedRun != nil {
+	if run.Status == domain.RunStatusQueued {
+		claimed, err := s.repo.ClaimRun(ctx, run.ID, s.workerID, leaseDuration)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+				now := time.Now()
+				run.Status = domain.RunStatusCancelled
+				run.StopReason = domain.StopReasonCancelled
+				run.Error = "Tác vụ bị hủy do máy chủ tắt trong lúc đang nhận việc"
+				run.UpdatedAt = now
+				run.FinishedAt = &now
+				_ = s.repo.Update(context.Background(), run)
+			} else {
+				log.Printf("[JobService] Lỗi khi claim run %s: %v", run.ID, err)
+			}
+			return
+		}
+		if !claimed {
+			// Worker khác đang sở hữu run hoặc run không thể claim -> STOP
+			return
+		}
+
+		// Đọc lại để lấy claim_generation mới nhất được sinh ra từ ClaimRun
+		claimedRun, gErr := s.repo.Get(context.Background(), run.ID)
+		if gErr != nil || claimedRun == nil {
+			log.Printf("[JobService] executeBackground: không thể lấy claim_generation sau khi claim run %s: %v", run.ID, gErr)
+			return
+		}
 		workerClaimGen = claimedRun.ClaimGeneration
 		run.ClaimGeneration = workerClaimGen
 		run.WorkerID = claimedRun.WorkerID
@@ -697,7 +729,7 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 			case <-execCtx.Done():
 				return
 			case <-ticker.C:
-				renewed, rErr := s.repo.RenewLease(execCtx, run.ID, s.workerID, leaseDuration)
+				renewed, rErr := s.repo.RenewLease(execCtx, run.ID, s.workerID, workerClaimGen, leaseDuration)
 				if rErr != nil || !renewed {
 					log.Printf("[JobService] Mất quyền lease cho run %s (renewed=%v, err=%v), dừng thực thi an toàn", run.ID, renewed, rErr)
 					cancelExec()
@@ -718,7 +750,12 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 			Message:   message,
 			Timestamp: time.Now(),
 		}
-		_ = s.repo.AppendEvent(context.Background(), ev)
+		appended, aErr := s.repo.AppendOwnedEvent(context.Background(), ev, s.workerID, workerClaimGen)
+		if aErr != nil || !appended {
+			log.Printf("[JobService] executeBackground: worker %s lost ownership (gen=%d) on run %s, progress event rejected", s.workerID, workerClaimGen, run.ID)
+			cancelExec()
+			return
+		}
 		s.broadcastEvent(run.ID, *ev)
 
 		if userProgress != nil {
@@ -783,8 +820,10 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 		Message:   fmt.Sprintf("Tác vụ kết thúc với trạng thái: %s (Stop reason: %s)", run.Status, run.StopReason),
 		Timestamp: now,
 	}
-	_ = s.repo.AppendEvent(context.Background(), &finalEv)
-	s.broadcastEvent(run.ID, finalEv)
+	appended, fErr := s.repo.AppendOwnedEvent(context.Background(), &finalEv, s.workerID, workerClaimGen)
+	if fErr == nil && appended {
+		s.broadcastEvent(run.ID, finalEv)
+	}
 	s.closeSubscribers(run.ID)
 }
 
@@ -990,7 +1029,16 @@ func (s *JobService) ResumeRunForTenant(ctx context.Context, tenantID, runID str
 	}
 	_ = s.repo.AppendEvent(ctx, &resumeEv)
 
-	_ = s.launchBackgroundWorker(newRun, opts)
+	if err := s.launchBackgroundWorker(newRun, opts); err != nil {
+		now := time.Now()
+		newRun.Status = domain.RunStatusCancelled
+		newRun.StopReason = domain.StopReasonServerShuttingDown
+		newRun.Error = "máy chủ đang trong quá trình tắt, từ chối nhận thêm tác vụ mới"
+		newRun.UpdatedAt = now
+		newRun.FinishedAt = &now
+		_ = s.repo.Update(context.Background(), newRun)
+		return nil, err
+	}
 	return newRun, nil
 }
 

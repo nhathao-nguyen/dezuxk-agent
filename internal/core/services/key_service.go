@@ -306,37 +306,30 @@ func (s *KeyService) ValidateKey(ctx context.Context, rawKey string, targetModel
 		return nil, domain.ErrInvalidAPIKey
 	}
 
-	// 3. Kiểm tra trạng thái hoạt động
+	return s.validateVirtualKey(ctx, vKey, targetModel, true)
+}
+
+// validateVirtualKey hợp nhất quy trình thẩm tra điều kiện hoạt động, RPM, model và hạn ngạch của khóa
+func (s *KeyService) validateVirtualKey(ctx context.Context, vKey *domain.VirtualKey, targetModel string, checkRPM bool) (*domain.VirtualKey, error) {
 	if !vKey.IsActive {
 		return nil, domain.ErrKeyRevoked
 	}
-
-	// 4. Kiểm tra thời hạn hết hạn
 	if vKey.IsExpired() {
 		return nil, domain.ErrKeyExpired
 	}
-
-	// 5. Kiểm tra giới hạn tốc độ RPM (Rate Limit)
-	if vKey.RateLimitRPM > 0 && !s.rateLimiter.Allow(vKey.ID, vKey.RateLimitRPM) {
+	if checkRPM && vKey.RateLimitRPM > 0 && !s.rateLimiter.Allow(vKey.ID, vKey.RateLimitRPM) {
 		return nil, domain.ErrRateLimitRPMExceeded
 	}
-
-	// 6. Kiểm tra quyền truy cập mô hình (Allowed Models)
 	if targetModel != "" && !vKey.IsModelAllowed(targetModel) {
 		return nil, domain.ErrModelNotAllowed
 	}
-
-	// 7. Kiểm tra hạn ngạch trong ngày (Daily Quota)
 	today := time.Now().UTC().Format("2006-01-02")
 	if vKey.DailyQuotaRequests > 0 && vKey.LastUsedDate == today && vKey.UsedToday >= vKey.DailyQuotaRequests {
 		return nil, domain.ErrDailyQuotaExceeded
 	}
-
-	// 8. Kiểm tra hạn ngạch tổng token nếu có thiết lập
 	if vKey.MaxTokenQuota > 0 && vKey.TotalTokens >= vKey.MaxTokenQuota {
 		return nil, domain.ErrTokenQuotaExceeded
 	}
-
 	return vKey, nil
 }
 
@@ -374,23 +367,7 @@ func (s *KeyService) ValidateKeyByID(ctx context.Context, keyID string, targetMo
 	if err != nil {
 		return nil, domain.ErrInvalidAPIKey
 	}
-	if !vKey.IsActive {
-		return nil, domain.ErrKeyRevoked
-	}
-	if vKey.IsExpired() {
-		return nil, domain.ErrKeyExpired
-	}
-	if targetModel != "" && !vKey.IsModelAllowed(targetModel) {
-		return nil, domain.ErrModelNotAllowed
-	}
-	today := time.Now().UTC().Format("2006-01-02")
-	if vKey.DailyQuotaRequests > 0 && vKey.LastUsedDate == today && vKey.UsedToday >= vKey.DailyQuotaRequests {
-		return nil, domain.ErrDailyQuotaExceeded
-	}
-	if vKey.MaxTokenQuota > 0 && vKey.TotalTokens >= vKey.MaxTokenQuota {
-		return nil, domain.ErrTokenQuotaExceeded
-	}
-	return vKey, nil
+	return s.validateVirtualKey(ctx, vKey, targetModel, true)
 }
 
 // ConsumeQuota tiêu thụ 1 lượt hạn ngạch trong ngày (Quota Decrementor)

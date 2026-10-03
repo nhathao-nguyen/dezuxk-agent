@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -97,6 +98,9 @@ func Run(configPath string, portOverride int) error {
 	if sqliteRepo != nil {
 		kr, err := session.NewSqliteKeyRepository(sqliteRepo.DB())
 		if err != nil {
+			if !cfg.Storage.AllowMemoryFallback {
+				return fmt.Errorf("khởi tạo SqliteKeyRepository thất bại: %w", err)
+			}
 			log.Printf("[Key Database Warning] Không thể khởi tạo SqliteKeyRepository: %v, dùng bộ nhớ RAM", err)
 			keyRepo = session.NewMemoryKeyRepository()
 		} else {
@@ -213,34 +217,18 @@ func Run(configPath string, portOverride int) error {
 	agentRunner.SetPolicyEngine(policyEngine)
 	agentRunner.SetKeyUseCase(keyService)
 
-	var checkpointRepo ports.CheckpointRepository
-	var memoryRepo ports.MemoryRepository
-	var agentRunRepo ports.AgentRunRepository
+	var db *sql.DB
 	if sqliteRepo != nil {
-		cpRepo, err := session.NewSqliteCheckpointRepository(sqliteRepo.DB())
-		if err == nil {
-			checkpointRepo = cpRepo
-		}
-		mRepo, err := session.NewSqliteMemoryRepository(sqliteRepo.DB())
-		if err == nil {
-			memoryRepo = mRepo
-		}
-		arRepo, err := session.NewSqliteAgentRunRepository(sqliteRepo.DB())
-		if err != nil {
-			log.Fatalf("[FATAL] Khởi tạo SqliteAgentRunRepository thất bại (migration fail): %v", err)
-		}
-		agentRunRepo = arRepo
+		db = sqliteRepo.DB()
 	}
-	if checkpointRepo == nil {
-		checkpointRepo = session.NewMemoryCheckpointRepository()
-	}
-	if memoryRepo == nil {
-		memoryRepo = session.NewMemoryMemoryRepository()
-	}
-	if agentRunRepo == nil {
-		agentRunRepo = session.NewMemoryAgentRunRepository()
+	checkpointRepo, memoryRepo, agentRunRepo, repoErr := InitCriticalRepositories(cfg, db)
+	if repoErr != nil {
+		return repoErr
 	}
 	agentRunner.SetCheckpointRepository(checkpointRepo)
+	if ledger, ok := agentRunRepo.(ports.ToolExecutionLedger); ok {
+		agentRunner.SetToolExecutionLedger(ledger)
+	}
 
 	agentJobService := agent.NewJobService(agentRunRepo, agentRunner)
 	agentJobService.SetCheckpointRepository(checkpointRepo)
@@ -602,4 +590,59 @@ func startStartupTierDiscovery(
 		}
 	}()
 }
+
+// InitCriticalRepositories khởi tạo các repository tác vụ bền vững (Checkpoint, Memory, AgentRun)
+// Tuân thủ triệt để: trong môi trường production (allow_memory_fallback = false), nếu SQLite migration/init lỗi thì buộc phải báo lỗi startup fail.
+func InitCriticalRepositories(cfg *config.Config, db *sql.DB) (ports.CheckpointRepository, ports.MemoryRepository, ports.AgentRunRepository, error) {
+	var checkpointRepo ports.CheckpointRepository
+	var memoryRepo ports.MemoryRepository
+	var agentRunRepo ports.AgentRunRepository
+
+	allowFallback := cfg != nil && cfg.Storage.AllowMemoryFallback
+
+	if db != nil {
+		cpRepo, err := session.NewSqliteCheckpointRepository(db)
+		if err != nil {
+			if !allowFallback {
+				return nil, nil, nil, fmt.Errorf("khởi tạo SqliteCheckpointRepository thất bại: %w", err)
+			}
+			log.Printf("[Storage Warning] Khởi tạo SqliteCheckpointRepository thất bại, fallback sang MemoryCheckpointRepository: %v", err)
+		} else {
+			checkpointRepo = cpRepo
+		}
+
+		mRepo, err := session.NewSqliteMemoryRepository(db)
+		if err != nil {
+			if !allowFallback {
+				return nil, nil, nil, fmt.Errorf("khởi tạo SqliteMemoryRepository thất bại: %w", err)
+			}
+			log.Printf("[Storage Warning] Khởi tạo SqliteMemoryRepository thất bại, fallback sang MemoryMemoryRepository: %v", err)
+		} else {
+			memoryRepo = mRepo
+		}
+
+		arRepo, err := session.NewSqliteAgentRunRepository(db)
+		if err != nil {
+			if !allowFallback {
+				return nil, nil, nil, fmt.Errorf("khởi tạo SqliteAgentRunRepository thất bại (migration fail): %w", err)
+			}
+			log.Printf("[Storage Warning] Khởi tạo SqliteAgentRunRepository thất bại, fallback sang MemoryAgentRunRepository: %v", err)
+		} else {
+			agentRunRepo = arRepo
+		}
+	}
+
+	if checkpointRepo == nil {
+		checkpointRepo = session.NewMemoryCheckpointRepository()
+	}
+	if memoryRepo == nil {
+		memoryRepo = session.NewMemoryMemoryRepository()
+	}
+	if agentRunRepo == nil {
+		agentRunRepo = session.NewMemoryAgentRunRepository()
+	}
+
+	return checkpointRepo, memoryRepo, agentRunRepo, nil
+}
+
 

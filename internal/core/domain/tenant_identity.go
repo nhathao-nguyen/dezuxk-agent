@@ -29,6 +29,11 @@ type NetworkPolicy struct {
 
 // IsURLAllowed kiểm tra xem địa chỉ URL có được phép truy cập theo NetworkPolicy không
 func (np NetworkPolicy) IsURLAllowed(rawURL string) bool {
+	// Quy tắc bất biến: Nếu AllowOutbound = false, tuyệt đối không cho phép bất kỳ truy cập nào ra ngoài
+	if !np.AllowOutbound {
+		return false
+	}
+
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return false
@@ -67,7 +72,7 @@ func (np NetworkPolicy) IsURLAllowed(rawURL string) bool {
 		return false
 	}
 
-	return np.AllowOutbound
+	return true
 }
 
 // TenantIdentity đại diện cho đối tượng định danh tin cậy nội bộ của từng yêu cầu
@@ -438,31 +443,28 @@ func IntersectSecurityContext(old *AgentSecurityContext, current TenantIdentity)
 	// 6. AutoMergeAllowed: chỉ cho phép nếu CẢ HAI bên cùng đồng ý
 	autoMergeAllowed := old.AutoMergeAllowed && current.AutoMergeAllowed
 
-	// 7. MaxAgentSteps: min(old, current)
-	maxSteps := current.MaxAgentSteps
-	if maxSteps <= 0 {
-		maxSteps = 25
-	}
-	if old.MaxAgentSteps > 0 && old.MaxAgentSteps < maxSteps {
-		maxSteps = old.MaxAgentSteps
+	// 7. MaxAgentSteps: min(old, current) - chỉ lấy giá trị hạn chế hơn
+	maxSteps := old.MaxAgentSteps
+	if current.MaxAgentSteps > 0 {
+		if maxSteps <= 0 || current.MaxAgentSteps < maxSteps {
+			maxSteps = current.MaxAgentSteps
+		}
 	}
 
 	// 8. MaxConcurrentRuns: min(old, current)
-	maxConcurrent := current.MaxConcurrentRuns
-	if maxConcurrent <= 0 {
-		maxConcurrent = 3
-	}
-	if old.MaxConcurrentRuns > 0 && old.MaxConcurrentRuns < maxConcurrent {
-		maxConcurrent = old.MaxConcurrentRuns
+	maxConcurrent := old.MaxConcurrentRuns
+	if current.MaxConcurrentRuns > 0 {
+		if maxConcurrent <= 0 || current.MaxConcurrentRuns < maxConcurrent {
+			maxConcurrent = current.MaxConcurrentRuns
+		}
 	}
 
 	// 9. MaxToolRuntime: min(old, current)
-	maxRuntime := current.MaxToolRuntime
-	if maxRuntime <= 0 {
-		maxRuntime = 60 * time.Second
-	}
-	if old.MaxToolRuntime > 0 && old.MaxToolRuntime < maxRuntime {
-		maxRuntime = old.MaxToolRuntime
+	maxRuntime := old.MaxToolRuntime
+	if current.MaxToolRuntime > 0 {
+		if maxRuntime <= 0 || current.MaxToolRuntime < maxRuntime {
+			maxRuntime = current.MaxToolRuntime
+		}
 	}
 
 	// 10. Giao các Scopes (Intersection)
@@ -584,29 +586,83 @@ func IntersectSecurityContext(old *AgentSecurityContext, current TenantIdentity)
 		}
 	}
 
-	// 13. Giao NetworkPolicy (Restrictive Intersection)
-	allowOutbound := old.NetworkPolicy.AllowOutbound && current.NetworkPolicy.AllowOutbound
-
-	// Allowed domains: intersection
-	var allowedDomains []string
-	if len(old.NetworkPolicy.AllowedDomains) == 0 {
-		allowedDomains = append([]string(nil), current.NetworkPolicy.AllowedDomains...)
-	} else if len(current.NetworkPolicy.AllowedDomains) == 0 {
-		allowedDomains = append([]string(nil), old.NetworkPolicy.AllowedDomains...)
-	} else {
-		currDomainMap := make(map[string]bool)
-		for _, d := range current.NetworkPolicy.AllowedDomains {
-			currDomainMap[strings.ToLower(strings.TrimSpace(d))] = true
+	if len(old.AllowedModels) > 0 && len(current.AllowedModels) > 0 && !hasWildcardModel(old.AllowedModels) && !hasWildcardModel(current.AllowedModels) {
+		if len(effectiveModels) == 0 {
+			return nil, errors.New("resume_reauthorization_failed: không có mô hình (model) nào thỏa mãn quyền của cả hai bên")
 		}
-		for _, d := range old.NetworkPolicy.AllowedDomains {
-			norm := strings.ToLower(strings.TrimSpace(d))
-			if currDomainMap[norm] {
-				allowedDomains = append(allowedDomains, norm)
+	}
+
+	// 13. Giao AllowedWorkspaceRoots (Path Containment Intersection)
+	effectiveRoots, wsErr := intersectWorkspaceRoots(old.AllowedWorkspaceRoots, current.AllowedWorkspaceRoots)
+	if wsErr != nil {
+		return nil, wsErr
+	}
+
+	// 14. Giao NetworkPolicy (Restrictive Intersection)
+	allowOutbound := old.NetworkPolicy.AllowOutbound && current.NetworkPolicy.AllowOutbound
+	var allowedDomains []string
+
+	if !allowOutbound {
+		allowedDomains = nil
+	} else {
+		// Allowed domains: intersection
+		if len(old.NetworkPolicy.AllowedDomains) == 0 && len(current.NetworkPolicy.AllowedDomains) == 0 {
+			allowedDomains = nil
+		} else if len(old.NetworkPolicy.AllowedDomains) == 0 {
+			allowedDomains = append([]string(nil), current.NetworkPolicy.AllowedDomains...)
+		} else if len(current.NetworkPolicy.AllowedDomains) == 0 {
+			allowedDomains = append([]string(nil), old.NetworkPolicy.AllowedDomains...)
+		} else {
+			domainMap := make(map[string]bool)
+			for _, o := range old.NetworkPolicy.AllowedDomains {
+				oNorm := strings.ToLower(strings.TrimSpace(o))
+				if oNorm == "" {
+					continue
+				}
+				for _, c := range current.NetworkPolicy.AllowedDomains {
+					cNorm := strings.ToLower(strings.TrimSpace(c))
+					if cNorm == "" {
+						continue
+					}
+					if oNorm == "*" {
+						if !domainMap[cNorm] {
+							domainMap[cNorm] = true
+							allowedDomains = append(allowedDomains, cNorm)
+						}
+					} else if cNorm == "*" {
+						if !domainMap[oNorm] {
+							domainMap[oNorm] = true
+							allowedDomains = append(allowedDomains, oNorm)
+						}
+					} else if oNorm == cNorm {
+						if !domainMap[oNorm] {
+							domainMap[oNorm] = true
+							allowedDomains = append(allowedDomains, oNorm)
+						}
+					} else if strings.HasSuffix(cNorm, "."+oNorm) {
+						if !domainMap[cNorm] {
+							domainMap[cNorm] = true
+							allowedDomains = append(allowedDomains, cNorm)
+						}
+					} else if strings.HasSuffix(oNorm, "."+cNorm) {
+						if !domainMap[oNorm] {
+							domainMap[oNorm] = true
+							allowedDomains = append(allowedDomains, oNorm)
+						}
+					}
+				}
+			}
+
+			// Nếu cả hai bên đều đặt whitelist nhưng không có miền nào giao nhau:
+			// Đặt allowOutbound = false để chặn mọi truy cập ra ngoài, không để bypass
+			if len(allowedDomains) == 0 {
+				allowOutbound = false
+				allowedDomains = nil
 			}
 		}
 	}
 
-	// Blocked domains: union
+	// Blocked domains: union (tất cả các domain bị chặn bởi bất kỳ bên nào đều phải bị chặn)
 	blockedDomainMap := make(map[string]bool)
 	var blockedDomains []string
 	for _, d := range old.NetworkPolicy.BlockedDomains {
@@ -631,7 +687,7 @@ func IntersectSecurityContext(old *AgentSecurityContext, current TenantIdentity)
 		Scopes:                effectiveScopes,
 		AllowedModels:         effectiveModels,
 		AllowedTools:          effectiveTools,
-		AllowedWorkspaceRoots: append([]string(nil), current.AllowedWorkspaceRoots...),
+		AllowedWorkspaceRoots: effectiveRoots,
 		MaxAgentSteps:         maxSteps,
 		MaxConcurrentRuns:     maxConcurrent,
 		MaxToolRuntime:        maxRuntime,
@@ -645,4 +701,77 @@ func IntersectSecurityContext(old *AgentSecurityContext, current TenantIdentity)
 			BlockedDomains: blockedDomains,
 		},
 	}, nil
+}
+
+// intersectWorkspaceRoots tính toán tập giao thoa đường dẫn nghiêm ngặt (path containment)
+func intersectWorkspaceRoots(oldRoots, currRoots []string) ([]string, error) {
+	if len(oldRoots) == 0 && len(currRoots) == 0 {
+		return nil, nil
+	}
+	if len(oldRoots) == 0 {
+		return normalizePaths(currRoots), nil
+	}
+	if len(currRoots) == 0 {
+		return normalizePaths(oldRoots), nil
+	}
+
+	var result []string
+	seen := make(map[string]bool)
+
+	for _, o := range oldRoots {
+		absO, errO := filepath.Abs(filepath.Clean(o))
+		if errO != nil {
+			continue
+		}
+		for _, c := range currRoots {
+			absC, errC := filepath.Abs(filepath.Clean(c))
+			if errC != nil {
+				continue
+			}
+
+			// Kiểm tra nếu absC nằm trong absO (absC con của absO) -> lấy absC (hẹp hơn)
+			relCO, errCO := filepath.Rel(absO, absC)
+			if errCO == nil && !strings.HasPrefix(relCO, "..") && !filepath.IsAbs(relCO) {
+				key := strings.ToLower(absC)
+				if !seen[key] {
+					seen[key] = true
+					result = append(result, absC)
+				}
+				continue
+			}
+
+			// Kiểm tra nếu absO nằm trong absC (absO con của absC) -> lấy absO (hẹp hơn)
+			relOC, errOC := filepath.Rel(absC, absO)
+			if errOC == nil && !strings.HasPrefix(relOC, "..") && !filepath.IsAbs(relOC) {
+				key := strings.ToLower(absO)
+				if !seen[key] {
+					seen[key] = true
+					result = append(result, absO)
+				}
+				continue
+			}
+		}
+	}
+
+	if len(result) == 0 {
+		return nil, errors.New("resume_reauthorization_failed: không có giao thoa thư mục workspace hợp lệ giữa quyền cũ và người gọi mới")
+	}
+
+	return result, nil
+}
+
+func normalizePaths(paths []string) []string {
+	var res []string
+	seen := make(map[string]bool)
+	for _, p := range paths {
+		abs, err := filepath.Abs(filepath.Clean(p))
+		if err == nil {
+			key := strings.ToLower(abs)
+			if !seen[key] {
+				seen[key] = true
+				res = append(res, abs)
+			}
+		}
+	}
+	return res
 }

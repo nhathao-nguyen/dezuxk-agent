@@ -249,7 +249,8 @@ func (f FailoverConfig) GetCoolingDuration() time.Duration {
 }
 
 type StorageConfig struct {
-	DatabasePath string `yaml:"database_path"`
+	DatabasePath        string `yaml:"database_path"`
+	AllowMemoryFallback bool   `yaml:"allow_memory_fallback"`
 }
 
 type GoldenJobConfig struct {

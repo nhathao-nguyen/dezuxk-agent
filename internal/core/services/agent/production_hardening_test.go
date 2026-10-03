@@ -635,7 +635,7 @@ func TestHardening_HeartbeatRenewal(t *testing.T) {
 	}
 
 	// Worker 2 cố renew lease của Worker 1 -> PHẢI false
-	renewedFake, err := runRepo.RenewLease(ctx, runID, "worker-impostor", 10*time.Second)
+	renewedFake, err := runRepo.RenewLease(ctx, runID, "worker-impostor", 1, 10*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error on renew lease: %v", err)
 	}
@@ -644,7 +644,7 @@ func TestHardening_HeartbeatRenewal(t *testing.T) {
 	}
 
 	// Worker 1 renew lease của chính mình -> PHẢI true
-	renewedOwner, err := runRepo.RenewLease(ctx, runID, "worker-1", 10*time.Second)
+	renewedOwner, err := runRepo.RenewLease(ctx, runID, "worker-1", 1, 10*time.Second)
 	if err != nil || !renewedOwner {
 		t.Fatalf("owner worker failed to renew lease: %v", err)
 	}

@@ -255,8 +255,15 @@ func (p *PolicyEngine) validatePaths(ctx context.Context, identity domain.Tenant
 			return fmt.Errorf("%w: phát hiện nỗ lực thoát workspace qua '..' trong trường %s=%q", ErrWorkspaceEscape, key, pathStr)
 		}
 
+		targetForCheck := clean
+		if !filepath.IsAbs(targetForCheck) {
+			if ws := domain.GetWorkspace(ctx, ""); ws != "" {
+				targetForCheck = filepath.Join(ws, clean)
+			}
+		}
+
 		// 2. Đối soát với AllowedWorkspaceRoots của tenant
-		if !identity.IsWorkspaceAllowed(clean) {
+		if !identity.IsWorkspaceAllowed(targetForCheck) {
 			return fmt.Errorf("%w: đường dẫn %q nằm ngoài phạm vi được phép của tenant %q", ErrWorkspaceEscape, pathStr, identity.TenantID)
 		}
 	}

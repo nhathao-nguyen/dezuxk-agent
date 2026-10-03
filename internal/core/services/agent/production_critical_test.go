@@ -440,6 +440,7 @@ func TestRecoveryPreservesExecutionOptions(t *testing.T) {
 	ctx := context.Background()
 	runner := &dummyRunner{delay: 10 * time.Millisecond}
 	svc := NewJobService(runRepo, runner)
+	defer svc.Shutdown(context.Background())
 
 	secCtx := domain.SecurityContextFromTenantIdentity(domain.TenantIdentity{
 		TenantID: "tenant-exec",
