@@ -67,21 +67,6 @@ jobs:
           --health-timeout 3s
           --health-retries 5
 
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadminpassword
-        ports:
-          - 9000:9000
-          - 9001:9001
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 5
-        command: server /data --console-address ":9001"
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -92,11 +77,21 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Start MinIO Server
+        run: |
+          docker run -d --name minio -p 9000:9000 -p 9001:9001 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadminpassword \
+            minio/minio:latest server /data --console-address ":9001"
+
       - name: Initialize MinIO Test Buckets
         run: |
           curl -sS https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
-          mc alias set local http://localhost:9000 minioadmin minioadminpassword
+          until mc alias set local http://localhost:9000 minioadmin minioadminpassword; do
+            echo "Chờ MinIO sẵn sàng..."
+            sleep 1
+          done
           mc mb --ignore-existing local/dezuxk-test
           mc mb --ignore-existing local/dezuxk-media
 

@@ -49,24 +49,23 @@ services:
       MINIO_ROOT_PASSWORD: minioadminpassword
     volumes:
       - minio-data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
 
-  # Khởi tạo bucket dezuxk-media tự động
+  # Khởi tạo bucket dezuxk-media và dezuxk-test tự động
   minio-init:
     image: minio/mc:latest
     container_name: dezuxk-minio-init
     depends_on:
-      minio:
-        condition: service_healthy
+      - minio
     entrypoint: >
       /bin/sh -c "
-      /usr/bin/mc alias set local http://minio:9000 minioadmin minioadminpassword;
-      /usr/bin/mc mb --ignore-existing local/dezuxk-media;
-      exit 0;
+      until /usr/bin/mc alias set local http://minio:9000 minioadmin minioadminpassword; do
+        echo 'Chờ MinIO sẵn sàng...'
+        sleep 1
+      done
+      /usr/bin/mc mb --ignore-existing local/dezuxk-media
+      /usr/bin/mc mb --ignore-existing local/dezuxk-test
+      echo 'MinIO buckets đã sẵn sàng!'
+      exit 0
       "
 
   # 4. Gateway Node A
@@ -99,13 +98,14 @@ services:
       - DEZUXK_S3_USE_PATH_STYLE=true
       - DEZUXK_CHROME_BINARY=/usr/bin/chromium
       - DEZUXK_TEST_MODE=true
+      - DEZUXK_MASTER_KEY=cluster_dev_master_key_32bytes_sec
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ready"]
       interval: 10s
@@ -143,13 +143,14 @@ services:
       - DEZUXK_S3_USE_PATH_STYLE=true
       - DEZUXK_CHROME_BINARY=/usr/bin/chromium
       - DEZUXK_TEST_MODE=true
+      - DEZUXK_MASTER_KEY=cluster_dev_master_key_32bytes_sec
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ready"]
       interval: 10s
@@ -187,13 +188,14 @@ services:
       - DEZUXK_S3_USE_PATH_STYLE=true
       - DEZUXK_CHROME_BINARY=/usr/bin/chromium
       - DEZUXK_TEST_MODE=true
+      - DEZUXK_MASTER_KEY=cluster_dev_master_key_32bytes_sec
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/ready"]
       interval: 10s
