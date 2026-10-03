@@ -86,6 +86,7 @@ type ServerConfig struct {
 	Host                  string          `yaml:"host"`
 	Port                  int             `yaml:"port"`
 	APIKey                string          `yaml:"api_key"`
+	MetricsToken          string          `yaml:"metrics_token"`
 	AllowedOrigins        []string        `yaml:"allowed_origins"`
 	ReadTimeout           time.Duration   `yaml:"read_timeout"`
 	WriteTimeout          time.Duration   `yaml:"write_timeout"`
@@ -524,6 +525,9 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if st := os.Getenv("DEZUXK_ADMIN_SESSION_TOKEN"); st != "" {
 		cfg.Admin.SessionToken = st
+	}
+	if mt := os.Getenv("DEZUXK_METRICS_TOKEN"); mt != "" {
+		cfg.Server.MetricsToken = mt
 	}
 }
 

@@ -422,8 +422,18 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 				}
 			}
 
-			if m := r.URL.Query().Get("model"); m != "" {
+			// 1b. Trích xuất Model: ưu tiên Context, sau đó Query param, sau đó Body JSON an toàn (fallback: default)
+			if m, ok := domain.ModelFromContext(r.Context()); ok && m != "" {
 				identity.Model = m
+			} else if m := r.URL.Query().Get("model"); m != "" {
+				identity.Model = strings.TrimSpace(m)
+				r = r.WithContext(domain.ContextWithModel(r.Context(), identity.Model))
+			} else if m := extractTargetModel(r); m != "" {
+				identity.Model = m
+				r = r.WithContext(domain.ContextWithModel(r.Context(), identity.Model))
+			}
+			if identity.Model == "" {
+				identity.Model = "default"
 			}
 
 			if strings.Contains(r.URL.Path, "/agent/") || strings.Contains(r.URL.Path, "/runs") {

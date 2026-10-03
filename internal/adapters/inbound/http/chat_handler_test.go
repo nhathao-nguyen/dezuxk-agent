@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	adaptersHTTP "dezuxk-gateway/internal/adapters/inbound/http"
@@ -16,6 +17,7 @@ import (
 )
 
 type mockChatUseCase struct {
+	mu         sync.RWMutex
 	syncResp   *domain.OpenAIChatResponse
 	syncErr    error
 	streamErr  error
@@ -24,16 +26,24 @@ type mockChatUseCase struct {
 }
 
 func (m *mockChatUseCase) ExecuteChatSync(ctx context.Context, req *domain.OpenAIChatRequest) (*domain.OpenAIChatResponse, error) {
+	m.mu.Lock()
 	m.lastReq = req
-	return m.syncResp, m.syncErr
+	resp := m.syncResp
+	err := m.syncErr
+	m.mu.Unlock()
+	return resp, err
 }
 
 func (m *mockChatUseCase) ExecuteChatStream(ctx context.Context, req *domain.OpenAIChatRequest, streamWriter io.Writer, flusher func()) error {
+	m.mu.Lock()
 	m.lastReq = req
-	if m.onStreamDo != nil {
-		return m.onStreamDo(ctx, streamWriter, flusher)
+	err := m.streamErr
+	onStreamDo := m.onStreamDo
+	m.mu.Unlock()
+	if onStreamDo != nil {
+		return onStreamDo(ctx, streamWriter, flusher)
 	}
-	return m.streamErr
+	return err
 }
 
 func TestChatHandler_SyncWithMultimodalAndUsage(t *testing.T) {

@@ -181,9 +181,9 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			authHeader := r.Header.Get("Authorization")
 			if strings.HasPrefix(authHeader, "Bearer ") {
 				token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-				if (deps.Config.Server.APIKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Server.APIKey)) == 1) ||
-					(deps.Config.Admin.SessionToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Admin.SessionToken)) == 1) ||
-					(deps.Config.Admin.Password != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Admin.Password)) == 1) {
+				if (deps.Config.Server.MetricsToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Server.MetricsToken)) == 1) ||
+					(deps.Config.Server.APIKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Server.APIKey)) == 1) ||
+					(deps.Config.Admin.SessionToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(deps.Config.Admin.SessionToken)) == 1) {
 					authorized = true
 				}
 			}
@@ -283,14 +283,6 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			"timestamp": time.Now().Format(time.RFC3339),
 		})
 	})
-
-	// Phục vụ tệp Media cục bộ với Byte-Range streaming (hỗ trợ tua video)
-	if deps.MediaStorage != nil {
-		r.Get("/media/{id}", func(w http.ResponseWriter, r *http.Request) {
-			id := chi.URLParam(r, "id")
-			_ = deps.MediaStorage.ServeAssetHTTP(w, r, id)
-		})
-	}
 
 	// Web Admin UI Dashboard (Embedded SPA)
 	webHandler := http.StripPrefix("/admin", web.Handler())

@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -28,6 +29,20 @@ import (
 	"dezuxk-gateway/internal/core/services/policy"
 )
 
+// ValidateInfrastructureAdapters kiểm tra tính sẵn sàng thực tế của các adapter hạ tầng (Fail Fast)
+func ValidateInfrastructureAdapters(cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Storage.Driver), "postgres") {
+		return errors.New("postgres storage driver configured but adapter is not implemented")
+	}
+	if cfg.Distributed.Enabled {
+		return errors.New("distributed mode configured but Redis adapters are not implemented")
+	}
+	return nil
+}
+
 // Run khởi động toàn bộ hạ tầng Dezuxk AI Gateway ở chế độ Headless Daemon
 func Run(configPath string, portOverride int) error {
 	log.Println("=================================================================")
@@ -38,6 +53,10 @@ func Run(configPath string, portOverride int) error {
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("không thể khởi động Gateway do lỗi cấu hình: %w", err)
+	}
+
+	if err := ValidateInfrastructureAdapters(cfg); err != nil {
+		return fmt.Errorf("không thể khởi động Gateway: %w", err)
 	}
 
 	if portOverride > 0 {

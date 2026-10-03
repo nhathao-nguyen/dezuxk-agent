@@ -297,6 +297,25 @@ func TenantIdentityFromContext(ctx context.Context) (TenantIdentity, bool) {
 	return TenantIdentity{}, false
 }
 
+type modelContextKey struct{}
+
+// ContextWithModel lưu model identifier vào context
+func ContextWithModel(ctx context.Context, model string) context.Context {
+	return context.WithValue(ctx, modelContextKey{}, model)
+}
+
+// ModelFromContext trích xuất model identifier từ context
+func ModelFromContext(ctx context.Context) (string, bool) {
+	if ctx == nil {
+		return "", false
+	}
+	val := ctx.Value(modelContextKey{})
+	if m, ok := val.(string); ok && m != "" {
+		return m, true
+	}
+	return "", false
+}
+
 // DefaultAdminIdentity trả về identity đầy đủ quyền cho quản trị viên
 func DefaultAdminIdentity() TenantIdentity {
 	return DefaultInternalIdentity()

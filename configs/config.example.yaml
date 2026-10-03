@@ -3,6 +3,7 @@ server:
   host: "127.0.0.1"
   port: 8080
   api_key: ""
+  metrics_token: "" # Dedicated Bearer token for /metrics scraping (production recommended)
   allowed_origins:
     - "*"
   read_timeout: 300s

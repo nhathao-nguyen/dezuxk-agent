@@ -2,6 +2,7 @@ package daemon_test
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 
 	"dezuxk-gateway/internal/app/daemon"
@@ -54,4 +55,42 @@ func TestCheckpointMigrationFailure_DevModeMayFallback(t *testing.T) {
 
 func TestCheckpointRepoFailureProductionFailsStartup(t *testing.T) {
 	TestCheckpointMigrationFailure_ProductionStartupFails(t)
+}
+
+func TestValidateInfrastructureAdapters_FailFast(t *testing.T) {
+	// 1. Postgres storage driver must fail fast with truthful message
+	cfgPostgres := &config.Config{
+		Storage: config.StorageConfig{
+			Driver: "postgres",
+		},
+	}
+	err := daemon.ValidateInfrastructureAdapters(cfgPostgres)
+	if err == nil || !strings.Contains(err.Error(), "postgres storage driver configured but adapter is not implemented") {
+		t.Fatalf("expected fail fast error for postgres, got: %v", err)
+	}
+
+	// 2. Distributed enabled must fail fast with truthful message
+	cfgDistributed := &config.Config{
+		Distributed: config.DistributedConfig{
+			Enabled: true,
+			Driver:  "redis",
+		},
+	}
+	err = daemon.ValidateInfrastructureAdapters(cfgDistributed)
+	if err == nil || !strings.Contains(err.Error(), "distributed mode configured but Redis adapters are not implemented") {
+		t.Fatalf("expected fail fast error for distributed redis, got: %v", err)
+	}
+
+	// 3. SQLite and non-distributed config must pass
+	cfgValid := &config.Config{
+		Storage: config.StorageConfig{
+			Driver: "sqlite",
+		},
+		Distributed: config.DistributedConfig{
+			Enabled: false,
+		},
+	}
+	if err := daemon.ValidateInfrastructureAdapters(cfgValid); err != nil {
+		t.Fatalf("expected nil error for valid sqlite standalone config, got: %v", err)
+	}
 }

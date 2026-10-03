@@ -101,14 +101,23 @@ func TestMediaRouteAndTenantIsolation(t *testing.T) {
 		t.Errorf("expected Cache-Control private for private media asset, got: %s", cacheControl)
 	}
 
-	// 4. Test: GET /media/{id} (root route backward compatibility)
+	// 4. Test: GET /media/{id} (legacy route removed for security, must return 404)
 	reqRoot := httptest.NewRequest(http.MethodGet, "/media/media-asset-public", nil)
 	recRoot := httptest.NewRecorder()
 	router.ServeHTTP(recRoot, reqRoot)
-	if recRoot.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK for public media on /media/{id}, got: %d", recRoot.Code)
+	if recRoot.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found for legacy unauthenticated /media/{id}, got: %d", recRoot.Code)
 	}
-	pubCache := recRoot.Header().Get("Cache-Control")
+
+	// 4b. Test: GET /v1/media/{id} canonical route for public media
+	reqV1Pub := httptest.NewRequest(http.MethodGet, "/v1/media/media-asset-public", nil)
+	reqV1Pub.Header.Set("Authorization", "Bearer "+keyTenantA.RawKey)
+	recV1Pub := httptest.NewRecorder()
+	router.ServeHTTP(recV1Pub, reqV1Pub)
+	if recV1Pub.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for public media on canonical /v1/media/{id}, got: %d", recV1Pub.Code)
+	}
+	pubCache := recV1Pub.Header().Get("Cache-Control")
 	if !bytes.Contains([]byte(pubCache), []byte("public")) {
 		t.Errorf("expected Cache-Control public for public media asset, got: %s", pubCache)
 	}

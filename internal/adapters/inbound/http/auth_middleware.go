@@ -80,10 +80,13 @@ func VirtualKeyAuthMiddleware(keyUseCase ports.KeyUseCase) func(http.Handler) ht
 				}
 			}
 
-			// 5. Đưa thông tin VirtualKey và TenantIdentity vào Request Context để các tầng sau sử dụng
+			// 5. Đưa thông tin VirtualKey, TenantIdentity và TargetModel vào Request Context để các tầng sau sử dụng
 			identity := vKey.ToIdentity()
 			ctx := domain.ContextWithVirtualKey(r.Context(), vKey)
 			ctx = domain.ContextWithTenantIdentity(ctx, identity)
+			if targetModel != "" {
+				ctx = domain.ContextWithModel(ctx, targetModel)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
