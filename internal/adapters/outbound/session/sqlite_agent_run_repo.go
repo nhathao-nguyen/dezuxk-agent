@@ -18,6 +18,7 @@ var (
 	ErrRunNotFound             = errors.New("agent run not found")
 	ErrIdempotencyConflict     = errors.New("idempotency conflict: a run with the same key already exists")
 	ErrInvalidStatusTransition = errors.New("invalid status transition")
+	ErrLeaseLost               = errors.New("agent lease lost")
 )
 
 // SqliteAgentRunRepository triển khai ports.AgentRunRepository trên cơ sở dữ liệu SQLite

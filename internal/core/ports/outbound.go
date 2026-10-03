@@ -80,12 +80,18 @@ type DerivedSecretRefresher interface {
 	RefreshDerivedSecret(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind) error
 }
 
-// MediaRepository quản lý lưu trữ tệp cục bộ
-type MediaRepository interface {
+// MediaStorage giao diện lưu trữ tài nguyên nhị phân đa phương tiện (Local Disk hoặc S3/MinIO)
+type MediaStorage interface {
 	SaveAsset(ctx context.Context, asset *domain.MediaAsset, content io.Reader) error
 	GetAsset(ctx context.Context, assetID string) (*domain.MediaAsset, io.ReadCloser, error)
+	DeleteAsset(ctx context.Context, assetID string) error
 	ListAssets(ctx context.Context, kind domain.MediaKind) ([]*domain.MediaAsset, error)
 	DeleteExpired(ctx context.Context, maxAgeDays int) (int, error)
+}
+
+// MediaRepository quản lý lưu trữ và phân phối tệp phương tiện cục bộ hoặc đám mây
+type MediaRepository interface {
+	MediaStorage
 	DownloadAndCache(ctx context.Context, remoteURL string, kind domain.MediaKind, prompt string, model string) (*domain.MediaAsset, error)
 	DownloadAndCacheWithAuth(ctx context.Context, remoteURL string, kind domain.MediaKind, prompt string, model string, cookies string, userAgent string) (*domain.MediaAsset, error)
 	ServeAssetHTTP(w http.ResponseWriter, r *http.Request, assetID string) error

@@ -214,6 +214,30 @@ dezuxk-gateway/
 
 ---
 
+## 🌐 Mô hình Vận hành: Single-Node vs Multi-Node Cluster
+
+Dezuxk AI Gateway hỗ trợ 2 chế độ vận hành độc lập:
+
+### 1. Chế độ Đơn Node (Single-Node Mode - Mặc định)
+- **Zero-Dependency**: Chạy độc lập trên 1 máy chủ vật lý, laptop hoặc VPS.
+- **Persistence**: SQLite WAL Mode với mã hóa AES-256-GCM Vault cho phiên và API keys.
+- **Khởi động**: Chỉ cần `go run main.go --config configs/config.yaml` hoặc `run.bat`.
+
+### 2. Chế độ Cụm Phân tán (Multi-Node Production Cluster)
+- **High Availability**: Chạy từ 2+ Gateway nodes song song sau Load Balancer (Nginx / HAProxy / ALB) không cần sticky session.
+- **State & Fencing**: PostgreSQL 16 là source-of-truth cho Agent Leases, Runs, Checkpoints với cơ chế Fencing Token đơn điệu tăng (`claim_generation`) ngăn ngừa zombie worker.
+- **Distributed Coordination**: Redis 7 phụ trách Shared Rate Limiting (Lua), Cross-Node SSE Fan-Out & Cancel signaling, và Singleton Leader Election (`leader.Coordinator`).
+- **Khởi động Cụm với Docker Compose**:
+  ```bash
+  docker compose -f docker-compose.multinode.yml up -d
+  ```
+- **Tài liệu Chi tiết**:
+  - [Kiến trúc Phân tán Multi-Node](file:///d:/nhathao/Vibe/dezuxk-agent/docs/MULTI_NODE_ARCHITECTURE.md)
+  - [Hướng dẫn Triển khai & Vận hành Cụm](file:///d:/nhathao/Vibe/dezuxk-agent/docs/MULTI_NODE_DEPLOYMENT.md)
+  - [Quy trình Di chuyển Schema PostgreSQL](file:///d:/nhathao/Vibe/dezuxk-agent/docs/POSTGRES_MIGRATION.md)
+
+---
+
 ## 🛡️ Bảo Mật & Lưu Ý Vận Hành
 
 1. **Khóa Master Key (AES-256-GCM)**:

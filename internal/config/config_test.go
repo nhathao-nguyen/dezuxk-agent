@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dezuxk-gateway/internal/config"
@@ -244,5 +245,42 @@ func TestStorageAndDistributedConfig(t *testing.T) {
 	cfg.Distributed.Redis.Addr = "127.0.0.1:6379"
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("expected valid distributed config to pass: %v", err)
+	}
+
+	// 7. Cluster mode requires postgres storage driver
+	cfg.Cluster.Enabled = true
+	cfg.Storage.Driver = "sqlite"
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected cluster mode to fail with sqlite driver")
+	}
+	cfg.Storage.Driver = "postgres"
+
+	// 8. Multi-node cluster with S3 media
+	cfg.Media.Driver = "s3"
+	cfg.Media.S3.Bucket = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error when s3 bucket is empty")
+	}
+	cfg.Media.S3.Bucket = "dezuxk-media"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected valid cluster + s3 config to pass: %v", err)
+	}
+
+	// 9. Postgres DSN and password masking
+	pgCfg := config.PostgresConfig{
+		Host:     "db.internal",
+		Port:     5432,
+		User:     "dezuxk",
+		Password: "supersecretpassword",
+		DBName:   "dezuxk_prod",
+		SSLMode:  "require",
+	}
+	dsn := pgCfg.BuildDSN()
+	if !strings.Contains(dsn, "supersecretpassword") {
+		t.Errorf("expected DSN to contain password, got: %s", dsn)
+	}
+	sanitized := pgCfg.SanitizedDSN()
+	if strings.Contains(sanitized, "supersecretpassword") {
+		t.Errorf("sanitized DSN must NOT contain real password, got: %s", sanitized)
 	}
 }

@@ -1,0 +1,63 @@
+name: Multi-Node Cluster Integration
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  multinode-verify:
+    name: Multi-Node Concurrency & Failover Tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dezuxk
+          POSTGRES_PASSWORD: dezuxk_dev_cluster_pwd
+          POSTGRES_DB: dezuxk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Verify Module Dependencies
+        run: go mod verify
+
+      - name: Run Multi-Node Deterministic Acceptance Suite
+        run: go test -v -count=1 ./tests/multinode/...
+
+      - name: Run Multi-Node Concurrency Race Verification
+        run: go test -race -v -count=1 ./tests/multinode/...
+
+      - name: Run Multi-Node Suite Against Real PostgreSQL & Redis
+        env:
+          TEST_POSTGRES_DSN: "postgres://dezuxk:dezuxk_dev_cluster_pwd@localhost:5432/dezuxk?sslmode=disable"
+          TEST_REDIS_ADDR: "localhost:6379"
+        run: go test -v -count=1 ./tests/multinode/...

@@ -16,8 +16,12 @@ import (
 	"time"
 
 	"dezuxk-gateway/internal/core/domain"
+	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/security/netguard"
 )
+
+var _ ports.MediaRepository = (*LocalStorageAdapter)(nil)
+var _ ports.MediaStorage = (*LocalStorageAdapter)(nil)
 
 type mediaAssetMetadata struct {
 	AssetID     string           `json:"asset_id"`
@@ -370,6 +374,18 @@ func (s *LocalStorageAdapter) ListAssets(ctx context.Context, kind domain.MediaK
 		}
 	}
 	return list, nil
+}
+
+func (s *LocalStorageAdapter) DeleteAsset(ctx context.Context, assetID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	asset, exists := s.assets[assetID]
+	if exists {
+		_ = os.Remove(asset.FilePath)
+		delete(s.assets, assetID)
+	}
+	_ = os.Remove(filepath.Join(s.storageDir, assetID+".metadata.json"))
+	return nil
 }
 
 func (s *LocalStorageAdapter) DeleteExpired(ctx context.Context, maxAgeDays int) (int, error) {

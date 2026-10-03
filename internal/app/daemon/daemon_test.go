@@ -116,18 +116,18 @@ func TestCheckpointRepoFailureProductionFailsStartup(t *testing.T) {
 }
 
 func TestValidateInfrastructureAdapters_FailFast(t *testing.T) {
-	// 1. Postgres storage driver must fail fast with truthful message
+	// 1. Postgres storage driver thiếu host/dbname must fail fast
 	cfgPostgres := &config.Config{
 		Storage: config.StorageConfig{
 			Driver: "postgres",
 		},
 	}
 	err := daemon.ValidateInfrastructureAdapters(cfgPostgres)
-	if err == nil || !strings.Contains(err.Error(), "postgres storage driver configured but adapter is not implemented") {
-		t.Fatalf("expected fail fast error for postgres, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "cấu hình PostgreSQL thiếu thông tin kết nối bắt buộc") {
+		t.Fatalf("expected fail fast error for invalid postgres config, got: %v", err)
 	}
 
-	// 2. Distributed enabled must fail fast with truthful message
+	// 2. Distributed enabled thiếu redis addrs must fail fast
 	cfgDistributed := &config.Config{
 		Distributed: config.DistributedConfig{
 			Enabled: true,
@@ -135,11 +135,32 @@ func TestValidateInfrastructureAdapters_FailFast(t *testing.T) {
 		},
 	}
 	err = daemon.ValidateInfrastructureAdapters(cfgDistributed)
-	if err == nil || !strings.Contains(err.Error(), "distributed mode configured but Redis adapters are not implemented") {
-		t.Fatalf("expected fail fast error for distributed redis, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "cấu hình distributed Redis thiếu địa chỉ kết nối") {
+		t.Fatalf("expected fail fast error for invalid distributed redis config, got: %v", err)
 	}
 
-	// 3. SQLite and non-distributed config must pass
+	// 3. Cluster enabled thiếu postgres must fail fast
+	cfgCluster := &config.Config{
+		Cluster: config.ClusterConfig{
+			Enabled: true,
+		},
+		Storage: config.StorageConfig{
+			Driver: "sqlite",
+		},
+		Distributed: config.DistributedConfig{
+			Enabled: true,
+			Driver:  "redis",
+			Redis: config.RedisConfig{
+				Addr: "127.0.0.1:6379",
+			},
+		},
+	}
+	err = daemon.ValidateInfrastructureAdapters(cfgCluster)
+	if err == nil || !strings.Contains(err.Error(), "chế độ cluster (multi-node) bắt buộc cấu hình storage driver là 'postgres'") {
+		t.Fatalf("expected fail fast error for cluster with sqlite, got: %v", err)
+	}
+
+	// 4. SQLite and non-distributed config must pass
 	cfgValid := &config.Config{
 		Storage: config.StorageConfig{
 			Driver: "sqlite",

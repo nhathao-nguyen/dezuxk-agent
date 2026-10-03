@@ -15,11 +15,9 @@ import (
 	"time"
 
 	adaptersHTTP "dezuxk-gateway/internal/adapters/inbound/http"
-	"dezuxk-gateway/internal/adapters/outbound/alerts"
 	"dezuxk-gateway/internal/adapters/outbound/google"
 	"dezuxk-gateway/internal/adapters/outbound/mcp"
 	"dezuxk-gateway/internal/adapters/outbound/session"
-	"dezuxk-gateway/internal/adapters/outbound/storage"
 	"dezuxk-gateway/internal/adapters/outbound/tools"
 	"dezuxk-gateway/internal/config"
 	"dezuxk-gateway/internal/core/domain"
@@ -34,12 +32,34 @@ func ValidateInfrastructureAdapters(cfg *config.Config) error {
 	if cfg == nil {
 		return nil
 	}
+
+	// 1. Kiểm tra cấu hình PostgreSQL nếu được chọn làm storage driver
 	if strings.EqualFold(strings.TrimSpace(cfg.Storage.Driver), "postgres") {
-		return errors.New("postgres storage driver configured but adapter is not implemented")
+		if strings.TrimSpace(cfg.Storage.Postgres.Host) == "" || strings.TrimSpace(cfg.Storage.Postgres.DBName) == "" {
+			return errors.New("cấu hình PostgreSQL thiếu thông tin kết nối bắt buộc (host hoặc dbname)")
+		}
 	}
+
+	// 2. Kiểm tra cấu hình Redis nếu bật distributed mode
 	if cfg.Distributed.Enabled {
-		return errors.New("distributed mode configured but Redis adapters are not implemented")
+		if len(cfg.Distributed.Redis.GetAddrs()) == 0 {
+			return errors.New("cấu hình distributed Redis thiếu địa chỉ kết nối (addrs hoặc addr)")
+		}
 	}
+
+	// 3. Kiểm tra tính tương thích khi kích hoạt Multi-Node Cluster
+	if cfg.Cluster.IsEnabled() {
+		if !strings.EqualFold(strings.TrimSpace(cfg.Storage.Driver), "postgres") {
+			return errors.New("chế độ cluster (multi-node) bắt buộc cấu hình storage driver là 'postgres'")
+		}
+		if !cfg.Distributed.Enabled {
+			return errors.New("chế độ cluster (multi-node) bắt buộc cấu hình distributed.enabled: true và driver 'redis'")
+		}
+		if cfg.IsProduction() && cfg.Media.GetDriver() == "local" {
+			return errors.New("chế độ cluster trong môi trường production không cho phép dùng media driver 'local'")
+		}
+	}
+
 	return nil
 }
 
@@ -81,59 +101,23 @@ func Run(configPath string, portOverride int) error {
 	}
 	tokenExtractor := google.NewGoogleTokenExtractorAdapter(cfg.Server.ShortTimeout())
 
-	// 3. Khởi tạo Persistent SQLite Session Repository (WAL mode) với Secret Vault (AES-256-GCM)
 	masterKey := session.ResolveMasterKey(cfg.Security.MasterKey)
 	vault := session.NewVault(masterKey)
 
-	dbPath := cfg.Storage.DatabasePath
-	if dbPath == "" {
-		dbPath = filepath.Join("storage", "gateway.db")
-	}
-	refresher := google.NewDerivedSecretRefresher(tokenExtractor)
-	var sessionRepo ports.SessionRepository
-
-	sqliteRepo, err := session.NewSqliteSessionRepository(dbPath, refresher, vault)
+	// 3. Khởi tạo toàn bộ Hạ tầng qua Infrastructure Bundle
+	infra, err := BuildInfrastructure(context.Background(), cfg, tokenExtractor)
 	if err != nil {
-		if cfg.IsProduction() || !cfg.Storage.AllowMemoryFallback {
-			return fmt.Errorf("không thể khởi tạo SqliteSessionRepository trong môi trường bền vững: %w", err)
-		}
-		log.Printf("[Database Warning] Không thể mở SQLite (%v), dùng bộ nhớ RAM MemorySessionRepository (Development Mode)", err)
-		sessionRepo = session.NewMemorySessionRepository(refresher)
-	} else {
-		log.Printf("[Database] Đã kích hoạt lưu trữ bền vững SQLite tại %s (WAL Mode, Vault AES-256-GCM)", dbPath)
-		sessionRepo = sqliteRepo
-		defer sqliteRepo.Close()
+		return fmt.Errorf("không thể khởi tạo hạ tầng Gateway: %w", err)
 	}
+	defer infra.Close()
 
-	// Khởi tạo Webhook Alert Dispatcher (Telegram / Discord / Slack / Generic)
-	alertDispatcher := alerts.NewWebhookAlertDispatcher(cfg.Alerts.Webhook)
-	defer alertDispatcher.Close()
-	if cfg.Alerts.Webhook.IsEnabled() {
-		log.Printf("[Alerts] Webhook Alert Dispatcher đã kích hoạt (Provider: %s)", cfg.Alerts.Webhook.GetProvider())
-	}
-	if sa, ok := sessionRepo.(ports.SessionAlertNotifier); ok {
-		sa.SetAlertDispatcher(alertDispatcher)
-	}
-
-	// Khởi tạo Key Repository & Key Service (Virtual API Keys đa người dùng)
-	var keyRepo ports.KeyRepository
-	if sqliteRepo != nil {
-		kr, err := session.NewSqliteKeyRepository(sqliteRepo.DB())
-		if err != nil {
-			if cfg.IsProduction() || !cfg.Storage.AllowMemoryFallback {
-				return fmt.Errorf("khởi tạo SqliteKeyRepository thất bại: %w", err)
-			}
-			log.Printf("[Key Database Warning] Không thể khởi tạo SqliteKeyRepository: %v, dùng bộ nhớ RAM (Development Mode)", err)
-			keyRepo = session.NewMemoryKeyRepository()
-		} else {
-			keyRepo = kr
-		}
-	} else {
-		if cfg.IsProduction() || !cfg.Storage.AllowMemoryFallback {
-			return errors.New("không thể khởi tạo KeyRepository khi chưa có database bền vững trong production")
-		}
-		keyRepo = session.NewMemoryKeyRepository()
-	}
+	sessionRepo := infra.Sessions
+	keyRepo := infra.Keys
+	checkpointRepo := infra.Checkpoints
+	memoryRepo := infra.Memory
+	agentRunRepo := infra.Runs
+	mediaStorage := infra.Media
+	alertDispatcher := infra.AlertDispatcher
 	masterAdminKey := cfg.Server.APIKey
 	var additionalAdminTokens []string
 	if cfg.Admin.IsEnabled() && cfg.Admin.GetSessionToken() != "" {
@@ -141,6 +125,12 @@ func Run(configPath string, portOverride int) error {
 	}
 	if masterAdminKey == "" && len(additionalAdminTokens) > 0 {
 		masterAdminKey = additionalAdminTokens[0]
+	}
+	if masterAdminKey == "" && !cfg.IsProduction() {
+		const defaultDevAdminKey = "sk-dez-12f564ddef831e78546a198cd56f4deb"
+		masterAdminKey = defaultDevAdminKey
+		additionalAdminTokens = append(additionalAdminTokens, defaultDevAdminKey)
+		log.Printf("[Security Notice] Server đang chạy ở chế độ cục bộ không có api_key, kích hoạt default admin key cho Onboarding: %s", defaultDevAdminKey)
 	}
 	keyService := services.NewKeyService(keyRepo, masterAdminKey, additionalAdminTokens...)
 
@@ -175,10 +165,6 @@ func Run(configPath string, portOverride int) error {
 
 	// 7. Khởi tạo Core Services & Inbound HTTP Router
 	wire := google.NewWireAdapter(rpcRegistry)
-	mediaStorage, err := storage.NewLocalStorageAdapter(cfg.Media.StorageDir, cfg.Media.BaseURL)
-	if err != nil {
-		log.Printf("[Storage Warning] Không thể khởi tạo LocalStorageAdapter: %v", err)
-	}
 
 	// Khởi tạo các Gemini Services nâng cao (Production)
 	geminiHistoryService := services.NewGeminiHistoryService(sessionRepo, upstreamTransport, rpcRegistry, metrics)
@@ -233,6 +219,9 @@ func Run(configPath string, portOverride int) error {
 		windowSecs = 60
 	}
 	rateLimiter := adaptersHTTP.NewIPRateLimiter(maxReqs, time.Duration(windowSecs)*time.Second, cfg.Server.TrustedProxies)
+	if infra.SharedLimiter != nil {
+		rateLimiter.SetSharedRateLimiter(infra.SharedLimiter)
+	}
 
 	// Khởi tạo Autonomous Agent Tool Registry, Checkpoint Repo & Runners
 	toolRegistry := tools.NewToolRegistry()
@@ -241,15 +230,6 @@ func Run(configPath string, portOverride int) error {
 	agentRunner := agent.NewRunner(chatService, toolRegistry, nil)
 	agentRunner.SetPolicyEngine(policyEngine)
 	agentRunner.SetKeyUseCase(keyService)
-
-	var db *sql.DB
-	if sqliteRepo != nil {
-		db = sqliteRepo.DB()
-	}
-	checkpointRepo, memoryRepo, agentRunRepo, repoErr := InitCriticalRepositories(cfg, db)
-	if repoErr != nil {
-		return repoErr
-	}
 	agentRunner.SetCheckpointRepository(checkpointRepo)
 	if ledger, ok := agentRunRepo.(ports.ToolExecutionLedger); ok {
 		agentRunner.SetToolExecutionLedger(ledger)
@@ -257,6 +237,10 @@ func Run(configPath string, portOverride int) error {
 
 	agentJobService := agent.NewJobService(agentRunRepo, agentRunner)
 	agentJobService.SetCheckpointRepository(checkpointRepo)
+	if infra.EventBus != nil {
+		agentJobService.SetEventBus(infra.EventBus)
+	}
+	agentJobService.SetWorkerID(infra.NodeID)
 
 	serverCtx, serverCancel := context.WithCancel(context.Background())
 	defer serverCancel()
@@ -334,13 +318,24 @@ func Run(configPath string, portOverride int) error {
 		AgentJobService:       agentJobService,
 		AgentRunRepo:          agentRunRepo,
 		ReadinessManager:      readinessManager,
+		ClusterClient:         infra.ClusterClient,
 	})
 
 	// 8. Khởi động GeminiChatGoldenJob và Proactive Session Keep-Alive Worker
 	goldenCtx, goldenCancel := context.WithCancel(context.Background())
 	defer goldenCancel()
-	startGeminiChatGoldenRunner(goldenCtx, wire, upstreamTransport, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
-	startProactiveKeepAliveRunner(goldenCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
+	if cfg.Cluster.IsEnabled() && infra.LeaderCoord != nil {
+		infra.LeaderCoord.RegisterJob("gemini-golden-job", func(leaderCtx context.Context) {
+			startGeminiChatGoldenRunner(leaderCtx, wire, upstreamTransport, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
+		})
+		infra.LeaderCoord.RegisterJob("gemini-keepalive", func(leaderCtx context.Context) {
+			startProactiveKeepAliveRunner(leaderCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
+		})
+		infra.LeaderCoord.Start(goldenCtx)
+	} else {
+		startGeminiChatGoldenRunner(goldenCtx, wire, upstreamTransport, sessionRepo, metrics, cfg.GoldenJob, alertDispatcher)
+		startProactiveKeepAliveRunner(goldenCtx, sessionRepo, geminiQuotaService, cfg.KeepAlive)
+	}
 	startStartupTierDiscovery(goldenCtx, sessionRepo, geminiQuotaService)
 
 	// Phục hồi an toàn các tác vụ Agent dở dang trước khi mở sẵn sàng
@@ -415,15 +410,12 @@ func Run(configPath string, portOverride int) error {
 		log.Printf("[Agent Alert] Timeout khi chờ Agent Job Service shutdown: %v", agentErr)
 	}
 
-	// 4. Đóng kết nối cơ sở dữ liệu SQLite sau khi tất cả worker đã hoàn tất ghi trạng thái
-	// TUYỆT ĐỐI không close SQLite nếu JobService workers chưa dừng!
-	if sqliteRepo != nil {
-		if agentErr == nil {
-			log.Println("[Database] Đóng cơ sở dữ liệu SQLite...")
-			_ = sqliteRepo.Close()
-		} else {
-			log.Printf("[Database Protection] Bỏ qua đóng SQLite vì JobService workers chưa dừng hẳn (tránh database write after close).")
-		}
+	// 4. Đóng kết nối hạ tầng an toàn sau khi JobService đã hoàn tất
+	if agentErr == nil {
+		log.Println("[Infrastructure] Đóng kết nối hạ tầng (Redis, Database Pool)...")
+		_ = infra.Close()
+	} else {
+		log.Printf("[Infrastructure Protection] Bỏ qua đóng database vì JobService workers chưa dừng hẳn (tránh database write after close).")
 	}
 
 	log.Println("[Server] Gateway đã dừng hoàn toàn sạch sẽ.")

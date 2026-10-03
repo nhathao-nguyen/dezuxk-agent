@@ -497,9 +497,10 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 	}
 }
 
-// IPRateLimiter giữ tương thích ngược 100% cho cấu trúc và test cũ
+// IPRateLimiter giữ tương thích ngược 100% cho cấu trúc và test cũ, đồng thời hỗ trợ ủy quyền sang cụm Redis
 type IPRateLimiter struct {
 	*LocalRateLimiter
+	shared ports.RateLimiter
 }
 
 // NewIPRateLimiter khởi tạo IPRateLimiter bọc LocalRateLimiter
@@ -508,9 +509,30 @@ func NewIPRateLimiter(rate int, window time.Duration, trustedProxies ...[]string
 	return &IPRateLimiter{LocalRateLimiter: local}
 }
 
+// SetSharedRateLimiter cấu hình rate limiter phân tán dùng chung cụm Redis
+func (lim *IPRateLimiter) SetSharedRateLimiter(s ports.RateLimiter) {
+	lim.shared = s
+}
+
+// Allow kiểm tra rate limit thông qua shared limiter nếu có hoặc local limiter
+func (lim *IPRateLimiter) Allow(ctx context.Context, id ports.RateLimitIdentity) (ports.RateLimitDecision, error) {
+	if lim.shared != nil {
+		return lim.shared.Allow(ctx, id)
+	}
+	return lim.LocalRateLimiter.Allow(ctx, id)
+}
+
+// AcquireConcurrency chiếm giữ slot đồng thời thông qua shared limiter nếu có hoặc local limiter
+func (lim *IPRateLimiter) AcquireConcurrency(ctx context.Context, id ports.RateLimitIdentity) (func(), bool, error) {
+	if lim.shared != nil {
+		return lim.shared.AcquireConcurrency(ctx, id)
+	}
+	return lim.LocalRateLimiter.AcquireConcurrency(ctx, id)
+}
+
 // Middleware cung cấp tương thích ngược cho Chi router
 func (lim *IPRateLimiter) Middleware(metrics ...*domain.ContractMetrics) func(http.Handler) http.Handler {
-	return PreAuthIPRateLimitMiddleware(lim.LocalRateLimiter, lim.LocalRateLimiter.ExtractClientIP, metrics...)
+	return PreAuthIPRateLimitMiddleware(lim, lim.LocalRateLimiter.ExtractClientIP, metrics...)
 }
 
 // MaxBodySizeMiddleware giới hạn kích thước tối đa của request body để chống DoS

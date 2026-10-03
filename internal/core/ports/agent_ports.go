@@ -121,16 +121,3 @@ type AgentJobService interface {
 	SubscribeEvents(ctx context.Context, runID string) (<-chan domain.AgentRunEvent, func(), error)
 	SubscribeEventsForTenant(ctx context.Context, tenantID, runID string) (<-chan domain.AgentRunEvent, func(), error)
 }
-
-// DistributedLockProvider giao diện khóa phân tán hỗ trợ môi trường multi-instance
-type DistributedLockProvider interface {
-	AcquireLock(ctx context.Context, key string, ttl time.Duration) (bool, error)
-	ReleaseLock(ctx context.Context, key string) error
-}
-
-// SharedStateStore giao diện lưu trữ key-value phân tán giữa nhiều node gateway
-type SharedStateStore interface {
-	Get(ctx context.Context, key string) ([]byte, error)
-	Set(ctx context.Context, key string, val []byte, ttl time.Duration) error
-	Delete(ctx context.Context, key string) error
-}

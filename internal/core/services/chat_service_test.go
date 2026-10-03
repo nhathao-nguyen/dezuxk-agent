@@ -223,6 +223,9 @@ func (m *mockMediaRepo) GetAsset(ctx context.Context, assetID string) (*domain.M
 func (m *mockMediaRepo) ListAssets(ctx context.Context, kind domain.MediaKind) ([]*domain.MediaAsset, error) {
 	return nil, nil
 }
+func (m *mockMediaRepo) DeleteAsset(ctx context.Context, assetID string) error {
+	return nil
+}
 func (m *mockMediaRepo) DeleteExpired(ctx context.Context, maxAgeDays int) (int, error) {
 	return 0, nil
 }

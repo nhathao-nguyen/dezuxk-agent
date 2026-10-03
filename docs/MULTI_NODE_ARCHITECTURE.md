@@ -1,142 +1,135 @@
 # Kiến trúc Đa Node & Cụm Phân tán (Multi-Node Architecture)
 
-Tài liệu này xác định mô hình kiến trúc phân tán (Multi-Node Gateway Cluster) cho Dezuxk AI Gateway, lộ trình chuẩn hóa interface (Hexagonal Ports), mô hình nhất quán dữ liệu (Consistency & Fencing Model), và cơ chế phòng vệ chống split-brain.
+Tài liệu này xác định mô hình kiến trúc phân tán (Multi-Node Gateway Cluster) chính thức cho Dezuxk AI Gateway, chuẩn hóa interface (Hexagonal Architecture Ports), mô hình nhất quán dữ liệu (PostgreSQL Source-of-Truth & Fencing Token), và cơ chế điều phối phân tán qua Redis.
 
 ---
 
-## 1. Hiện trạng Hệ thống (Current Status)
+## 1. Hiện trạng Hệ thống (Production Status)
 
 | Thành phần (Component) | Trạng thái hiện tại | Công nghệ vận hành | Ghi chú độ tin cậy |
 | :--- | :--- | :--- | :--- |
-| **Node Mode** | **Single-Node READY** | Headless Daemon | Độc lập, không phụ thuộc cụm ngoài |
-| **Persistence Storage** | **Production Ready** | SQLite WAL (fsync/atomic) | Bền vững trên đĩa, AES-256 Vault |
-| **Rate Limiter** | **Single-Node Ready** | Token Bucket + In-Flight Mutex | Giới hạn IP, Tenant, Key, Model |
-| **Agent Fencing** | **Single-Node Ready** | Lease generation + Memory/DB | Fencing tokens đã được chuẩn hóa |
-| **Distributed Redis/Postgres**| **PARTIAL / FAIL-FAST** | Interfaces & Config ready | Cấm fake readiness; startup fail-fast |
-
-> [!IMPORTANT]
-> **Nguyên tắc Truthful Readiness**:
-> Hệ thống tuyệt đối không dùng local in-memory map để giả lập môi trường phân tán. Khi cấu hình `storage.driver=postgres` hoặc `distributed.enabled=true`, daemon kiểm tra sự sẵn sàng thực tế và **báo lỗi dừng khởi động ngay lập tức (fail-fast)** vì các adapter kết nối driver Redis/Postgres chưa được kết nối trọn vẹn trong Phase 2.
+| **Single-Node Mode** | **Production Ready** | SQLite WAL (fsync/atomic) + In-Memory Coordination | Bảo toàn 100% tương thích ngược, zero dependency |
+| **Multi-Node Cluster** | **Production Ready** | PostgreSQL + Redis + S3/MinIO + Nginx/HAProxy | Đã vượt qua 10/10 Acceptance Tests đa node |
+| **Persistence Storage** | **PostgreSQL (pgxpool)** | PostgreSQL 15/16 + Connection Pool + Advisory Locks | Nguồn chân lý duy nhất cho Leases, Runs, Checkpoints |
+| **Rate Limiter** | **Redis Shared Limiter** | Redis + Lua Script Token Bucket & Concurrency | Giới hạn dùng chung toàn cụm, chống overshoot |
+| **Agent Fencing** | **Monotonic Generation** | `claim_generation` + DB time `NOW()` | Ngăn ngừa zombie worker, split-brain và replay side-effects |
+| **Cross-Node SSE** | **Redis Pub/Sub EventBus** | Durable PostgreSQL Event Log + Live Fan-Out | SSE client kết nối tới Node B vẫn nhận đủ event từ Node A |
+| **Singleton Jobs** | **Distributed Leader** | Redis Locker (Token + Lua release) + Auto Failover | Golden Job, KeepAlive chỉ chạy duy nhất trên 1 Leader |
+| **Shared Media** | **S3 / MinIO Storage** | S3 API + PostgreSQL Metadata + NetGuard SSRF | Lưu trữ nhị phân phân tán, cách ly tenant nghiêm ngặt |
 
 ---
 
-## 2. Mô hình Kiến trúc Mục tiêu (Target Distributed Architecture)
+## 2. Mô hình Kiến trúc Mục tiêu (Target Architecture)
 
-```mermaid
-flowchart TD
-    subgraph ClientLayer["Lớp Client & SDK"]
-        LB["Cloud Load Balancer (HAProxy / NGINX / AWS ALB)"]
-    end
-
-    subgraph GatewayCluster["Cụm Dezuxk Gateway Nodes (Multi-Instance)"]
-        Node1["Gateway Node 1<br/>(Stateless Worker)"]
-        Node2["Gateway Node 2<br/>(Stateless Worker)"]
-        NodeN["Gateway Node N<br/>(Stateless Worker)"]
-    end
-
-    subgraph DistributedState["Lớp Trạng thái Phân tán (Durable Distributed Tier)"]
-        PG[("PostgreSQL Cluster<br/>- Sessions & Key Vault<br/>- Agent Runs & Events<br/>- Checkpoints & Memories")]
-        Redis[("Redis Cluster / Sentinel<br/>- Shared Rate Limiter (Lua)<br/>- Distributed Locker (Redlock)<br/>- Lease Manager<br/>- Pub/Sub EventBus")]
-    end
-
-    LB --> Node1
-    LB --> Node2
-    LB --> NodeN
-
-    Node1 --> PG
-    Node1 --> Redis
-    Node2 --> PG
-    Node2 --> Redis
-    NodeN --> PG
-    NodeN --> Redis
+```
+                       Load Balancer (NGINX / HAProxy / AWS ALB)
+                                          │
+                 ┌────────────────────────┼────────────────────────┐
+                 ↓                        ↓                        ↓
+          Gateway Node A           Gateway Node B           Gateway Node C
+                 │                        │                        │
+                 └────────────────────────┼────────────────────────┘
+                                          │
+                   ┌──────────────────────┴──────────────────────┐
+                   ↓                                             ↓
+         PostgreSQL (Pool)                              Redis (Cluster/Standalone)
+  ├─ sessions (AES-256 Vault)                    ├─ shared rate limiter (Lua)
+  ├─ virtual API keys                            ├─ cross-node SSE event bus
+  ├─ agent runs (Fencing tokens)                 ├─ cross-node cancel signaling
+  ├─ checkpoints (Deterministic)                 ├─ singleton leader locks (Lua)
+  ├─ tool execution ledger (Fenced)              └─ shared coordination state
+  └─ media metadata (Tenant-isolated)
+                   │
+                   ↓
+         S3 / MinIO Object Storage
+  └─ binary assets & files (private bucket, tenant prefix)
 ```
 
 ---
 
-## 3. Chuẩn hóa Hệ thống Cổng (Standardized Ports & Interfaces)
+## 3. Nguyên tắc Thiết kế Bất biến (Core Principles)
 
-Các giao diện phân tán được chuẩn hóa hoàn toàn tại gói [`internal/core/ports`](file:///d:/nhathao/Vibe/dezuxk-agent/internal/core/ports):
+### 3.1. PostgreSQL là Source-of-Truth duy nhất cho AgentRun Ownership
+- **Quyền lực sở hữu**: `worker_id`, `claim_generation`, `lease_until`, `heartbeat_at`, `status` được lưu trữ và kiểm soát độc quyền tại PostgreSQL.
+- **Không phân mảnh thẩm quyền**: Tuyệt đối không dùng Redis để quyết định quyền sở hữu tác vụ Agent. Redis chỉ phục vụ thông báo đánh thức (wakeup), fan-out SSE, và hủy tác vụ.
+- **Khử trôi lệch đồng hồ (Clock Skew Defense)**: Câu lệnh `ClaimRun` và `RenewLease` sử dụng thời gian của cơ sở dữ liệu `NOW()` thay vì `time.Now()` cục bộ trên các máy chủ Gateway.
 
-### 3.1. `DistributedLocker` ([distributed.go](file:///d:/nhathao/Vibe/dezuxk-agent/internal/core/ports/distributed.go))
-```go
-type DistributedLocker interface {
-    AcquireLock(ctx context.Context, key string, ttl time.Duration) (release func() error, acquired bool, err error)
-}
-```
-- **Triển khai đơn node**: `sync.Mutex` / in-memory key mutex.
-- **Triển khai đa node**: Redis SET with NX + PX hoặc Redlock thuật toán phân tán có TTL tự hủy an toàn.
+### 3.2. Fencing Token đơn điệu tăng (Monotonic Fencing)
+- Mỗi lần chuyển giao quyền sở hữu (Claim hoặc Recover), `claim_generation` được tăng nguyên tử:
+  ```sql
+  UPDATE agent_runs
+  SET status = 'running',
+      worker_id = $2,
+      claim_generation = claim_generation + 1,
+      lease_until = NOW() + make_interval(secs => $3::float8),
+      heartbeat_at = NOW(),
+      updated_at = NOW()
+  WHERE id = $1 AND (
+      status = 'queued' 
+      OR (status IN ('running', 'recovering', 'waiting_for_tool') AND (lease_until IS NULL OR lease_until <= NOW()))
+  )
+  RETURNING claim_generation;
+  ```
+- Mọi thao tác ghi từ worker (`UpdateOwned`, `AppendOwnedEvent`, `RecordFinishedOwned`) bắt buộc phải chứa `worker_id` và `claim_generation`:
+  ```sql
+  UPDATE agent_runs SET ...
+  WHERE id = $1 AND worker_id = $2 AND claim_generation = $3 AND status != 'cancelled';
+  ```
+- Nếu `RowsAffected == 0`, tiến trình worker lập tức nhận diện trạng thái mất quyền sở hữu (Zombie Worker), hủy bỏ context cục bộ và dừng ngay việc gọi công cụ.
 
-### 3.2. `SharedRateLimiter` ([ratelimit.go](file:///d:/nhathao/Vibe/dezuxk-agent/internal/core/ports/ratelimit.go))
-```go
-type SharedRateLimiter interface {
-    RateLimiter
-}
-```
-- **Triển khai đơn node**: `LocalRateLimiter` (sliding token bucket per visitor).
-- **Triển khai đa node**: Redis Sliding Window Rate Limiter chạy qua Lua Script nguyên tử, chia sẻ hạn mức RPM/TPM trên toàn cụm.
+### 3.3. Bảo vệ Side-Effects & Fenced Tool Execution Ledger
+- Tránh trùng lặp thực thi công cụ bên ngoài (webhooks, email, file writes, git operations):
+  - Trước khi gọi tool: `RecordPlannedOrRunning` kiểm tra xem worker hiện tại còn giữ quyền sở hữu run hợp lệ hay không.
+  - Sau khi gọi tool: `RecordFinishedOwned` chỉ cho phép ghi nhận kết quả khi `worker_id` và `claim_generation` khớp với thời điểm đăng ký.
 
-### 3.3. `LeaseManager` & Fencing Tokens ([distributed.go](file:///d:/nhathao/Vibe/dezuxk-agent/internal/core/ports/distributed.go))
-```go
-type LeaseManager interface {
-    AcquireLease(ctx context.Context, resourceID, workerID string, ttl time.Duration) (generation int64, acquired bool, err error)
-    RenewLease(ctx context.Context, resourceID, workerID string, generation int64, ttl time.Duration) (renewed bool, err error)
-    ReleaseLease(ctx context.Context, resourceID, workerID string, generation int64) error
-}
-```
-- Cung cấp `generation int64` đơn điệu tăng (Monotonically Increasing Fencing Token).
-
-### 3.4. `EventBus` ([distributed.go](file:///d:/nhathao/Vibe/dezuxk-agent/internal/core/ports/distributed.go))
-```go
-type EventBus interface {
-    Publish(ctx context.Context, topic string, payload []byte) error
-    Subscribe(ctx context.Context, topic string) (events <-chan []byte, unsubscribe func(), err error)
-}
-```
-- Cho phép truyền phát sự kiện Agent Run Events (thought, tool_call, tool_result, message) theo thời gian thực tới tất cả các node đang giữ kết nối SSE với client.
-
----
-
-## 4. Mô hình Nhất quán & Phòng vệ Split-Brain (Consistency & Fencing Model)
-
-### 4.1. Vấn đề "Zombie Worker" khi Node bị GC Pause hoặc Network Partition
-Nếu Node 1 đang thực thi Agent Run nhưng bị nghẽn mạng (Network Partition), Lease hết hạn và Node 2 nhận quyền thực thi. Khi Node 1 tỉnh lại, nếu Node 1 tiếp tục ghi dữ liệu vào cơ sở dữ liệu thì sẽ gây corrupt dữ liệu.
-
-### 4.2. Giải pháp: Fencing Token (`claim_generation`)
-1. Mỗi khi tác vụ được gán cho một worker qua `ClaimRun`, thế hệ sở hữu (`claim_generation`) được tăng thêm 1:
-   ```sql
-   UPDATE agent_runs 
-   SET worker_id = :worker_id, 
-       claim_generation = claim_generation + 1, 
-       lease_expire_at = :lease_expire_at
-   WHERE id = :run_id AND (worker_id IS NULL OR lease_expire_at < :now);
-   ```
-2. Mọi truy vấn ghi trạng thái hoặc chèn sự kiện (`UpdateOwned`, `AppendOwnedEvent`) bắt buộc phải kiểm tra điều kiện thế hệ:
-   ```sql
-   UPDATE agent_runs
-   SET status = :status, output = :output, updated_at = :now
-   WHERE id = :run_id 
-     AND worker_id = :worker_id 
-     AND claim_generation = :claim_generation;
-   ```
-3. Nếu Node 1 cố gắng ghi với generation cũ, câu lệnh SQL trả về `rows_affected == 0`, hệ thống phát hiện mất quyền sở hữu và lập tức hủy bỏ luồng thực thi (Fail-fast termination).
+### 3.4. Idempotency cấp Cơ sở Dữ liệu
+- Ràng buộc duy nhất từng phần (Partial Unique Index):
+  ```sql
+  CREATE UNIQUE INDEX idx_agent_runs_tenant_idempotency
+  ON agent_runs (tenant_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL AND idempotency_key != '';
+  ```
+- Khi nhiều node nhận cùng một yêu cầu gửi tác vụ đồng thời, cơ sở dữ liệu đóng vai trò trọng tài tối cao. Node thua cuộc sẽ nhận diện conflict và trả về bản ghi AgentRun đã được tạo bởi node thắng cuộc.
 
 ---
 
-## 5. Phục hồi Sự cố Tự động (Failure Recovery & Crash Resilience)
+## 4. Tầng Điều phối Phân tán Redis (Redis Coordination)
 
-1. **Worker Crash Detection**: Mỗi node định kỳ gia hạn lease cho các tác vụ đang chạy (`RenewLease`). Nếu node gặp lỗi phần cứng hoặc sập tiến trình, sau khi TTL hết hạn, các node khác sẽ nhận diện tác vụ mồ côi (`ScanRecoverableRuns`).
-2. **Safe Resume**: Node mới phục hồi tác vụ từ bản lưu Snapshot mới nhất trong `CheckpointRepository`.
-3. **Idempotent Tool Execution**: `ToolExecutionLedger` ghi nhận trạng thái tool call trước và sau khi gọi để tránh chạy lại các tác vụ có side-effect bên ngoài (ví dụ gửi email, gọi webhook).
+### 4.1. Distributed Locker An toàn
+- Khóa phân tán lưu trữ một mã ngẫu nhiên bảo mật (Cryptographic Ownership Token) làm giá trị:
+  ```go
+  token := hex.EncodeToString(randomBytes(16))
+  ```
+- **Giải phóng khóa**: Sử dụng Lua script nguyên tử kiểm tra token để tránh một tiến trình xóa nhầm khóa của tiến trình khác khi khóa đã hết hạn:
+  ```lua
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+      return redis.call("del", KEYS[1])
+  else
+      return 0
+  end
+  ```
+- **Gia hạn khóa (Heartbeat Renewal)**: Thực hiện qua Lua script nguyên tử `luaRenewLock`.
+
+### 4.2. Shared Rate Limiter
+- Sử dụng thuật toán Sliding Window Token Bucket và Concurrency Limiting được cài đặt bằng Lua script trong Redis.
+- Giới hạn phân tán chính xác theo:
+  - Global RPM
+  - Tenant RPM
+  - API Key RPM
+  - Pre-auth IP Limit
+  - Concurrent In-Flight Agent Runs
+
+### 4.3. Cross-Node SSE & Real-time Cancel
+- **Truyền phát SSE**: Node thực thi (Node A) ghi event vào PostgreSQL (durable history) và phát qua Redis Pub/Sub topic `agent:events:<runID>`. Node giữ kết nối SSE của client (Node B) lắng nghe topic và chuyển tiếp event tới client mà không cần sticky session.
+- **Hủy tác vụ**: Khi client gửi yêu cầu cancel tới Node B, Node B cập nhật DB thành `cancelled` và phát tín hiệu tới `agent:cancel:<runID>`. Worker trên Node A nhận tín hiệu và dừng thực thi ngay lập tức.
 
 ---
 
-## 6. Lộ trình Triển khai Adapter Thật (Phase 3 Integration Roadmap)
+## 5. Singleton Leader Jobs
 
-1. Xây dựng `internal/adapters/outbound/storage/postgres`:
-   - Chạy Migration script SQL chuẩn cho PostgreSQL 15+.
-   - Cung cấp Connection Pool (`pgxpool.Pool`) với health check và retry backoff.
-2. Xây dựng `internal/adapters/outbound/distributed/redis`:
-   - Redis Sentinel / Cluster client với tự động failover.
-   - Triển khai Lua script cho `SharedRateLimiter`.
-   - Triển khai Redis Streams / PubSub cho `EventBus`.
-3. Bài kiểm thử tích hợp (Integration Tests) chạy trên Testcontainers Docker độc lập cho Redis và PostgreSQL.
+Các tác vụ nền chỉ được phép chạy duy nhất trên 1 node trong toàn cụm:
+- `gemini-golden-job`: Job kiểm tra sức khỏe và đồng bộ quota upstream.
+- `gemini-keepalive`: Giữ ấm phiên làm việc của Google account.
+- `cleanup-jobs`: Dọn dẹp tài nguyên hết hạn.
+
+Bộ điều phối `leader.Coordinator` tự động tham gia bầu cử qua Redis Locker. Khi Node Leader gặp sự cố hoặc tắt, các Node còn lại sẽ tự động phát hiện hết hạn TTL và tiếp quản vai trò Leader trong vòng 1-2 giây.

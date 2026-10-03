@@ -1,8 +1,11 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +28,7 @@ type Config struct {
 	Failover     FailoverConfig               `yaml:"failover"`
 	Storage      StorageConfig                `yaml:"storage"`
 	Distributed  DistributedConfig            `yaml:"distributed"`
+	Cluster      ClusterConfig                `yaml:"cluster"`
 	GoldenJob    GoldenJobConfig              `yaml:"golden_job"`
 	KeepAlive    KeepAliveConfig              `yaml:"keep_alive"`
 	Security     SecurityConfig               `yaml:"security"`
@@ -139,10 +143,29 @@ type ProfilesConfig struct {
 }
 
 type MediaConfig struct {
-	StorageDir    string `yaml:"storage_dir"`
-	BaseURL       string `yaml:"base_url"`
-	MaxDiskGB     int    `yaml:"max_disk_gb"`
-	RetentionDays int    `yaml:"retention_days"`
+	Driver        string        `yaml:"driver"` // "local" | "s3"
+	StorageDir    string        `yaml:"storage_dir"`
+	BaseURL       string        `yaml:"base_url"`
+	MaxDiskGB     int           `yaml:"max_disk_gb"`
+	RetentionDays int           `yaml:"retention_days"`
+	S3            S3MediaConfig `yaml:"s3"`
+}
+
+func (m MediaConfig) GetDriver() string {
+	d := strings.ToLower(strings.TrimSpace(m.Driver))
+	if d == "" {
+		return "local"
+	}
+	return d
+}
+
+type S3MediaConfig struct {
+	Endpoint     string `yaml:"endpoint"`
+	Region       string `yaml:"region"`
+	Bucket       string `yaml:"bucket"`
+	AccessKey    string `yaml:"access_key"`
+	SecretKey    string `yaml:"secret_key"`
+	UsePathStyle bool   `yaml:"use_path_style"`
 }
 
 type VisionConfig struct {
@@ -250,6 +273,28 @@ func (f FailoverConfig) GetCoolingDuration() time.Duration {
 	return 60 * time.Second
 }
 
+type ClusterConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	NodeID  string `yaml:"node_id"`
+}
+
+func (c ClusterConfig) IsEnabled() bool {
+	return c.Enabled
+}
+
+func (c ClusterConfig) GetNodeID() string {
+	if strings.TrimSpace(c.NodeID) != "" {
+		return strings.TrimSpace(c.NodeID)
+	}
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		hostname = "node"
+	}
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%s-%s", hostname, hex.EncodeToString(b))
+}
+
 type StorageConfig struct {
 	Driver              string         `yaml:"driver"` // "sqlite" (mặc định) | "postgres"
 	DatabasePath        string         `yaml:"database_path"`
@@ -258,12 +303,109 @@ type StorageConfig struct {
 }
 
 type PostgresConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	DBName   string `yaml:"dbname"`
-	SSLMode  string `yaml:"sslmode"`
+	DSN               string        `yaml:"dsn"`
+	Host              string        `yaml:"host"`
+	Port              int           `yaml:"port"`
+	User              string        `yaml:"user"`
+	Password          string        `yaml:"password"`
+	DBName            string        `yaml:"dbname"`
+	SSLMode           string        `yaml:"sslmode"`
+	MaxConns          int32         `yaml:"max_conns"`
+	MinConns          int32         `yaml:"min_conns"`
+	MaxConnLifetime   time.Duration `yaml:"max_conn_lifetime"`
+	MaxConnIdleTime   time.Duration `yaml:"max_conn_idle_time"`
+	HealthCheckPeriod time.Duration `yaml:"health_check_period"`
+	ConnectTimeout    time.Duration `yaml:"connect_timeout"`
+	StatementTimeout  time.Duration `yaml:"statement_timeout"`
+}
+
+func (p PostgresConfig) GetPort() int {
+	if p.Port > 0 {
+		return p.Port
+	}
+	return 5432
+}
+
+func (p PostgresConfig) GetSSLMode() string {
+	if p.SSLMode != "" {
+		return strings.TrimSpace(p.SSLMode)
+	}
+	return "disable"
+}
+
+func (p PostgresConfig) GetMaxConns() int32 {
+	if p.MaxConns > 0 {
+		return p.MaxConns
+	}
+	return 25
+}
+
+func (p PostgresConfig) GetMinConns() int32 {
+	if p.MinConns > 0 {
+		return p.MinConns
+	}
+	return 5
+}
+
+func (p PostgresConfig) GetMaxConnLifetime() time.Duration {
+	if p.MaxConnLifetime > 0 {
+		return p.MaxConnLifetime
+	}
+	return time.Hour
+}
+
+func (p PostgresConfig) GetMaxConnIdleTime() time.Duration {
+	if p.MaxConnIdleTime > 0 {
+		return p.MaxConnIdleTime
+	}
+	return 30 * time.Minute
+}
+
+func (p PostgresConfig) GetHealthCheckPeriod() time.Duration {
+	if p.HealthCheckPeriod > 0 {
+		return p.HealthCheckPeriod
+	}
+	return time.Minute
+}
+
+func (p PostgresConfig) GetConnectTimeout() time.Duration {
+	if p.ConnectTimeout > 0 {
+		return p.ConnectTimeout
+	}
+	return 5 * time.Second
+}
+
+func (p PostgresConfig) BuildDSN() string {
+	if strings.TrimSpace(p.DSN) != "" {
+		return strings.TrimSpace(p.DSN)
+	}
+	u := &url.URL{
+		Scheme: "postgres",
+		Host:   fmt.Sprintf("%s:%d", p.Host, p.GetPort()),
+		Path:   "/" + strings.TrimPrefix(p.DBName, "/"),
+	}
+	if p.User != "" || p.Password != "" {
+		u.User = url.UserPassword(p.User, p.Password)
+	}
+	q := u.Query()
+	q.Set("sslmode", p.GetSSLMode())
+	if p.ConnectTimeout > 0 {
+		q.Set("connect_timeout", strconv.Itoa(int(p.ConnectTimeout.Seconds())))
+	}
+	if p.StatementTimeout > 0 {
+		q.Set("statement_timeout", strconv.Itoa(int(p.StatementTimeout.Milliseconds())))
+	}
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func (p PostgresConfig) SanitizedDSN() string {
+	raw := p.BuildDSN()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "postgres://[sanitized]"
+	}
+	return parsed.Redacted()
 }
 
 type DistributedConfig struct {
@@ -273,9 +415,71 @@ type DistributedConfig struct {
 }
 
 type RedisConfig struct {
-	Addr     string `yaml:"addr"`
-	Password string `yaml:"password"`
-	DB       int    `yaml:"db"`
+	Mode         string        `yaml:"mode"` // "standalone", "sentinel", "cluster"
+	Addr         string        `yaml:"addr"`
+	Addrs        []string      `yaml:"addrs"`
+	MasterName   string        `yaml:"master_name"`
+	Username     string        `yaml:"username"`
+	Password     string        `yaml:"password"`
+	DB           int           `yaml:"db"`
+	PoolSize     int           `yaml:"pool_size"`
+	MinIdleConns int           `yaml:"min_idle_conns"`
+	DialTimeout  time.Duration `yaml:"dial_timeout"`
+	ReadTimeout  time.Duration `yaml:"read_timeout"`
+	WriteTimeout time.Duration `yaml:"write_timeout"`
+}
+
+func (r RedisConfig) GetMode() string {
+	m := strings.ToLower(strings.TrimSpace(r.Mode))
+	if m == "" {
+		return "standalone"
+	}
+	return m
+}
+
+func (r RedisConfig) GetAddrs() []string {
+	if len(r.Addrs) > 0 {
+		return r.Addrs
+	}
+	if strings.TrimSpace(r.Addr) != "" {
+		return []string{strings.TrimSpace(r.Addr)}
+	}
+	return nil
+}
+
+func (r RedisConfig) GetPoolSize() int {
+	if r.PoolSize > 0 {
+		return r.PoolSize
+	}
+	return 50
+}
+
+func (r RedisConfig) GetMinIdleConns() int {
+	if r.MinIdleConns > 0 {
+		return r.MinIdleConns
+	}
+	return 10
+}
+
+func (r RedisConfig) GetDialTimeout() time.Duration {
+	if r.DialTimeout > 0 {
+		return r.DialTimeout
+	}
+	return 5 * time.Second
+}
+
+func (r RedisConfig) GetReadTimeout() time.Duration {
+	if r.ReadTimeout > 0 {
+		return r.ReadTimeout
+	}
+	return 3 * time.Second
+}
+
+func (r RedisConfig) GetWriteTimeout() time.Duration {
+	if r.WriteTimeout > 0 {
+		return r.WriteTimeout
+	}
+	return 3 * time.Second
 }
 
 type GoldenJobConfig struct {
@@ -511,12 +715,102 @@ func applyEnvOverrides(cfg *Config) {
 	if sd := os.Getenv("DEZUXK_STORAGE_DRIVER"); sd != "" {
 		cfg.Storage.Driver = sd
 	}
+	if pgDSN := os.Getenv("DEZUXK_POSTGRES_DSN"); pgDSN != "" {
+		cfg.Storage.Postgres.DSN = pgDSN
+	}
+	if pgHost := os.Getenv("DEZUXK_POSTGRES_HOST"); pgHost != "" {
+		cfg.Storage.Postgres.Host = pgHost
+	}
+	if pgPortStr := os.Getenv("DEZUXK_POSTGRES_PORT"); pgPortStr != "" {
+		if p, err := strconv.Atoi(pgPortStr); err == nil && p > 0 {
+			cfg.Storage.Postgres.Port = p
+		}
+	}
+	if pgUser := os.Getenv("DEZUXK_POSTGRES_USER"); pgUser != "" {
+		cfg.Storage.Postgres.User = pgUser
+	}
+	if pgPass := os.Getenv("DEZUXK_POSTGRES_PASSWORD"); pgPass != "" {
+		cfg.Storage.Postgres.Password = pgPass
+	}
+	if pgDB := os.Getenv("DEZUXK_POSTGRES_DBNAME"); pgDB != "" {
+		cfg.Storage.Postgres.DBName = pgDB
+	}
+	if pgSSL := os.Getenv("DEZUXK_POSTGRES_SSLMODE"); pgSSL != "" {
+		cfg.Storage.Postgres.SSLMode = pgSSL
+	}
+	if pgMaxConnsStr := os.Getenv("DEZUXK_POSTGRES_MAX_CONNS"); pgMaxConnsStr != "" {
+		if mc, err := strconv.Atoi(pgMaxConnsStr); err == nil && mc > 0 {
+			cfg.Storage.Postgres.MaxConns = int32(mc)
+		}
+	}
+	if pgMinConnsStr := os.Getenv("DEZUXK_POSTGRES_MIN_CONNS"); pgMinConnsStr != "" {
+		if mc, err := strconv.Atoi(pgMinConnsStr); err == nil && mc >= 0 {
+			cfg.Storage.Postgres.MinConns = int32(mc)
+		}
+	}
+
 	if de := os.Getenv("DEZUXK_DISTRIBUTED_ENABLED"); de != "" {
 		cfg.Distributed.Enabled = (de == "true" || de == "1")
 	}
 	if ra := os.Getenv("DEZUXK_REDIS_ADDR"); ra != "" {
 		cfg.Distributed.Redis.Addr = ra
 	}
+	if ras := os.Getenv("DEZUXK_REDIS_ADDRS"); ras != "" {
+		parts := strings.Split(ras, ",")
+		var addrs []string
+		for _, p := range parts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				addrs = append(addrs, trimmed)
+			}
+		}
+		if len(addrs) > 0 {
+			cfg.Distributed.Redis.Addrs = addrs
+		}
+	}
+	if rp := os.Getenv("DEZUXK_REDIS_PASSWORD"); rp != "" {
+		cfg.Distributed.Redis.Password = rp
+	}
+	if rdbStr := os.Getenv("DEZUXK_REDIS_DB"); rdbStr != "" {
+		if rdb, err := strconv.Atoi(rdbStr); err == nil && rdb >= 0 {
+			cfg.Distributed.Redis.DB = rdb
+		}
+	}
+	if rm := os.Getenv("DEZUXK_REDIS_MODE"); rm != "" {
+		cfg.Distributed.Redis.Mode = rm
+	}
+	if rmn := os.Getenv("DEZUXK_REDIS_MASTER_NAME"); rmn != "" {
+		cfg.Distributed.Redis.MasterName = rmn
+	}
+
+	if ce := os.Getenv("DEZUXK_CLUSTER_ENABLED"); ce != "" {
+		cfg.Cluster.Enabled = (ce == "true" || ce == "1")
+	}
+	if cn := os.Getenv("DEZUXK_CLUSTER_NODE_ID"); cn != "" {
+		cfg.Cluster.NodeID = cn
+	}
+
+	if md := os.Getenv("DEZUXK_MEDIA_DRIVER"); md != "" {
+		cfg.Media.Driver = md
+	}
+	if s3ep := os.Getenv("DEZUXK_S3_ENDPOINT"); s3ep != "" {
+		cfg.Media.S3.Endpoint = s3ep
+	}
+	if s3reg := os.Getenv("DEZUXK_S3_REGION"); s3reg != "" {
+		cfg.Media.S3.Region = s3reg
+	}
+	if s3bkt := os.Getenv("DEZUXK_S3_BUCKET"); s3bkt != "" {
+		cfg.Media.S3.Bucket = s3bkt
+	}
+	if s3ak := os.Getenv("DEZUXK_S3_ACCESS_KEY"); s3ak != "" {
+		cfg.Media.S3.AccessKey = s3ak
+	}
+	if s3sk := os.Getenv("DEZUXK_S3_SECRET_KEY"); s3sk != "" {
+		cfg.Media.S3.SecretKey = s3sk
+	}
+	if s3ps := os.Getenv("DEZUXK_S3_USE_PATH_STYLE"); s3ps != "" {
+		cfg.Media.S3.UsePathStyle = (s3ps == "true" || s3ps == "1")
+	}
+
 	if u := os.Getenv("DEZUXK_ADMIN_USERNAME"); u != "" {
 		cfg.Admin.Username = u
 	}
@@ -552,13 +846,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("storage.driver không được hỗ trợ: %q (chỉ hỗ trợ 'sqlite' hoặc 'postgres')", c.Storage.Driver)
 	}
 	if storageDriver == "postgres" {
-		if strings.TrimSpace(c.Storage.Postgres.Host) == "" || strings.TrimSpace(c.Storage.Postgres.DBName) == "" {
-			return errors.New("storage.postgres.host và storage.postgres.dbname là bắt buộc khi chọn driver 'postgres'")
+		hasDSN := strings.TrimSpace(c.Storage.Postgres.DSN) != ""
+		hasHostDB := strings.TrimSpace(c.Storage.Postgres.Host) != "" && strings.TrimSpace(c.Storage.Postgres.DBName) != ""
+		if !hasDSN && !hasHostDB {
+			return errors.New("storage.postgres.host và storage.postgres.dbname (hoặc storage.postgres.dsn) là bắt buộc khi chọn driver 'postgres'")
 		}
 	}
 
 	// Kiểm tra multi-node cluster config (fail-fast: không giả vờ multi-node ready nếu cấu hình chưa đủ)
-	if c.Distributed.Enabled {
+	if c.Distributed.Enabled || c.Cluster.Enabled {
 		distDriver := strings.ToLower(strings.TrimSpace(c.Distributed.Driver))
 		if distDriver == "" {
 			distDriver = "redis"
@@ -566,12 +862,35 @@ func (c *Config) Validate() error {
 		if distDriver != "redis" {
 			return fmt.Errorf("distributed.driver không được hỗ trợ: %q (chỉ hỗ trợ 'redis')", c.Distributed.Driver)
 		}
-		if strings.TrimSpace(c.Distributed.Redis.Addr) == "" {
+		addrs := c.Distributed.Redis.GetAddrs()
+		if len(addrs) == 0 || addrs[0] == "" {
 			return errors.New("distributed.redis.addr là bắt buộc khi kích hoạt chế độ cụm phân tán (distributed.enabled: true)")
 		}
 	}
 
+	if c.Cluster.Enabled {
+		if storageDriver != "postgres" {
+			return errors.New("chế độ cụm phân tán cluster.enabled yêu cầu storage.driver='postgres' (PostgreSQL là source-of-truth cho agent leases)")
+		}
+		if !c.Distributed.Enabled {
+			return errors.New("chế độ cụm phân tán cluster.enabled yêu cầu distributed.enabled=true")
+		}
+	}
+
+	mediaDriver := c.Media.GetDriver()
+	if mediaDriver != "local" && mediaDriver != "s3" {
+		return fmt.Errorf("media.driver không được hỗ trợ: %q (chỉ hỗ trợ 'local' hoặc 's3')", c.Media.Driver)
+	}
+	if mediaDriver == "s3" {
+		if strings.TrimSpace(c.Media.S3.Bucket) == "" {
+			return errors.New("media.s3.bucket là bắt buộc khi chọn media driver 's3'")
+		}
+	}
+
 	if c.IsProduction() {
+		if (c.Cluster.Enabled || storageDriver == "postgres") && mediaDriver == "local" && c.Cluster.Enabled {
+			return errors.New("cụm cluster multi-node production không được dùng media driver 'local' (yêu cầu shared media storage: media.driver='s3')")
+		}
 		if strings.TrimSpace(c.Server.APIKey) == "" {
 			return errors.New("server.api_key bắt buộc phải được cấu hình trong môi trường production")
 		}

@@ -71,6 +71,7 @@ type RouterDependencies struct {
 	AgentJobService    ports.AgentJobService
 	AgentRunRepo       ports.AgentRunRepository
 	ReadinessManager   *ReadinessManager
+	ClusterClient      ports.DistributedClusterClient
 }
 
 func BuildRouter(deps RouterDependencies) http.Handler {
@@ -277,6 +278,31 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		} else {
 			checks["accounts"] = "session repository not initialized"
 			isReady = false
+		}
+		// Kiểm tra kết nối Redis trong môi trường phân tán nếu có
+		if deps.ClusterClient != nil {
+			pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
+			if err := deps.ClusterClient.Ping(pingCtx); err != nil {
+				checks["redis"] = fmt.Sprintf("redis ping error: %v", err)
+				isReady = false
+			} else {
+				checks["redis"] = "ok"
+			}
+			pingCancel()
+		}
+
+		// Kiểm tra kết nối S3/MinIO Shared Media nếu có
+		if deps.MediaStorage != nil {
+			if pinger, ok := deps.MediaStorage.(interface{ Ping(context.Context) error }); ok {
+				pingCtx, pingCancel := context.WithTimeout(r.Context(), 1*time.Second)
+				if err := pinger.Ping(pingCtx); err != nil {
+					checks["media_storage"] = fmt.Sprintf("media ping error: %v", err)
+					isReady = false
+				} else {
+					checks["media_storage"] = "ok"
+				}
+				pingCancel()
+			}
 		}
 
 		status := http.StatusOK

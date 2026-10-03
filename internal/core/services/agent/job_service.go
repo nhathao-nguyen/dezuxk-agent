@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -30,6 +31,7 @@ type JobService struct {
 	runner         ports.AgentRunner
 	checkpointRepo ports.CheckpointRepository
 	workerID       string
+	eventBus       ports.EventBus
 
 	mu          sync.RWMutex
 	accepting   bool
@@ -67,6 +69,22 @@ func NewJobService(repo ports.AgentRunRepository, runner ports.AgentRunner) *Job
 		}
 	}
 	return js
+}
+
+// SetEventBus cấu hình EventBus phân tán (Redis Pub/Sub) phục vụ cross-node SSE và cancel fan-out
+func (s *JobService) SetEventBus(eb ports.EventBus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.eventBus = eb
+}
+
+// SetWorkerID cấu hình Worker ID ổn định hoặc gắn liền với định danh node
+func (s *JobService) SetWorkerID(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id != "" {
+		s.workerID = id
+	}
 }
 
 // SetCheckpointRepository cấu hình checkpoint repository phục vụ phục hồi và resume
@@ -716,6 +734,29 @@ func (s *JobService) executeBackground(ctx context.Context, run *domain.AgentRun
 	execCtx, cancelExec := context.WithCancel(ctx)
 	defer cancelExec()
 
+	// Lắng nghe tín hiệu cross-node cancel qua EventBus nếu có
+	s.mu.RLock()
+	eb := s.eventBus
+	s.mu.RUnlock()
+	if eb != nil {
+		cancelTopic := fmt.Sprintf("agent:cancel:%s", run.ID)
+		cancelCh, unsubCancel, err := eb.Subscribe(execCtx, cancelTopic)
+		if err == nil {
+			defer unsubCancel()
+			go func() {
+				select {
+				case <-execCtx.Done():
+					return
+				case _, ok := <-cancelCh:
+					if ok {
+						log.Printf("[JobService] executeBackground: nhận được tín hiệu cross-node cancel cho run %s, dừng worker", run.ID)
+						cancelExec()
+					}
+				}
+			}()
+		}
+	}
+
 	heartbeatStop := make(chan struct{})
 	defer close(heartbeatStop)
 
@@ -845,10 +886,17 @@ func (s *JobService) CancelRun(ctx context.Context, runID string) error {
 
 	s.mu.RLock()
 	cancel, ok := s.cancels[runID]
+	eb := s.eventBus
 	s.mu.RUnlock()
 
 	if ok && cancel != nil {
 		cancel()
+	}
+
+	if eb != nil {
+		topic := fmt.Sprintf("agent:cancel:%s", runID)
+		payload, _ := json.Marshal(map[string]string{"run_id": runID})
+		_ = eb.Publish(ctx, topic, payload)
 	}
 
 	return s.repo.Cancel(ctx, runID)
@@ -862,10 +910,17 @@ func (s *JobService) CancelRunForTenant(ctx context.Context, tenantID, runID str
 
 	s.mu.RLock()
 	cancel, ok := s.cancels[runID]
+	eb := s.eventBus
 	s.mu.RUnlock()
 
 	if ok && cancel != nil {
 		cancel()
+	}
+
+	if eb != nil {
+		topic := fmt.Sprintf("agent:cancel:%s", runID)
+		payload, _ := json.Marshal(map[string]string{"run_id": runID, "tenant_id": tenantID})
+		_ = eb.Publish(ctx, topic, payload)
 	}
 
 	return s.repo.CancelForTenant(ctx, tenantID, runID)
@@ -1066,33 +1121,90 @@ func (s *JobService) registerSubscriber(runID string) (<-chan domain.AgentRunEve
 	s.subscribers[runID] = append(s.subscribers[runID], ch)
 	s.subsMu.Unlock()
 
-	unsubscribe := func() {
-		s.subsMu.Lock()
-		defer s.subsMu.Unlock()
-		subs := s.subscribers[runID]
-		for i, sub := range subs {
-			if sub == ch {
-				s.subscribers[runID] = append(subs[:i], subs[i+1:]...)
-				close(ch)
-				break
+	s.mu.RLock()
+	eb := s.eventBus
+	s.mu.RUnlock()
+
+	var cancelRemote func()
+	if eb != nil {
+		topic := fmt.Sprintf("agent:events:%s", runID)
+		subCtx, subCancel := context.WithCancel(context.Background())
+		remoteCh, unsubRemote, err := eb.Subscribe(subCtx, topic)
+		if err == nil {
+			cancelRemote = func() {
+				subCancel()
+				unsubRemote()
 			}
+			go func() {
+				for {
+					select {
+					case <-subCtx.Done():
+						return
+					case payload, ok := <-remoteCh:
+						if !ok {
+							return
+						}
+						var ev domain.AgentRunEvent
+						if err := json.Unmarshal(payload, &ev); err == nil {
+							select {
+							case ch <- ev:
+							default:
+							}
+						}
+					}
+				}
+			}()
+		} else {
+			subCancel()
 		}
+	}
+
+	var once sync.Once
+	unsubscribe := func() {
+		once.Do(func() {
+			if cancelRemote != nil {
+				cancelRemote()
+			}
+			s.subsMu.Lock()
+			defer s.subsMu.Unlock()
+			subs := s.subscribers[runID]
+			for i, sub := range subs {
+				if sub == ch {
+					s.subscribers[runID] = append(subs[:i], subs[i+1:]...)
+					close(ch)
+					break
+				}
+			}
+		})
 	}
 
 	return ch, unsubscribe, nil
 }
 
 func (s *JobService) broadcastEvent(runID string, event domain.AgentRunEvent) {
-	s.subsMu.RLock()
-	defer s.subsMu.RUnlock()
+	s.mu.RLock()
+	eb := s.eventBus
+	s.mu.RUnlock()
 
-	subs := s.subscribers[runID]
-	for _, ch := range subs {
-		select {
-		case ch <- event:
-		default:
-			// Tránh làm block worker nếu subscriber đọc chậm
+	if eb != nil {
+		// Trong multi-node cluster, xuất bản lên Redis để fan-out toàn cluster
+		data, err := json.Marshal(event)
+		if err == nil {
+			topic := fmt.Sprintf("agent:events:%s", runID)
+			_ = eb.Publish(context.Background(), topic, data)
 		}
+	} else {
+		// Trong single-node mode (không có Redis), gửi trực tiếp vào local channels
+		s.subsMu.RLock()
+		subs := s.subscribers[runID]
+		for _, ch := range subs {
+			select {
+			case ch <- event:
+			default:
+				// Tránh làm block worker nếu subscriber đọc chậm
+			}
+		}
+		s.subsMu.RUnlock()
 	}
 }
 
