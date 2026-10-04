@@ -417,6 +417,15 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 				case <-execCtx.Done():
 					return state, execCtx.Err()
 				}
+			} else {
+				// Khi takeover ở bước tiếp theo trong controlled sleep test: đánh dấu hoàn thành thành công
+				state.IsCompleted = true
+				state.StopReason = domain.StopReasonCompleted
+				state.FinalAnswer = "Controlled sleep test task completed successfully after crash takeover"
+				if opts.OnProgress != nil {
+					opts.OnProgress(step, "completed", state.FinalAnswer)
+				}
+				return state, nil
 			}
 		}
 

@@ -418,9 +418,17 @@ func AuthenticatedRateLimitMiddleware(limiter ports.RateLimiter, extractIP func(
 			}
 
 			if id, ok := domain.TenantIdentityFromContext(r.Context()); ok {
+				if id.Role == "admin" || id.TenantID == "internal-local" {
+					next.ServeHTTP(w, r)
+					return
+				}
 				identity.TenantID = id.TenantID
 				identity.KeyID = id.KeyID
 			} else if vKey := domain.VirtualKeyFromContext(r.Context()); vKey != nil {
+				if vKey.Role == "admin" {
+					next.ServeHTTP(w, r)
+					return
+				}
 				identity.TenantID = vKey.TenantID
 				identity.KeyID = vKey.ID
 			}

@@ -781,15 +781,17 @@ func TestClusterProcess_09_RealNodeCrashAndAgentTakeover(t *testing.T) {
 		reqB.Header.Set("Authorization", "Bearer "+masterAPIKey)
 		respB, err := client.Do(reqB)
 		if err == nil {
-			_ = json.NewDecoder(respB.Body).Decode(&finalRunState)
-			respB.Body.Close()
-
-			if finalRunState.ClaimGeneration > initialClaimGen && (finalRunState.Status == "completed" || finalRunState.Status == "running" || finalRunState.Status == "recovering") {
-				takeoverSucceeded = true
-				if finalRunState.Status == "completed" {
-					break
+			if respB.StatusCode == http.StatusOK {
+				_ = json.NewDecoder(respB.Body).Decode(&finalRunState)
+				if finalRunState.ClaimGeneration > initialClaimGen && (finalRunState.Status == "completed" || finalRunState.Status == "running" || finalRunState.Status == "recovering") {
+					takeoverSucceeded = true
+					if finalRunState.Status == "completed" {
+						respB.Body.Close()
+						break
+					}
 				}
 			}
+			respB.Body.Close()
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
