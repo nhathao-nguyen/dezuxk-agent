@@ -337,10 +337,10 @@ func (s *ChatService) runGeminiFailover(ctx context.Context, initialModel *domai
 			return err
 		})
 
-		// 1. Client ngắt kết nối (Client Disconnect)
-		if ctx.Err() != nil || errors.Is(callErr, context.Canceled) {
+		// 1. Client ngắt kết nối (Client Disconnect) hoặc Stream Idle Timeout
+		if ctx.Err() != nil || errors.Is(callErr, context.Canceled) || errors.Is(callErr, domain.ErrStreamIdleTimeout) {
 			s.sessionRepo.ReleaseWriteLease(account, domain.ServiceGemini)
-			s.sessionRepo.Release(account, nil)
+			s.sessionRepo.Release(account, callErr)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -553,7 +553,9 @@ func (s *ChatService) streamRound(
 	}
 
 	var usage *domain.OpenAIUsage
-	if s.tokenCounter != nil {
+	if reply.Usage != nil {
+		usage = reply.Usage
+	} else if s.tokenCounter != nil {
 		usage = s.tokenCounter.CalculateUsage(req.Messages, reply)
 	}
 
@@ -637,22 +639,37 @@ func (s *ChatService) streamRound(
 	stopReason := "stop"
 	if len(toolCalls) > 0 {
 		stopReason = "tool_calls"
-	} else if maxTokens := req.EffectiveMaxTokens(); maxTokens != nil && *maxTokens > 0 && usage != nil && usage.CompletionTokens >= *maxTokens {
-		stopReason = "length"
+	} else {
+		stopReason = DetermineRoundPreliminaryFinishReason(reply.FinishReason, usage, req.EffectiveMaxTokens())
+	}
+
+	initialRound := StreamRoundResult{
+		Text:           reply.Text,
+		FinishReason:   reply.FinishReason,
+		Usage:          usage,
+		ConversationID: conversationID,
+		ResponseID:     reply.ResponseID,
+		ChoiceID:       reply.ChoiceID,
+	}
+
+	expectedFormat := extractExpectedFormat(req.ResponseFormat)
+	var state CompletionState
+	if s.continuationSvc != nil {
+		state = s.continuationSvc.detector.Analyze(initialRound.Text, stopReason, expectedFormat)
+	} else {
+		state = CompletionState{IsComplete: stopReason != "length"}
 	}
 
 	canContinue := !IsNoContinuation(reqCtx) && s.continuationSvc != nil && s.continuationSvc.cfg.Enabled && len(toolCalls) == 0 && reqCtx.Err() == nil
-	if canContinue {
-		expectedFormat := extractExpectedFormat(req.ResponseFormat)
-		state := s.continuationSvc.detector.Analyze(reply.Text, stopReason, expectedFormat)
-		if !state.IsComplete {
-			currentFullText := reply.Text
-			currentConversationID := conversationID
+	if !state.IsComplete {
+		if canContinue {
+			currentFullText := initialRound.Text
+			currentConversationID := initialRound.ConversationID
 			if currentConversationID == "" {
-				currentConversationID = reply.ConversationID
+				currentConversationID = conversationID
 			}
-			currentResponseID := reply.ResponseID
-			currentChoiceID := reply.ChoiceID
+			currentResponseID := initialRound.ResponseID
+			currentChoiceID := initialRound.ChoiceID
 			continuationsDone := 0
 			maxCont := s.continuationSvc.cfg.MaxContinuations
 			if maxCont <= 0 {
@@ -667,10 +684,32 @@ func (s *ChatService) streamRound(
 				}
 			}
 
+			var (
+				continuationAttempted bool
+				continuationFailed    bool
+				continuationError     error
+			)
+
+			// Cumulative usage for aggregate reporting in final chunk
+			var aggregateUsage *domain.OpenAIUsage
+			if initialRound.Usage != nil {
+				aggregateUsage = &domain.OpenAIUsage{
+					PromptTokens:     initialRound.Usage.PromptTokens,
+					CompletionTokens: initialRound.Usage.CompletionTokens,
+					TotalTokens:      initialRound.Usage.TotalTokens,
+				}
+				if initialRound.Usage.CompletionTokensDetails != nil {
+					aggregateUsage.CompletionTokensDetails = &domain.CompletionTokensDetails{
+						ReasoningTokens: initialRound.Usage.CompletionTokensDetails.ReasoningTokens,
+					}
+				}
+			}
+
 			for continuationsDone < maxCont && !state.IsComplete {
 				if reqCtx.Err() != nil {
 					return reqCtx.Err()
 				}
+				continuationAttempted = true
 				contPrompt := BuildContinuationPrompt(taskGoal, currentFullText, state)
 				nextReq := *req
 				nextReq.Messages = append([]domain.OpenAIMessage{}, req.Messages...)
@@ -692,6 +731,8 @@ func (s *ChatService) streamRound(
 				nextResp, postErr := s.postGemini(contCtx, account, modelDesc, &nextReq)
 				if postErr != nil {
 					contCancel()
+					continuationFailed = true
+					continuationError = postErr
 					break
 				}
 
@@ -792,6 +833,8 @@ func (s *ChatService) streamRound(
 					if errors.Is(dematErr, domain.ErrStreamIdleTimeout) {
 						return dematErr
 					}
+					continuationFailed = true
+					continuationError = dematErr
 					break
 				}
 
@@ -806,25 +849,75 @@ func (s *ChatService) streamRound(
 					currentConversationID = contReply.ConversationID
 				}
 
-				contStopReason := "stop"
-				if maxTokens := req.EffectiveMaxTokens(); maxTokens != nil && *maxTokens > 0 && usage != nil && usage.CompletionTokens >= *maxTokens {
-					contStopReason = "length"
+				// Tính toán usage riêng cho round continuation này
+				var contRoundUsage *domain.OpenAIUsage
+				if contReply.Usage != nil {
+					contRoundUsage = contReply.Usage
+				} else if s.tokenCounter != nil {
+					contRoundUsage = s.tokenCounter.CalculateUsage(nil, contReply)
 				}
+
+				if contRoundUsage != nil {
+					if aggregateUsage == nil {
+						aggregateUsage = &domain.OpenAIUsage{
+							PromptTokens:     contRoundUsage.PromptTokens,
+							CompletionTokens: contRoundUsage.CompletionTokens,
+							TotalTokens:      contRoundUsage.TotalTokens,
+						}
+					} else {
+						aggregateUsage.CompletionTokens += contRoundUsage.CompletionTokens
+						aggregateUsage.TotalTokens += contRoundUsage.CompletionTokens
+					}
+				}
+
+				roundResult := StreamRoundResult{
+					Text:           contReply.Text,
+					FinishReason:   contReply.FinishReason,
+					Usage:          contRoundUsage,
+					ConversationID: currentConversationID,
+					ResponseID:     currentResponseID,
+					ChoiceID:       currentChoiceID,
+				}
+
+				contStopReason := DetermineRoundPreliminaryFinishReason(
+					roundResult.FinishReason,
+					roundResult.Usage,
+					req.EffectiveMaxTokens(),
+				)
 				state = s.continuationSvc.detector.Analyze(currentFullText, contStopReason, expectedFormat)
 			}
 
-			if continuationsDone >= maxCont && !state.IsComplete {
+			var finalStatus ContinuationFinalStatus
+			if state.IsComplete {
+				finalStatus = StatusComplete
+				stopReason = "stop"
+			} else if continuationFailed {
+				finalStatus = StatusContinuationFailed
+				stopReason = "length"
+			} else if continuationsDone >= maxCont {
+				finalStatus = StatusContinuationExhausted
 				stopReason = "length"
 				if s.continuationSvc.metrics != nil {
 					s.continuationSvc.metrics.IncrementContinuationExhausted()
 				}
 			} else {
-				stopReason = "stop"
+				finalStatus = StatusLengthLimit
+				stopReason = "length"
 			}
+
+			_ = finalStatus
+			_ = continuationAttempted
+			_ = continuationError
+
 			conversationID = currentConversationID
 			reply.ResponseID = currentResponseID
 			reply.ChoiceID = currentChoiceID
 			reply.Text = currentFullText
+			if aggregateUsage != nil {
+				usage = aggregateUsage
+			}
+		} else {
+			stopReason = "length"
 		}
 	}
 
@@ -985,8 +1078,8 @@ func (s *ChatService) syncRound(
 	stopReason := "stop"
 	if len(toolCalls) > 0 {
 		stopReason = "tool_calls"
-	} else if maxTokens := req.EffectiveMaxTokens(); maxTokens != nil && *maxTokens > 0 && usage != nil && usage.CompletionTokens >= *maxTokens {
-		stopReason = "length"
+	} else {
+		stopReason = DetermineRoundPreliminaryFinishReason(reply.FinishReason, usage, req.EffectiveMaxTokens())
 	}
 
 	choices := []domain.OpenAIChoice{

@@ -20,6 +20,86 @@ type CompletionState struct {
 	ExpectedFormat string   `json:"expected_format,omitempty"`
 }
 
+// StreamRoundResult chứa trạng thái hoàn tất và dữ liệu riêng biệt của một round sinh phản hồi
+type StreamRoundResult struct {
+	Text           string
+	FinishReason   string
+	Usage          *domain.OpenAIUsage
+	ConversationID string
+	ResponseID     string
+	ChoiceID       string
+}
+
+// ContinuationFinalStatus phân loại trạng thái kết thúc nội bộ của chu trình continuation
+type ContinuationFinalStatus string
+
+const (
+	StatusComplete              ContinuationFinalStatus = "COMPLETE"
+	StatusLengthLimit           ContinuationFinalStatus = "LENGTH_LIMIT"
+	StatusContinuationExhausted ContinuationFinalStatus = "CONTINUATION_EXHAUSTED"
+	StatusContinuationFailed    ContinuationFinalStatus = "CONTINUATION_FAILED"
+	StatusClientCancelled       ContinuationFinalStatus = "CLIENT_CANCELLED"
+	StatusUpstreamError         ContinuationFinalStatus = "UPSTREAM_ERROR"
+	StatusIdleTimeout           ContinuationFinalStatus = "IDLE_TIMEOUT"
+)
+
+// NormalizeFinishReason chuẩn hóa finish_reason về các giá trị chuẩn OpenAI
+func NormalizeFinishReason(reason string) string {
+	r := strings.ToLower(strings.TrimSpace(reason))
+	switch r {
+	case "stop", "completed", "finish":
+		return "stop"
+	case "length", "max_tokens":
+		return "length"
+	case "tool_calls", "function_call":
+		return "tool_calls"
+	case "content_filter", "safety":
+		return "content_filter"
+	default:
+		return r
+	}
+}
+
+// ResolveRoundFinishReason xác định finish_reason cho một generation round theo thứ tự ưu tiên:
+// 1. Actual upstream finish reason của chính round đó (nếu có)
+// 2. Round-specific usage nếu đạt explicit max_tokens ("length")
+// 3. Structural completion detector state (nếu truyền vào chưa hoàn tất -> "length")
+// 4. Mặc định "stop"
+func ResolveRoundFinishReason(
+	upstreamReason string,
+	usage *domain.OpenAIUsage,
+	effectiveMaxTokens *int,
+	completionState CompletionState,
+) string {
+	if !completionState.IsComplete {
+		return "length"
+	}
+	norm := NormalizeFinishReason(upstreamReason)
+	if norm != "" {
+		return norm
+	}
+	if effectiveMaxTokens != nil && *effectiveMaxTokens > 0 && usage != nil && usage.CompletionTokens >= *effectiveMaxTokens {
+		return "length"
+	}
+	return "stop"
+}
+
+// DetermineRoundPreliminaryFinishReason tính finish_reason sơ bộ của một round trước khi chạy CompletionDetector
+func DetermineRoundPreliminaryFinishReason(
+	upstreamReason string,
+	usage *domain.OpenAIUsage,
+	effectiveMaxTokens *int,
+) string {
+	norm := NormalizeFinishReason(upstreamReason)
+	if norm != "" {
+		return norm
+	}
+	if effectiveMaxTokens != nil && *effectiveMaxTokens > 0 && usage != nil && usage.CompletionTokens >= *effectiveMaxTokens {
+		return "length"
+	}
+	return "stop"
+}
+
 // CompletionDetector kiểm tra tính nguyên vẹn của đầu ra mô hình
 type CompletionDetector struct{}
 
@@ -379,10 +459,18 @@ func (cs *ContinuationService) AutoContinueResponse(
 
 		nextResp, err := chatUseCase.ExecuteChatSync(ctx, &nextReq)
 		if err != nil {
-			// Nếu thất bại ở bước tiếp tục, trả về kết quả tốt nhất hiện tại kèm log
+			// Nếu thất bại ở bước tiếp tục, đánh dấu length nếu vẫn chưa hoàn chỉnh
+			if len(currentResp.Choices) > 0 {
+				lenReason := "length"
+				currentResp.Choices[0].FinishReason = &lenReason
+			}
 			return currentResp, continuationsDone, nil
 		}
 		if len(nextResp.Choices) == 0 {
+			if len(currentResp.Choices) > 0 {
+				lenReason := "length"
+				currentResp.Choices[0].FinishReason = &lenReason
+			}
 			break
 		}
 
@@ -406,16 +494,17 @@ func (cs *ContinuationService) AutoContinueResponse(
 		}
 	}
 
-	if continuationsDone >= cs.cfg.MaxContinuations && len(currentResp.Choices) > 0 {
+	if len(currentResp.Choices) > 0 {
 		finishReason := ""
 		if currentResp.Choices[0].FinishReason != nil {
 			finishReason = *currentResp.Choices[0].FinishReason
 		}
-		state := cs.detector.Analyze(currentResp.Choices[0].Message.Content, finishReason, "")
+		expectedFormat := extractExpectedFormat(req.ResponseFormat)
+		state := cs.detector.Analyze(currentResp.Choices[0].Message.Content, finishReason, expectedFormat)
 		if !state.IsComplete {
 			lenReason := "length"
 			currentResp.Choices[0].FinishReason = &lenReason
-			if cs.metrics != nil {
+			if continuationsDone >= cs.cfg.MaxContinuations && cs.metrics != nil {
 				cs.metrics.IncrementContinuationExhausted()
 			}
 		}

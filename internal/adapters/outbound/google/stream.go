@@ -525,6 +525,7 @@ type StreamChunkMeta struct {
 	CodeExecutions  []domain.CodeExecution
 	MediaURLs       []string
 	Drafts          []string
+	FinishReason    string
 }
 
 func parseEnvelopeChunk(rawLine string) (text string, convID string) {
@@ -676,6 +677,18 @@ func ParseEnvelopeChunk(rawLine string) StreamChunkMeta {
 						}
 						if cardContentRegex.MatchString(meta.Text) {
 							meta.Text = cardContentRegex.ReplaceAllString(meta.Text, "")
+						}
+						// Bóc tách finish_reason từ candidate nếu upstream cung cấp
+						for i := 2; i < len(candidate); i++ {
+							if s, ok := candidate[i].(string); ok {
+								upper := strings.ToUpper(strings.TrimSpace(s))
+								if upper == "STOP" || upper == "MAX_TOKENS" || upper == "SAFETY" || upper == "RECITATION" {
+									meta.FinishReason = strings.ToLower(upper)
+									if meta.FinishReason == "max_tokens" {
+										meta.FinishReason = "length"
+									}
+								}
+							}
 						}
 						meta.Text = CleanInternalPlaceholders(meta.Text)
 					}
@@ -1180,6 +1193,9 @@ func ReadGeminiStreamWithThinking(
 				if len(meta.Drafts) > 0 {
 					reply.Drafts = meta.Drafts
 				}
+				if meta.FinishReason != "" {
+					reply.FinishReason = meta.FinishReason
+				}
 
 				mapped := meta.Text != "" || meta.ConversationID != "" || meta.ResponseID != "" || meta.ChoiceID != "" ||
 					meta.ThinkingContent != "" || len(meta.ThinkingBlocks) > 0 || meta.Grounding != nil ||
@@ -1277,6 +1293,9 @@ func ReadGeminiStreamWithThinking(
 			}
 		}
 		reply.Text = cleaned
+	}
+	if tracker != nil && tracker.FinishReason != "" && reply.FinishReason == "" {
+		reply.FinishReason = tracker.FinishReason
 	}
 	if strings.TrimSpace(reply.Text) == "" && len(reply.MediaURLs) == 0 && len(reply.ThinkingBlocks) == 0 && len(reply.CodeExecutions) == 0 {
 		if metrics != nil {

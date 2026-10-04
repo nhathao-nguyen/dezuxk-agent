@@ -20,4 +20,6 @@ type GeminiReply struct {
 	MediaURLs      []string
 	Unmapped       int
 	Drafts         []string
+	FinishReason   string
+	Usage          *OpenAIUsage
 }

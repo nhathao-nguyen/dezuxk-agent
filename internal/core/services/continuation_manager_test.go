@@ -396,6 +396,8 @@ type multiRoundStreamCodec struct {
 	mu           sync.Mutex
 	rounds       []domain.GeminiReply
 	deltas       [][]string
+	errors       []error
+	onDeltaHook  func(round int, delta string)
 	currentRound int
 }
 
@@ -417,12 +419,19 @@ func (m *multiRoundStreamCodec) DematerializeChatStream(ctx context.Context, res
 	m.currentRound++
 	m.mu.Unlock()
 
+	if rIndex < len(m.errors) && m.errors[rIndex] != nil {
+		return domain.GeminiReply{}, m.errors[rIndex]
+	}
+
 	if rIndex >= len(m.rounds) {
 		return domain.GeminiReply{Text: "default fallback", ConversationID: "c_def"}, nil
 	}
 	reply := m.rounds[rIndex]
 	if rIndex < len(m.deltas) {
 		for _, d := range m.deltas[rIndex] {
+			if m.onDeltaHook != nil {
+				m.onDeltaHook(rIndex, d)
+			}
 			if onContent != nil {
 				if err := onContent(d, reply.ConversationID); err != nil {
 					return reply, err
@@ -431,6 +440,26 @@ func (m *multiRoundStreamCodec) DematerializeChatStream(ctx context.Context, res
 		}
 	}
 	return reply, nil
+}
+
+type configurableTransport struct {
+	doRequest func(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind, method string, path string, body io.Reader, contentType string) (*http.Response, error)
+}
+
+func (c configurableTransport) BoundShort(ctx context.Context) (context.Context, context.CancelFunc) {
+	return ctx, func() {}
+}
+func (c configurableTransport) BoundStream(ctx context.Context) (context.Context, context.CancelFunc) {
+	return ctx, func() {}
+}
+func (c configurableTransport) DoRequest(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind, method string, path string, body io.Reader, contentType string) (*http.Response, error) {
+	if c.doRequest != nil {
+		return c.doRequest(ctx, account, service, method, path, body, contentType)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("")),
+	}, nil
 }
 
 func TestStreamAutoContinuation_Section16(t *testing.T) {
@@ -748,4 +777,592 @@ func TestStreamAutoContinuation_Section16(t *testing.T) {
 			t.Errorf("expected StreamIdleTimeoutsTotal = 1, got %d", snap.StreamIdleTimeoutsTotal)
 		}
 	})
+}
+
+func TestStreamAutoContinuation_Mandatory1_StaleUsageBug(t *testing.T) {
+	// Initial round:
+	// usage.CompletionTokens = 100, max_tokens = 100, finish = "length", text = incomplete
+	// Continuation round:
+	// usage.CompletionTokens = 30, finish = "stop", text = completes response
+	// Expected:
+	// exactly 1 continuation (2 rounds total)
+	// final finish_reason = "stop"
+	// no Round 3
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+	maxTokens := 100
+
+	codec := &multiRoundStreamCodec{
+		rounds: []domain.GeminiReply{
+			{
+				Text:         "Once upon a time in a digital world (continued...)",
+				FinishReason: "length",
+				Usage: &domain.OpenAIUsage{
+					PromptTokens:     20,
+					CompletionTokens: 100,
+					TotalTokens:      120,
+				},
+				ConversationID: "c_mand1",
+			},
+			{
+				Text:         "they built an intelligent resilient gateway. The end.",
+				FinishReason: "stop",
+				Usage: &domain.OpenAIUsage{
+					PromptTokens:     0,
+					CompletionTokens: 30,
+					TotalTokens:      30,
+				},
+				ConversationID: "c_mand1",
+			},
+			{
+				Text:         "UNEXPECTED ROUND 3 - Should not be reached!",
+				FinishReason: "stop",
+				Usage: &domain.OpenAIUsage{
+					CompletionTokens: 10,
+				},
+				ConversationID: "c_mand1",
+			},
+		},
+		deltas: [][]string{
+			{"Once upon a time in a digital world (continued...)"},
+			{"they built an intelligent resilient gateway. The end."},
+			{"UNEXPECTED ROUND 3 - Should not be reached!"},
+		},
+	}
+
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+	chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+		Enabled:          true,
+		MaxContinuations: 3,
+	}))
+
+	var buf strings.Builder
+	req := &domain.OpenAIChatRequest{
+		Model:     "gemini-3.8-flash",
+		MaxTokens: &maxTokens,
+		Messages: []domain.OpenAIMessage{
+			{Role: "user", Content: "Write a story"},
+		},
+	}
+
+	err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "UNEXPECTED ROUND 3") {
+		t.Fatalf("stale usage bug detected: Round 3 was executed unexpectedly!")
+	}
+	if codec.currentRound != 2 {
+		t.Fatalf("expected exactly 2 rounds executed (1 initial + 1 continuation), got %d", codec.currentRound)
+	}
+	if !strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("expected final finish_reason 'stop', got output: %s", out)
+	}
+	if strings.Contains(out, `"finish_reason":"length"`) {
+		t.Errorf("output must not have finish_reason length when completed, got: %s", out)
+	}
+}
+
+func TestStreamAutoContinuation_Mandatory2_ContinuationFailureNotStop(t *testing.T) {
+	// Initial round: incomplete
+	// Continuation request: postGemini returns error (or demat fails)
+	// Expected: final state != stop, finish_reason = length/incomplete-compatible value (never stop)
+
+	t.Run("PostGeminiFails_FinalStateLengthNotStop", func(t *testing.T) {
+		mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+		repo := &mockSessionRepo{}
+		metrics := domain.NewContractMetrics()
+
+		chatCalls := 0
+		transport := configurableTransport{
+			doRequest: func(ctx context.Context, account *domain.ManagedAccount, service domain.ServiceKind, method string, path string, body io.Reader, contentType string) (*http.Response, error) {
+				if strings.Contains(path, "/test") {
+					chatCalls++
+					if chatCalls > 1 {
+						// Round 2 continuation fails
+						return nil, errors.New("upstream connection reset")
+					}
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("")),
+				}, nil
+			},
+		}
+
+		codec := &multiRoundStreamCodec{
+			rounds: []domain.GeminiReply{
+				{
+					Text:           "Partial sentence that continues... (continued...)",
+					ConversationID: "c_mand2_a",
+				},
+			},
+			deltas: [][]string{
+				{"Partial sentence that continues... (continued...)"},
+			},
+		}
+
+		chatService := services.NewChatService(mr, repo, transport, codec, metrics)
+		chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+			Enabled:          true,
+			MaxContinuations: 2,
+		}))
+
+		var buf strings.Builder
+		req := &domain.OpenAIChatRequest{
+			Model: "gemini-3.8-flash",
+			Messages: []domain.OpenAIMessage{
+				{Role: "user", Content: "Continue text"},
+			},
+		}
+
+		err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+		if err != nil {
+			t.Fatalf("stream should end cleanly with incomplete state, got error: %v", err)
+		}
+
+		out := buf.String()
+		if strings.Contains(out, `"finish_reason":"stop"`) {
+			t.Fatalf("CRITICAL SEMANTIC BUG: incomplete response with failed continuation received finish_reason: stop!")
+		}
+		if !strings.Contains(out, `"finish_reason":"length"`) {
+			t.Errorf("expected finish_reason 'length' for failed continuation on incomplete output, got: %s", out)
+		}
+	})
+
+	t.Run("DematerializeFails_FinalStateLengthNotStop", func(t *testing.T) {
+		mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+		repo := &mockSessionRepo{}
+		metrics := domain.NewContractMetrics()
+
+		codec := &multiRoundStreamCodec{
+			rounds: []domain.GeminiReply{
+				{
+					Text:           "Partial sentence that continues... (continued...)",
+					ConversationID: "c_mand2_b",
+				},
+			},
+			deltas: [][]string{
+				{"Partial sentence that continues... (continued...)"},
+			},
+			errors: []error{
+				nil,
+				errors.New("unexpected wire EOF"),
+			},
+		}
+
+		chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+		chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+			Enabled:          true,
+			MaxContinuations: 2,
+		}))
+
+		var buf strings.Builder
+		req := &domain.OpenAIChatRequest{
+			Model: "gemini-3.8-flash",
+			Messages: []domain.OpenAIMessage{
+				{Role: "user", Content: "Continue text"},
+			},
+		}
+
+		err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+		if err != nil {
+			t.Fatalf("stream should end cleanly with incomplete state, got error: %v", err)
+		}
+
+		out := buf.String()
+		if strings.Contains(out, `"finish_reason":"stop"`) {
+			t.Fatalf("CRITICAL SEMANTIC BUG: incomplete response with failed continuation demat received finish_reason: stop!")
+		}
+		if !strings.Contains(out, `"finish_reason":"length"`) {
+			t.Errorf("expected finish_reason 'length' for failed continuation on incomplete output, got: %s", out)
+		}
+	})
+}
+
+func TestStreamAutoContinuation_Mandatory3_MaxContinuations(t *testing.T) {
+	// All rounds incomplete. MaxContinuations = 2.
+	// Expected: 2 continuation attempts only (3 rounds total: 1 initial + 2 continuations).
+	// finish_reason = length, ContinuationExhausted metric +1, no infinite loop.
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+
+	codec := &multiRoundStreamCodec{
+		rounds: []domain.GeminiReply{
+			{Text: "Part 1 (continued...)", ConversationID: "c_mand3"},
+			{Text: "Part 2 (continued...)", ConversationID: "c_mand3"},
+			{Text: "Part 3 (continued...)", ConversationID: "c_mand3"},
+			{Text: "Part 4 (continued...)", ConversationID: "c_mand3"},
+		},
+		deltas: [][]string{
+			{"Part 1 (continued...)"},
+			{"Part 2 (continued...)"},
+			{"Part 3 (continued...)"},
+			{"Part 4 (continued...)"},
+		},
+	}
+
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+	chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+		Enabled:          true,
+		MaxContinuations: 2,
+	}))
+	chatService.SetMetrics(metrics)
+
+	var buf strings.Builder
+	req := &domain.OpenAIChatRequest{
+		Model: "gemini-3.8-flash",
+		Messages: []domain.OpenAIMessage{
+			{Role: "user", Content: "Loop me"},
+		},
+	}
+
+	err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if codec.currentRound != 3 {
+		t.Errorf("expected exactly 3 rounds (1 initial + 2 continuations), got %d", codec.currentRound)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"finish_reason":"length"`) {
+		t.Errorf("expected final finish_reason 'length' when continuations exhausted, got: %s", out)
+	}
+	if strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("output must not contain finish_reason stop when budget exhausted")
+	}
+
+	snap := metrics.Snapshot()
+	if snap.ContinuationsTotal != 2 {
+		t.Errorf("expected ContinuationsTotal = 2, got %d", snap.ContinuationsTotal)
+	}
+	if snap.ContinuationExhaustedTotal != 1 {
+		t.Errorf("expected ContinuationExhaustedTotal = 1, got %d", snap.ContinuationExhaustedTotal)
+	}
+}
+
+func TestStreamAutoContinuation_Mandatory4_Round2CompleteStructurallyJSON(t *testing.T) {
+	// Round 1: {\n  "name":
+	// Round 2: "dezuxk"\n}
+	// Round 2 finish reason = stop. Merged JSON parses successfully.
+	// Expected: complete, stop, no Round 3.
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+
+	codec := &multiRoundStreamCodec{
+		rounds: []domain.GeminiReply{
+			{
+				Text:           "{\n  \"name\":",
+				ConversationID: "c_mand4",
+			},
+			{
+				Text:           " \"dezuxk\"\n}",
+				FinishReason:   "stop",
+				ConversationID: "c_mand4",
+			},
+			{
+				Text:           "Round 3 SHOULD NOT HAPPEN",
+				ConversationID: "c_mand4",
+			},
+		},
+		deltas: [][]string{
+			{"{\n  \"name\":"},
+			{" \"dezuxk\"\n}"},
+			{"Round 3 SHOULD NOT HAPPEN"},
+		},
+	}
+
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+	chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+		Enabled:          true,
+		MaxContinuations: 3,
+	}))
+
+	var buf strings.Builder
+	req := &domain.OpenAIChatRequest{
+		Model: "gemini-3.8-flash",
+		Messages: []domain.OpenAIMessage{
+			{Role: "user", Content: "Output JSON"},
+		},
+		ResponseFormat: "json_object",
+	}
+
+	err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if codec.currentRound != 2 {
+		t.Fatalf("expected exactly 2 rounds, got %d", codec.currentRound)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("expected final finish_reason 'stop', got: %s", out)
+	}
+	if !strings.Contains(out, "dezuxk") {
+		t.Errorf("expected output to contain dezuxk, got: %s", out)
+	}
+}
+
+func TestStreamAutoContinuation_Mandatory5_CodeBlockCompletion(t *testing.T) {
+	// Round 1: ```go\nfunc x() {\n
+	// Round 2: }\n```
+	// Expected: complete, stop
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+
+	codec := &multiRoundStreamCodec{
+		rounds: []domain.GeminiReply{
+			{
+				Text:           "```go\nfunc x() {\n",
+				ConversationID: "c_mand5",
+			},
+			{
+				Text:           "}\n```",
+				FinishReason:   "stop",
+				ConversationID: "c_mand5",
+			},
+		},
+		deltas: [][]string{
+			{"```go\nfunc x() {\n"},
+			{"}\n```"},
+		},
+	}
+
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+	chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+		Enabled:          true,
+		MaxContinuations: 3,
+	}))
+
+	var buf strings.Builder
+	req := &domain.OpenAIChatRequest{
+		Model: "gemini-3.8-flash",
+		Messages: []domain.OpenAIMessage{
+			{Role: "user", Content: "Write go function"},
+		},
+	}
+
+	err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if codec.currentRound != 2 {
+		t.Fatalf("expected 2 rounds, got %d", codec.currentRound)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("expected final finish_reason 'stop', got: %s", out)
+	}
+}
+
+func TestStreamAutoContinuation_Mandatory6_ClientCancel(t *testing.T) {
+	// Client cancels during continuation.
+	// Expected: no further continuation, no [DONE], return context.Canceled.
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	codec := &multiRoundStreamCodec{
+		rounds: []domain.GeminiReply{
+			{
+				Text:           "Initial chunk (continued...)",
+				ConversationID: "c_mand6",
+			},
+			{
+				Text:           "Continuation chunk",
+				ConversationID: "c_mand6",
+			},
+		},
+		deltas: [][]string{
+			{"Initial chunk (continued...)"},
+			{"Continuation chunk"},
+		},
+		onDeltaHook: func(round int, delta string) {
+			if round == 1 {
+				cancel() // Client disconnects during continuation delta delivery
+			}
+		},
+	}
+
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+	chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+		Enabled:          true,
+		MaxContinuations: 3,
+	}))
+
+	var buf strings.Builder
+	req := &domain.OpenAIChatRequest{
+		Model: "gemini-3.8-flash",
+		Messages: []domain.OpenAIMessage{
+			{Role: "user", Content: "Tell story"},
+		},
+	}
+
+	err := chatService.ExecuteChatStream(ctx, req, &buf, nil)
+	if err == nil || (!errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "canceled")) {
+		t.Fatalf("expected context.Canceled error, got: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "data: [DONE]") {
+		t.Errorf("stream must NOT send [DONE] when client cancels during continuation, got: %s", out)
+	}
+}
+
+func TestStreamAutoContinuation_Mandatory7_IdleTimeout(t *testing.T) {
+	// Continuation round hangs.
+	// Expected: ErrStreamIdleTimeout, stream_idle_timeout metric increments, not finish_reason=stop, no [DONE].
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+
+	codec := &multiRoundStreamCodec{
+		rounds: []domain.GeminiReply{
+			{
+				Text:           "Initial chunk (continued...)",
+				ConversationID: "c_mand7",
+			},
+		},
+		deltas: [][]string{
+			{"Initial chunk (continued...)"},
+		},
+		errors: []error{
+			nil,
+			domain.ErrStreamIdleTimeout, // round 2 hangs and times out
+		},
+	}
+
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+	chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+		Enabled:          true,
+		MaxContinuations: 3,
+	}))
+	chatService.SetMetrics(metrics)
+
+	var buf strings.Builder
+	req := &domain.OpenAIChatRequest{
+		Model: "gemini-3.8-flash",
+		Messages: []domain.OpenAIMessage{
+			{Role: "user", Content: "Hang story"},
+		},
+	}
+
+	err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+	if err == nil {
+		t.Fatalf("expected stream idle timeout error, got nil")
+	}
+	if !errors.Is(err, domain.ErrStreamIdleTimeout) && !strings.Contains(err.Error(), "idle timeout") {
+		t.Errorf("expected ErrStreamIdleTimeout, got: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("idle timeout must NOT send finish_reason: stop, got: %s", out)
+	}
+	if strings.Contains(out, "data: [DONE]") {
+		t.Errorf("idle timeout must NOT send [DONE], got: %s", out)
+	}
+}
+
+func TestStreamAutoContinuation_Mandatory8_AggregateUsage(t *testing.T) {
+	// Round 1: completion_tokens = 100
+	// Round 2: completion_tokens = 40
+	// Final usage: completion_tokens = 140
+	// Completion decision for Round 2 must use 40, not 140 >= max_tokens
+	mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+	repo := &mockSessionRepo{}
+	metrics := domain.NewContractMetrics()
+	maxTokens := 100
+
+	codec := &multiRoundStreamCodec{
+		rounds: []domain.GeminiReply{
+			{
+				Text:         "Chapter 1 of the story was very detailed and long... (continued...)",
+				FinishReason: "length",
+				Usage: &domain.OpenAIUsage{
+					PromptTokens:     25,
+					CompletionTokens: 100,
+					TotalTokens:      125,
+				},
+				ConversationID: "c_mand8",
+			},
+			{
+				Text:         "Chapter 2 completes all storylines cleanly.",
+				FinishReason: "stop",
+				Usage: &domain.OpenAIUsage{
+					PromptTokens:     0,
+					CompletionTokens: 40,
+					TotalTokens:      40,
+				},
+				ConversationID: "c_mand8",
+			},
+			{
+				Text:         "Chapter 3 SHOULD NOT BE CALLED",
+				FinishReason: "stop",
+				Usage: &domain.OpenAIUsage{
+					CompletionTokens: 10,
+				},
+				ConversationID: "c_mand8",
+			},
+		},
+		deltas: [][]string{
+			{"Chapter 1 of the story was very detailed and long... (continued...)"},
+			{"Chapter 2 completes all storylines cleanly."},
+			{"Chapter 3 SHOULD NOT BE CALLED"},
+		},
+	}
+
+	chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+	chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+		Enabled:          true,
+		MaxContinuations: 3,
+	}))
+
+	var buf strings.Builder
+	req := &domain.OpenAIChatRequest{
+		Model:     "gemini-3.8-flash",
+		MaxTokens: &maxTokens,
+		Messages: []domain.OpenAIMessage{
+			{Role: "user", Content: "Write 2 chapters"},
+		},
+	}
+
+	err := chatService.ExecuteChatStream(context.Background(), req, &buf, nil)
+	if err != nil {
+		t.Fatalf("unexpected stream error: %v", err)
+	}
+
+	if codec.currentRound != 2 {
+		t.Fatalf("expected exactly 2 rounds, got %d (if 3, aggregate tokens leaked into round decision)", codec.currentRound)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, `"finish_reason":"stop"`) {
+		t.Errorf("expected final finish_reason 'stop', got: %s", out)
+	}
+	if strings.Contains(out, "Chapter 3 SHOULD NOT BE CALLED") {
+		t.Errorf("Chapter 3 was unexpectedly called")
+	}
+
+	// Verify aggregate usage in final chunk: completion_tokens = 140, prompt_tokens = 25, total_tokens = 165
+	if !strings.Contains(out, `"completion_tokens":140`) {
+		t.Errorf("expected final chunk to report aggregate completion_tokens: 140, got: %s", out)
+	}
+	if !strings.Contains(out, `"total_tokens":165`) {
+		t.Errorf("expected final chunk to report aggregate total_tokens: 165, got: %s", out)
+	}
 }
