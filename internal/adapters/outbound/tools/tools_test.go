@@ -150,6 +150,9 @@ func (m *mockMemoryService) SearchArchival(ctx context.Context, query string, to
 func (m *mockMemoryService) CompactConversation(ctx context.Context, messages []domain.OpenAIMessage, threshold int) ([]domain.OpenAIMessage, error) {
 	return messages, nil
 }
+func (m *mockMemoryService) CompactWithBudget(ctx context.Context, messages []domain.OpenAIMessage, budget domain.ContextBudget) ([]domain.OpenAIMessage, error) {
+	return messages, nil
+}
 
 func TestMemoryTools(t *testing.T) {
 	memSvc := &mockMemoryService{storage: make(map[string]string)}

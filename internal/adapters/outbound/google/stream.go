@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"dezuxk-gateway/internal/core/domain"
 )
@@ -160,6 +164,265 @@ func CleanInternalPlaceholders(text string) string {
 	return strings.TrimSpace(text)
 }
 
+// ErrStreamIdleTimeout báo hiệu luồng stream không nhận được byte mới từ Google upstream quá khoảng thời gian idle
+var ErrStreamIdleTimeout = errors.New("stream idle timeout: no data received from upstream within idle window")
+
+type streamIdleTimeoutKey struct{}
+type streamMetricsTrackerKey struct{}
+
+// WithStreamIdleTimeout gắn idle timeout của stream vào context
+func WithStreamIdleTimeout(ctx context.Context, d time.Duration) context.Context {
+	if d <= 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, streamIdleTimeoutKey{}, d)
+}
+
+// StreamIdleTimeoutFromContext trích xuất idle timeout của stream từ context, nếu không có trả về fallback
+func StreamIdleTimeoutFromContext(ctx context.Context, fallback time.Duration) time.Duration {
+	if ctx == nil {
+		return fallback
+	}
+	if d, ok := ctx.Value(streamIdleTimeoutKey{}).(time.Duration); ok && d > 0 {
+		return d
+	}
+	return fallback
+}
+
+// StreamMetricsTracker theo dõi chi tiết hiệu năng và trạng thái của luồng stream
+type StreamMetricsTracker struct {
+	mu                  sync.RWMutex
+	StartTime           time.Time
+	TimeToFirstByte     time.Duration
+	TimeToFirstToken    time.Duration
+	LastByteReceivedAt  time.Time
+	LastTokenReceivedAt time.Time
+	BytesRead           int64
+	TokensEmitted       int64
+	TimeoutKind         string // "idle", "total", "client_disconnect", "parser_error", ""
+	FinishReason        string
+	UpstreamEOF         bool
+	ClientDisconnect    bool
+}
+
+func NewStreamMetricsTracker() *StreamMetricsTracker {
+	now := time.Now()
+	return &StreamMetricsTracker{
+		StartTime:          now,
+		LastByteReceivedAt: now,
+	}
+}
+
+func (s *StreamMetricsTracker) RecordByte(n int) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.TimeToFirstByte == 0 {
+		s.TimeToFirstByte = now.Sub(s.StartTime)
+	}
+	s.LastByteReceivedAt = now
+	s.BytesRead += int64(n)
+}
+
+func (s *StreamMetricsTracker) RecordToken() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.TimeToFirstToken == 0 {
+		s.TimeToFirstToken = now.Sub(s.StartTime)
+	}
+	s.LastTokenReceivedAt = now
+	s.TokensEmitted++
+}
+
+func (s *StreamMetricsTracker) SetTimeoutKind(kind string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.TimeoutKind == "" {
+		s.TimeoutKind = kind
+	}
+}
+
+func (s *StreamMetricsTracker) SetFinishReason(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.FinishReason = reason
+}
+
+func (s *StreamMetricsTracker) SetUpstreamEOF(eof bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.UpstreamEOF = eof
+}
+
+func (s *StreamMetricsTracker) SetClientDisconnect(disc bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ClientDisconnect = disc
+	if disc && s.TimeoutKind == "" {
+		s.TimeoutKind = "client_disconnect"
+	}
+}
+
+// StreamMetricsSnapshot là bản sao chép chỉ đọc của StreamMetricsTracker không chứa mutex
+type StreamMetricsSnapshot struct {
+	StartTime           time.Time
+	TimeToFirstByte     time.Duration
+	TimeToFirstToken    time.Duration
+	LastByteReceivedAt  time.Time
+	LastTokenReceivedAt time.Time
+	BytesRead           int64
+	TokensEmitted       int64
+	TimeoutKind         string
+	FinishReason        string
+	UpstreamEOF         bool
+	ClientDisconnect    bool
+}
+
+func (s *StreamMetricsTracker) Snapshot() StreamMetricsSnapshot {
+	if s == nil {
+		return StreamMetricsSnapshot{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return StreamMetricsSnapshot{
+		StartTime:           s.StartTime,
+		TimeToFirstByte:     s.TimeToFirstByte,
+		TimeToFirstToken:    s.TimeToFirstToken,
+		LastByteReceivedAt:  s.LastByteReceivedAt,
+		LastTokenReceivedAt: s.LastTokenReceivedAt,
+		BytesRead:           s.BytesRead,
+		TokensEmitted:       s.TokensEmitted,
+		TimeoutKind:         s.TimeoutKind,
+		FinishReason:        s.FinishReason,
+		UpstreamEOF:         s.UpstreamEOF,
+		ClientDisconnect:    s.ClientDisconnect,
+	}
+}
+
+// WithStreamMetricsTracker gắn StreamMetricsTracker vào context
+func WithStreamMetricsTracker(ctx context.Context, tracker *StreamMetricsTracker) context.Context {
+	if tracker == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, streamMetricsTrackerKey{}, tracker)
+}
+
+// StreamMetricsTrackerFromContext lấy StreamMetricsTracker từ context
+func StreamMetricsTrackerFromContext(ctx context.Context) *StreamMetricsTracker {
+	if ctx == nil {
+		return nil
+	}
+	if t, ok := ctx.Value(streamMetricsTrackerKey{}).(*StreamMetricsTracker); ok {
+		return t
+	}
+	return nil
+}
+
+// IdleTimeoutReader bọc io.Reader/io.Closer để phát hiện stream idle và ngắt kết nối an toàn
+type IdleTimeoutReader struct {
+	r           io.Reader
+	closer      io.Closer
+	idleTimeout time.Duration
+	tracker     *StreamMetricsTracker
+	timer       *time.Timer
+	timerMu     sync.Mutex
+	timedOut    atomic.Bool
+	closed      atomic.Bool
+}
+
+func NewIdleTimeoutReader(r io.Reader, closer io.Closer, idleTimeout time.Duration, tracker *StreamMetricsTracker) *IdleTimeoutReader {
+	if idleTimeout <= 0 {
+		idleTimeout = 90 * time.Second
+	}
+	if tracker == nil {
+		tracker = NewStreamMetricsTracker()
+	} else if tracker.StartTime.IsZero() {
+		tracker.StartTime = time.Now()
+		tracker.LastByteReceivedAt = time.Now()
+	}
+	return &IdleTimeoutReader{
+		r:           r,
+		closer:      closer,
+		idleTimeout: idleTimeout,
+		tracker:     tracker,
+	}
+}
+
+func (itr *IdleTimeoutReader) Read(p []byte) (int, error) {
+	if itr.timedOut.Load() {
+		return 0, ErrStreamIdleTimeout
+	}
+	if itr.closed.Load() {
+		return 0, io.EOF
+	}
+
+	itr.timerMu.Lock()
+	if itr.timer == nil {
+		itr.timer = time.AfterFunc(itr.idleTimeout, func() {
+			itr.timedOut.Store(true)
+			if itr.tracker != nil {
+				itr.tracker.SetTimeoutKind("idle")
+			}
+			if itr.closer != nil {
+				_ = itr.closer.Close()
+			}
+		})
+	} else {
+		itr.timer.Reset(itr.idleTimeout)
+	}
+	itr.timerMu.Unlock()
+
+	n, err := itr.r.Read(p)
+
+	itr.timerMu.Lock()
+	if itr.timer != nil {
+		itr.timer.Stop()
+	}
+	itr.timerMu.Unlock()
+
+	if itr.timedOut.Load() {
+		return n, ErrStreamIdleTimeout
+	}
+
+	if n > 0 && itr.tracker != nil {
+		itr.tracker.RecordByte(n)
+	}
+
+	return n, err
+}
+
+func (itr *IdleTimeoutReader) Close() error {
+	itr.closed.Store(true)
+	itr.timerMu.Lock()
+	if itr.timer != nil {
+		itr.timer.Stop()
+	}
+	itr.timerMu.Unlock()
+	if itr.closer != nil {
+		return itr.closer.Close()
+	}
+	return nil
+}
+
 type StreamHandler struct {
 	bufferSize int
 }
@@ -179,13 +442,21 @@ func (h *StreamHandler) ProcessWrbFrStream(
 ) error {
 	defer body.Close()
 
-	reader := bufio.NewReaderSize(body, h.bufferSize)
+	tracker := StreamMetricsTrackerFromContext(ctx)
+	if tracker == nil {
+		tracker = NewStreamMetricsTracker()
+	}
+	idleTimeout := StreamIdleTimeoutFromContext(ctx, 90*time.Second)
+	idleReader := NewIdleTimeoutReader(body, body, idleTimeout, tracker)
+
+	reader := bufio.NewReaderSize(idleReader, h.bufferSize)
 	var conversationID string
 	var lastFullText string
 
 	for {
 		select {
 		case <-ctx.Done():
+			tracker.SetClientDisconnect(true)
 			return ctx.Err()
 		default:
 		}
@@ -216,6 +487,7 @@ func (h *StreamHandler) ProcessWrbFrStream(
 						lastFullText = effectiveText
 
 						if delta != "" {
+							tracker.RecordToken()
 							if err := onDelta(delta, conversationID); err != nil {
 								return err
 							}
@@ -227,7 +499,12 @@ func (h *StreamHandler) ProcessWrbFrStream(
 
 		if err != nil {
 			if err == io.EOF {
+				tracker.SetUpstreamEOF(true)
 				break
+			}
+			if errors.Is(err, ErrStreamIdleTimeout) || err == ErrStreamIdleTimeout {
+				tracker.SetTimeoutKind("idle")
+				return err
 			}
 			return err
 		}
@@ -841,7 +1118,18 @@ func ReadGeminiStreamWithThinking(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	reader := bufio.NewReaderSize(body, 64*1024)
+	tracker := StreamMetricsTrackerFromContext(ctx)
+	if tracker == nil {
+		tracker = NewStreamMetricsTracker()
+	}
+	idleTimeout := StreamIdleTimeoutFromContext(ctx, 60*time.Second)
+	var closer io.Closer
+	if c, ok := body.(io.Closer); ok {
+		closer = c
+	}
+	idleReader := NewIdleTimeoutReader(body, closer, idleTimeout, tracker)
+
+	reader := bufio.NewReaderSize(idleReader, 64*1024)
 	var reply domain.GeminiReply
 	var lastFullText string
 	var lastFullThinking string
@@ -851,6 +1139,7 @@ func ReadGeminiStreamWithThinking(
 		if delta == "" {
 			return nil
 		}
+		tracker.RecordToken()
 		reply.Text += delta
 		if onDelta == nil {
 			return nil
@@ -860,6 +1149,7 @@ func ReadGeminiStreamWithThinking(
 
 	for {
 		if ctx.Err() != nil {
+			tracker.SetClientDisconnect(true)
 			return reply, ctx.Err()
 		}
 		line, err := reader.ReadBytes('\n')
@@ -916,6 +1206,7 @@ func ReadGeminiStreamWithThinking(
 					deltaThinking := ComputeDelta(currentThinking, lastFullThinking)
 					lastFullThinking = currentThinking
 					if deltaThinking != "" && onReasoning != nil {
+						tracker.RecordToken()
 						if callErr := onReasoning(deltaThinking, reply.ConversationID); callErr != nil {
 							return reply, callErr
 						}
@@ -962,7 +1253,12 @@ func ReadGeminiStreamWithThinking(
 		}
 		if err != nil {
 			if err == io.EOF {
+				tracker.SetUpstreamEOF(true)
 				break
+			}
+			if errors.Is(err, ErrStreamIdleTimeout) || err == ErrStreamIdleTimeout {
+				tracker.SetTimeoutKind("idle")
+				return reply, err
 			}
 			return reply, err
 		}
@@ -971,7 +1267,13 @@ func ReadGeminiStreamWithThinking(
 		metrics.AddUnmapped(reply.Unmapped)
 	}
 	if lastFullText != "" {
-		reply.Text = CleanInternalPlaceholders(lastFullText)
+		cleaned := CleanInternalPlaceholders(lastFullText)
+		for _, u := range reply.MediaURLs {
+			if !strings.Contains(cleaned, u) {
+				cleaned += "\n" + u
+			}
+		}
+		reply.Text = cleaned
 	}
 	if strings.TrimSpace(reply.Text) == "" && len(reply.MediaURLs) == 0 && len(reply.ThinkingBlocks) == 0 && len(reply.CodeExecutions) == 0 {
 		if metrics != nil {

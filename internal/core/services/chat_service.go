@@ -35,6 +35,7 @@ type ChatService struct {
 	chatDefaults         config.ChatDefaultsConfig
 	tenantSettingsRepo   ports.TenantRuntimeSettingsRepository
 	modelSelectionConfig config.ModelSelectionConfig
+	continuationSvc      *ContinuationService
 }
 
 func NewChatService(
@@ -57,6 +58,20 @@ func NewChatService(
 			CoolingDuration: 60 * time.Second,
 		},
 		leaseWaitTimeout: 3 * time.Second,
+		continuationSvc: func() *ContinuationService {
+			cs := NewContinuationService(DefaultAutoContinuationConfig())
+			if metrics != nil {
+				cs.SetMetrics(metrics)
+			}
+			return cs
+		}(),
+	}
+}
+
+func (s *ChatService) SetContinuationService(cs *ContinuationService) {
+	s.continuationSvc = cs
+	if s.continuationSvc != nil && s.metrics != nil {
+		s.continuationSvc.SetMetrics(s.metrics)
 	}
 }
 
@@ -135,6 +150,10 @@ func (s *ChatService) ExecuteChatSync(
 	})
 	if err != nil {
 		return nil, err
+	}
+	if !IsNoContinuation(ctx) && s.continuationSvc != nil && resp != nil && len(resp.Choices) > 0 {
+		continuationCtx := WithNoContinuation(ctx)
+		resp, _, _ = s.continuationSvc.AutoContinueResponse(continuationCtx, s, req, resp, "")
 	}
 	return resp, nil
 }
@@ -606,6 +625,156 @@ func (s *ChatService) streamRound(
 		stopReason = "tool_calls"
 	} else if maxTokens := req.EffectiveMaxTokens(); maxTokens != nil && *maxTokens > 0 && usage != nil && usage.CompletionTokens >= *maxTokens {
 		stopReason = "length"
+	}
+
+	canContinue := !IsNoContinuation(ctx) && s.continuationSvc != nil && len(toolCalls) == 0
+	if canContinue {
+		expectedFormat := extractExpectedFormat(req.ResponseFormat)
+		state := s.continuationSvc.detector.Analyze(reply.Text, stopReason, expectedFormat)
+		if !state.IsComplete {
+			currentFullText := reply.Text
+			currentConversationID := conversationID
+			currentResponseID := reply.ResponseID
+			currentChoiceID := reply.ChoiceID
+			continuationsDone := 0
+			maxCont := s.continuationSvc.cfg.MaxContinuations
+			if maxCont <= 0 {
+				maxCont = 3
+			}
+
+			for continuationsDone < maxCont && !state.IsComplete {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				contPrompt := BuildContinuationPrompt("", currentFullText, state)
+				nextReq := *req
+				nextReq.Messages = append([]domain.OpenAIMessage{}, req.Messages...)
+				nextReq.Messages = append(nextReq.Messages, domain.OpenAIMessage{
+					Role:    "assistant",
+					Content: currentFullText,
+				})
+				nextReq.Messages = append(nextReq.Messages, domain.OpenAIMessage{
+					Role:    "user",
+					Content: contPrompt,
+				})
+				if currentConversationID != "" {
+					nextReq.ConversationID = currentConversationID
+					nextReq.ResponseID = currentResponseID
+					nextReq.ChoiceID = currentChoiceID
+				}
+
+				nextResp, postErr := s.postGemini(ctx, account, modelDesc, &nextReq)
+				if postErr != nil {
+					break
+				}
+
+				dedup := NewStreamOverlapDeduplicator(currentFullText)
+				var nextFullTextBuilder strings.Builder
+
+				onContContent := func(delta, cID string) error {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					default:
+					}
+					if cID != "" {
+						currentConversationID = cID
+					}
+					cleanDelta := dedup.ProcessDelta(delta)
+					if cleanDelta != "" {
+						nextFullTextBuilder.WriteString(cleanDelta)
+						chunk := domain.OpenAIChatResponse{
+							ID:             "chatcmpl-" + currentConversationID,
+							Object:         "chat.completion.chunk",
+							Created:        createdTime,
+							Model:          req.Model,
+							ConversationID: currentConversationID,
+							Choices: []domain.OpenAIChoice{{
+								Index: 0,
+								Delta: domain.OpenAIDelta{
+									Content: cleanDelta,
+								},
+							}},
+						}
+						if b, err := json.Marshal(chunk); err == nil {
+							_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+							if flusher != nil {
+								flusher()
+							}
+							if flushedToClient != nil {
+								*flushedToClient = true
+							}
+						}
+					}
+					return nil
+				}
+
+				onContReasoning := func(delta, cID string) error {
+					return nil
+				}
+
+				contReply, dematErr := s.wire.DematerializeChatStream(ctx, nextResp, s.metrics.Bind(domain.OpChatCompletions), onContContent, onContReasoning)
+				if nextResp.Body != nil {
+					_ = nextResp.Body.Close()
+				}
+				if remaining := dedup.Flush(); remaining != "" {
+					nextFullTextBuilder.WriteString(remaining)
+					chunk := domain.OpenAIChatResponse{
+						ID:             "chatcmpl-" + currentConversationID,
+						Object:         "chat.completion.chunk",
+						Created:        createdTime,
+						Model:          req.Model,
+						ConversationID: currentConversationID,
+						Choices: []domain.OpenAIChoice{{
+							Index: 0,
+							Delta: domain.OpenAIDelta{
+								Content: remaining,
+							},
+						}},
+					}
+					if b, err := json.Marshal(chunk); err == nil {
+						_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+						if flusher != nil {
+							flusher()
+						}
+					}
+				}
+
+				if dematErr != nil {
+					break
+				}
+
+				continuationsDone++
+				if s.continuationSvc.metrics != nil {
+					s.continuationSvc.metrics.IncrementContinuations()
+				}
+				currentFullText = MergeContinuation(currentFullText, contReply.Text)
+				currentResponseID = contReply.ResponseID
+				currentChoiceID = contReply.ChoiceID
+				if contReply.ConversationID != "" {
+					currentConversationID = contReply.ConversationID
+				}
+
+				contStopReason := "stop"
+				if maxTokens := req.EffectiveMaxTokens(); maxTokens != nil && *maxTokens > 0 && usage != nil && usage.CompletionTokens >= *maxTokens {
+					contStopReason = "length"
+				}
+				state = s.continuationSvc.detector.Analyze(currentFullText, contStopReason, expectedFormat)
+			}
+
+			if continuationsDone >= maxCont && !state.IsComplete {
+				stopReason = "length"
+				if s.continuationSvc.metrics != nil {
+					s.continuationSvc.metrics.IncrementContinuationExhausted()
+				}
+			} else {
+				stopReason = "stop"
+			}
+			conversationID = currentConversationID
+			reply.ResponseID = currentResponseID
+			reply.ChoiceID = currentChoiceID
+			reply.Text = currentFullText
+		}
 	}
 
 	finalChunk := domain.OpenAIChatResponse{

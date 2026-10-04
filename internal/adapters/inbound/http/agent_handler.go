@@ -247,11 +247,15 @@ func (h *AgentHandler) HandleRunStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+
 	sendSSE := func(event string, data any) {
 		bytes, err := json.Marshal(data)
 		if err != nil {
 			return
 		}
+		_ = rc.SetWriteDeadline(time.Time{})
 		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, bytes)
 		flusher.Flush()
 	}
@@ -996,6 +1000,8 @@ func (h *AgentHandler) HandleStreamRunEvents(w http.ResponseWriter, r *http.Requ
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 

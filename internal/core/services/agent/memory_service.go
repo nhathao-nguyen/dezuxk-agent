@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -118,7 +117,7 @@ func (m *MemoryManager) SearchArchival(ctx context.Context, query string, topK i
 	return m.archival.SearchHybrid(ctx, query, topK)
 }
 
-// CompactConversation nén lịch sử hội thoại dài bằng Gemini Flash (Tier 2 Recall Memory)
+// CompactConversation nén lịch sử hội thoại dài có cấu trúc bảo toàn dữ liệu (Structured Context Compaction)
 func (m *MemoryManager) CompactConversation(
 	ctx context.Context,
 	messages []domain.OpenAIMessage,
@@ -133,7 +132,7 @@ func (m *MemoryManager) CompactConversation(
 		return messages, nil
 	}
 
-	keepRecent := 4
+	keepRecent := 6
 	boundary := findSafeCompactionBoundary(messages, keepRecent)
 	if boundary <= 1 {
 		return messages, nil
@@ -143,44 +142,47 @@ func (m *MemoryManager) CompactConversation(
 	middleMessages := messages[1:boundary]
 	recentMessages := messages[boundary:]
 
-	var sb strings.Builder
-	for _, msg := range middleMessages {
-		content := strings.TrimSpace(msg.Content)
-		if len(content) > 300 {
-			content = content[:300] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("[%s]: %s\n", msg.Role, content))
-		if len(msg.ToolCalls) > 0 {
-			for _, tc := range msg.ToolCalls {
-				sb.WriteString(fmt.Sprintf("[Tool Call]: %s(%s)\n", tc.Function.Name, tc.Function.Arguments))
-			}
-		}
+	// Nén có cấu trúc không làm mất thông tin (Section 6)
+	summaryMsg := GenerateStructuredCompaction(ctx, middleMessages, m.chatUseCase, m.model)
+
+	compacted := make([]domain.OpenAIMessage, 0, 2+len(recentMessages))
+	compacted = append(compacted, systemMsg)
+	compacted = append(compacted, summaryMsg)
+	compacted = append(compacted, recentMessages...)
+
+	return compacted, nil
+}
+
+// CompactWithBudget nén lịch sử linh hoạt dựa trên ngân sách token và watermark thực tế của mô hình
+func (m *MemoryManager) CompactWithBudget(
+	ctx context.Context,
+	messages []domain.OpenAIMessage,
+	budget domain.ContextBudget,
+) ([]domain.OpenAIMessage, error) {
+	if !budget.CompactionRequired && !budget.CompactionRecommended && !budget.EmergencyCompactionRequired {
+		return messages, nil
 	}
 
-	prompt := fmt.Sprintf(`You are a conversation summarizer for an AI agent.
-Summarize the following past conversation turns into a dense technical context summary (max 3-5 sentences).
-Preserve all key decisions, files modified, tools executed, and user constraints:
-
-%s`, sb.String())
-
-	summaryText := "[Lịch sử hội thoại trước đó đã được tóm tắt]"
-	if m.chatUseCase != nil {
-		resp, err := m.chatUseCase.ExecuteChatSync(ctx, &domain.OpenAIChatRequest{
-			Model: m.model,
-			Messages: []domain.OpenAIMessage{
-				{Role: "system", Content: "You are a concise technical summarizer. Output only the summary without pleasantries."},
-				{Role: "user", Content: prompt},
-			},
-		})
-		if err == nil && len(resp.Choices) > 0 && resp.Choices[0].Message.Content != "" {
-			summaryText = resp.Choices[0].Message.Content
+	keepRecent := budget.RecommendedKeepRecent
+	if keepRecent <= 0 {
+		keepRecent = 6
+		if budget.EmergencyCompactionRequired {
+			keepRecent = 4
+		} else if budget.ModelContextWindow >= 200000 {
+			keepRecent = 12
 		}
 	}
 
-	summaryMsg := domain.OpenAIMessage{
-		Role:    "system",
-		Content: fmt.Sprintf("## Previous Conversation Context Summary (Auto-Compacted)\n%s", strings.TrimSpace(summaryText)),
+	boundary := findSafeCompactionBoundary(messages, keepRecent)
+	if boundary <= 1 {
+		return messages, nil
 	}
+
+	systemMsg := messages[0]
+	middleMessages := messages[1:boundary]
+	recentMessages := messages[boundary:]
+
+	summaryMsg := GenerateStructuredCompaction(ctx, middleMessages, m.chatUseCase, m.model)
 
 	compacted := make([]domain.OpenAIMessage, 0, 2+len(recentMessages))
 	compacted = append(compacted, systemMsg)

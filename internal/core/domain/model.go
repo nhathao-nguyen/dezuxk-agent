@@ -111,9 +111,10 @@ func CanonicalModelID(rawID string, service ServiceKind) string {
 // ModelRegistry quản lý danh mục mô hình trong bộ nhớ đệm thời gian chạy (in-memory cache).
 // PostgreSQL và upstream discovery là nguồn chân lý bền vững (source of truth).
 type ModelRegistry struct {
-	mu      sync.RWMutex
-	models  map[string]ModelDescriptor
-	aliases map[string]ModelAliasRule
+	mu                 sync.RWMutex
+	models             map[string]ModelDescriptor
+	aliases            map[string]ModelAliasRule
+	capabilityRegistry *ModelCapabilityRegistry
 }
 
 func DefaultModelAliases() map[string]ModelAliasRule {
@@ -129,8 +130,9 @@ func DefaultModelAliases() map[string]ModelAliasRule {
 
 func NewModelRegistry(initial []ModelDescriptor) *ModelRegistry {
 	r := &ModelRegistry{
-		models:  make(map[string]ModelDescriptor),
-		aliases: DefaultModelAliases(),
+		models:             make(map[string]ModelDescriptor),
+		aliases:            DefaultModelAliases(),
+		capabilityRegistry: NewModelCapabilityRegistry(),
 	}
 	now := time.Now()
 	for _, m := range initial {
@@ -146,6 +148,37 @@ func NewModelRegistry(initial []ModelDescriptor) *ModelRegistry {
 		r.models[m.ID] = m
 	}
 	return r
+}
+
+func (r *ModelRegistry) CapabilityRegistry() *ModelCapabilityRegistry {
+	if r == nil {
+		return NewModelCapabilityRegistry()
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.capabilityRegistry == nil {
+		return NewModelCapabilityRegistry()
+	}
+	return r.capabilityRegistry
+}
+
+func (r *ModelRegistry) GetCapabilities(modelID string) ModelCapabilities {
+	if r == nil {
+		return DefaultFallbackCapabilities(modelID, nil)
+	}
+	r.mu.RLock()
+	capReg := r.capabilityRegistry
+	desc, ok := r.models[modelID]
+	r.mu.RUnlock()
+
+	var descPtr *ModelDescriptor
+	if ok {
+		descPtr = &desc
+	}
+	if capReg == nil {
+		return DefaultFallbackCapabilities(modelID, descPtr)
+	}
+	return capReg.Resolve(modelID, descPtr)
 }
 
 func (r *ModelRegistry) SetAliases(aliases map[string]ModelAliasRule) {
@@ -267,6 +300,14 @@ func (m *ModelDescriptor) HasCapability(cap ModelCapability) bool {
 		}
 	}
 	return false
+}
+
+// CapabilitiesProfile trả về ModelCapabilities phân giải từ ModelDescriptor
+func (m *ModelDescriptor) CapabilitiesProfile() ModelCapabilities {
+	if m == nil {
+		return DefaultFallbackCapabilities("", nil)
+	}
+	return GetGlobalCapabilityRegistry().Resolve(m.ID, m)
 }
 
 // ResolveGeminiModel phân giải tên mô hình cho dịch vụ Gemini

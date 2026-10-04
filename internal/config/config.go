@@ -190,20 +190,23 @@ func (o Operations) Enabled(operation string) bool {
 }
 
 type ServerConfig struct {
-	Host                  string          `yaml:"host"`
-	Port                  int             `yaml:"port"`
-	APIKey                string          `yaml:"api_key"`
-	MetricsToken          string          `yaml:"metrics_token"`
-	AllowedOrigins        []string        `yaml:"allowed_origins"`
-	ReadTimeout           time.Duration   `yaml:"read_timeout"`
-	WriteTimeout          time.Duration   `yaml:"write_timeout"`
-	UpstreamShortTimeout  time.Duration   `yaml:"upstream_short_timeout"`
-	UpstreamStreamTimeout time.Duration   `yaml:"upstream_stream_timeout"`
-	MaxHeaderBytes        int             `yaml:"max_header_bytes"`
-	EnableRequestLog      bool            `yaml:"enable_request_log"`
-	TrustedProxies        []string        `yaml:"trusted_proxies"`
-	ShutdownTimeout       time.Duration   `yaml:"shutdown_timeout"`
-	RateLimit             RateLimitConfig `yaml:"rate_limit"`
+	Host                   string          `yaml:"host"`
+	Port                   int             `yaml:"port"`
+	APIKey                 string          `yaml:"api_key"`
+	MetricsToken           string          `yaml:"metrics_token"`
+	AllowedOrigins         []string        `yaml:"allowed_origins"`
+	ReadTimeout            time.Duration   `yaml:"read_timeout"`
+	WriteTimeout           time.Duration   `yaml:"write_timeout"`
+	UpstreamShortTimeout   time.Duration   `yaml:"upstream_short_timeout"`
+	UpstreamStreamTimeout  time.Duration   `yaml:"upstream_stream_timeout"`
+	UpstreamConnectTimeout time.Duration   `yaml:"upstream_connect_timeout"`
+	UpstreamIdleTimeout    time.Duration   `yaml:"stream_idle_timeout"`
+	UpstreamMaxDuration    time.Duration   `yaml:"stream_max_duration"`
+	MaxHeaderBytes         int             `yaml:"max_header_bytes"`
+	EnableRequestLog       bool            `yaml:"enable_request_log"`
+	TrustedProxies         []string        `yaml:"trusted_proxies"`
+	ShutdownTimeout        time.Duration   `yaml:"shutdown_timeout"`
+	RateLimit              RateLimitConfig `yaml:"rate_limit"`
 }
 
 type RateLimitConfig struct {
@@ -227,16 +230,43 @@ func (s ServerConfig) ShortTimeout() time.Duration {
 	return 20 * time.Second
 }
 
+// ConnectTimeout trả về thời gian chờ thiết lập kết nối tới upstream (mặc định 10s)
+func (s ServerConfig) ConnectTimeout() time.Duration {
+	if s.UpstreamConnectTimeout > 0 {
+		return s.UpstreamConnectTimeout
+	}
+	return 10 * time.Second
+}
+
+// StreamIdleTimeout trả về thời gian chờ tối đa giữa 2 lần nhận dữ liệu từ upstream (mặc định 60s)
+func (s ServerConfig) StreamIdleTimeout() time.Duration {
+	if s.UpstreamIdleTimeout > 0 {
+		return s.UpstreamIdleTimeout
+	}
+	return 60 * time.Second
+}
+
+// StreamMaxDuration trả về thời lượng tối đa cho toàn bộ phiên sinh nội dung dài (mặc định 30 phút = 1800s)
+func (s ServerConfig) StreamMaxDuration() time.Duration {
+	if s.UpstreamMaxDuration > 0 {
+		return s.UpstreamMaxDuration
+	}
+	return 1800 * time.Second
+}
+
 // StreamTimeout là hạn chờ dài của StreamGenerate và StreamChat.
-// Khóa thiếu thì lấy read_timeout, rồi 300 giây. Caller deadline ngắn hơn vẫn thắng.
+// Ưu tiên: UpstreamStreamTimeout > UpstreamMaxDuration > ReadTimeout > 1800s.
 func (s ServerConfig) StreamTimeout() time.Duration {
 	if s.UpstreamStreamTimeout > 0 {
 		return s.UpstreamStreamTimeout
 	}
+	if s.UpstreamMaxDuration > 0 {
+		return s.UpstreamMaxDuration
+	}
 	if s.ReadTimeout > 0 {
 		return s.ReadTimeout
 	}
-	return 300 * time.Second
+	return 1800 * time.Second
 }
 
 type ProfilesConfig struct {

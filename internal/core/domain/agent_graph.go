@@ -8,13 +8,14 @@ import (
 type GraphNodeKind string
 
 const (
-	NodeKindPlan      GraphNodeKind = "PLAN"      // Lập kế hoạch phân rã nhiệm vụ thành Todo Checklist
-	NodeKindExecute   GraphNodeKind = "EXECUTE"   // Thực thi mã nguồn và công cụ cho bước hiện tại
-	NodeKindVerify    GraphNodeKind = "VERIFY"    // Chạy kiểm thử / linter để thu thập bằng chứng xác minh
-	NodeKindFix       GraphNodeKind = "FIX"       // Chẩn đoán lỗi và áp dụng bản vá tự sửa sai
-	NodeKindComplete  GraphNodeKind = "COMPLETE"  // Hoàn thành với đầy đủ bằng chứng đã xác minh
-	NodeKindFailed    GraphNodeKind = "FAILED"    // Thất bại sau khi đã vượt quá số lần Fix tối đa
-	NodeKindInterrupt GraphNodeKind = "INTERRUPT" // Tạm dừng chờ người dùng phê duyệt hoặc can thiệp
+	NodeKindPlan             GraphNodeKind = "PLAN"              // Lập kế hoạch phân rã nhiệm vụ thành Todo Checklist
+	NodeKindExecute          GraphNodeKind = "EXECUTE"           // Thực thi mã nguồn và công cụ cho bước hiện tại
+	NodeKindVerify           GraphNodeKind = "VERIFY"            // Chạy kiểm thử / linter để thu thập bằng chứng xác minh
+	NodeKindFix              GraphNodeKind = "FIX"               // Chẩn đoán lỗi và áp dụng bản vá tự sửa sai
+	NodeKindCompletionVerify GraphNodeKind = "COMPLETION_VERIFY" // Thẩm định toàn diện đối chiếu Original Goal + Evidence
+	NodeKindComplete         GraphNodeKind = "COMPLETE"          // Hoàn thành với đầy đủ bằng chứng đã xác minh
+	NodeKindFailed           GraphNodeKind = "FAILED"            // Thất bại sau khi đã vượt quá số lần Fix tối đa
+	NodeKindInterrupt        GraphNodeKind = "INTERRUPT"         // Tạm dừng chờ người dùng phê duyệt hoặc can thiệp
 )
 
 // PlanStepStatus trạng thái của từng bước trong kế hoạch
@@ -84,19 +85,20 @@ type AgentCheckpoint struct {
 
 // AgentGraphState trạng thái tổng hợp của luồng Workflow State Machine
 type AgentGraphState struct {
-	TaskID       string        `json:"task_id"`
-	Goal         string        `json:"goal"`
-	CurrentNode  GraphNodeKind `json:"current_node"`
-	Plan         TaskPlan      `json:"plan"`
-	AgentState   AgentState    `json:"agent_state"`
-	MaxFixRetry  int           `json:"max_fix_retry"` // Mặc định 3 lần tự sửa lỗi trước khi dừng
-	Checkpoints  int           `json:"checkpoints_count"`
-	IsCompleted  bool          `json:"is_completed"`
-	FinalSummary string        `json:"final_summary"`
-	Error        string        `json:"error,omitempty"`
-	GitDiff      string        `json:"git_diff,omitempty"`      // Git Diff sau khi workflow hoàn thành
-	WorktreePath string        `json:"worktree_path,omitempty"` // Thư mục sandbox nếu có
-	BranchName   string        `json:"branch_name,omitempty"`   // Nhánh git tạm nếu có
-	CreatedAt    time.Time     `json:"created_at"`
-	UpdatedAt    time.Time     `json:"updated_at"`
+	TaskID           string        `json:"task_id"`
+	Goal             string        `json:"goal"`
+	CurrentNode      GraphNodeKind `json:"current_node"`
+	Plan             TaskPlan      `json:"plan"`
+	AgentState       AgentState    `json:"agent_state"`
+	MaxFixRetry      int           `json:"max_fix_retry"` // Mặc định 3 lần tự sửa lỗi trước khi dừng
+	Checkpoints      int           `json:"checkpoints_count"`
+	CompletionRounds int           `json:"completion_rounds"` // Số vòng hoàn thiện từ CompletionVerifier
+	IsCompleted      bool          `json:"is_completed"`
+	FinalSummary     string        `json:"final_summary"`
+	Error            string        `json:"error,omitempty"`
+	GitDiff          string        `json:"git_diff,omitempty"`      // Git Diff sau khi workflow hoàn thành
+	WorktreePath     string        `json:"worktree_path,omitempty"` // Thư mục sandbox nếu có
+	BranchName       string        `json:"branch_name,omitempty"`   // Nhánh git tạm nếu có
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
 }

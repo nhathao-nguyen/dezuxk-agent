@@ -137,6 +137,20 @@ type metricState struct {
 	runtimeAccountModelEligibility map[string]int64
 	runtimeModelSelections         map[string]uint64
 	runtimeModelFailovers          map[string]uint64
+
+	// Runtime Optimization Metrics (Section 8)
+	contextTokensEstimated         int64
+	contextBudgetLimit             int64
+	contextCompactionsTotal        uint64
+	contextCompactionFailuresTotal uint64
+	reasoningPolicySelected        map[string]uint64
+	reasoningModeNativeOrEmulated  map[string]uint64
+	continuationsTotal             uint64
+	continuationExhaustedTotal     uint64
+	streamIdleTimeoutsTotal        uint64
+	completionVerifierPassTotal    uint64
+	completionVerifierRetryTotal   uint64
+	completionVerifierBlockedTotal uint64
 }
 
 func NewContractMetrics() *ContractMetrics {
@@ -171,6 +185,8 @@ func NewContractMetrics() *ContractMetrics {
 		runtimeAccountModelEligibility: make(map[string]int64),
 		runtimeModelSelections:         make(map[string]uint64),
 		runtimeModelFailovers:          make(map[string]uint64),
+		reasoningPolicySelected:        make(map[string]uint64),
+		reasoningModeNativeOrEmulated:  make(map[string]uint64),
 	}}
 }
 
@@ -768,6 +784,20 @@ type ContractSnapshot struct {
 	RuntimeAccountModelEligibility map[string]int64  `json:"runtime_account_model_eligibility"`
 	RuntimeModelSelections         map[string]uint64 `json:"runtime_model_selection_total"`
 	RuntimeModelFailovers          map[string]uint64 `json:"runtime_model_failover_total"`
+
+	// Runtime Optimization Metrics (Section 8)
+	ContextTokensEstimated         int64             `json:"context_tokens_estimated"`
+	ContextBudgetLimit             int64             `json:"context_budget_limit"`
+	ContextCompactionsTotal        uint64            `json:"context_compactions_total"`
+	ContextCompactionFailuresTotal uint64            `json:"context_compaction_failures_total"`
+	ReasoningPolicySelected        map[string]uint64 `json:"reasoning_policy_selected"`
+	ReasoningModeNativeOrEmulated  map[string]uint64 `json:"reasoning_mode_native_or_emulated"`
+	ContinuationsTotal             uint64            `json:"continuations_total"`
+	ContinuationExhaustedTotal     uint64            `json:"continuation_exhausted_total"`
+	StreamIdleTimeoutsTotal        uint64            `json:"stream_idle_timeouts_total"`
+	CompletionVerifierPassTotal    uint64            `json:"completion_verifier_pass_total"`
+	CompletionVerifierRetryTotal   uint64            `json:"completion_verifier_retry_total"`
+	CompletionVerifierBlockedTotal uint64            `json:"completion_verifier_blocked_total"`
 }
 
 func (m *ContractMetrics) Snapshot() ContractSnapshot {
@@ -902,6 +932,14 @@ func (m *ContractMetrics) Snapshot() ContractSnapshot {
 	for k, v := range m.state.runtimeModelFailovers {
 		runtimeFailovers[k] = v
 	}
+	reasoningPolicySelected := make(map[string]uint64, len(m.state.reasoningPolicySelected))
+	for k, v := range m.state.reasoningPolicySelected {
+		reasoningPolicySelected[k] = v
+	}
+	reasoningModeNativeOrEmulated := make(map[string]uint64, len(m.state.reasoningModeNativeOrEmulated))
+	for k, v := range m.state.reasoningModeNativeOrEmulated {
+		reasoningModeNativeOrEmulated[k] = v
+	}
 
 	return ContractSnapshot{
 		TotalRequests:                  m.state.totalRequests,
@@ -954,6 +992,18 @@ func (m *ContractMetrics) Snapshot() ContractSnapshot {
 		RuntimeAccountModelEligibility: runtimeEligibility,
 		RuntimeModelSelections:         runtimeSelections,
 		RuntimeModelFailovers:          runtimeFailovers,
+		ContextTokensEstimated:         m.state.contextTokensEstimated,
+		ContextBudgetLimit:             m.state.contextBudgetLimit,
+		ContextCompactionsTotal:        m.state.contextCompactionsTotal,
+		ContextCompactionFailuresTotal: m.state.contextCompactionFailuresTotal,
+		ReasoningPolicySelected:        reasoningPolicySelected,
+		ReasoningModeNativeOrEmulated:  reasoningModeNativeOrEmulated,
+		ContinuationsTotal:             m.state.continuationsTotal,
+		ContinuationExhaustedTotal:     m.state.continuationExhaustedTotal,
+		StreamIdleTimeoutsTotal:        m.state.streamIdleTimeoutsTotal,
+		CompletionVerifierPassTotal:    m.state.completionVerifierPassTotal,
+		CompletionVerifierRetryTotal:   m.state.completionVerifierRetryTotal,
+		CompletionVerifierBlockedTotal: m.state.completionVerifierBlockedTotal,
 	}
 }
 
@@ -1143,6 +1193,111 @@ func (m *ContractMetrics) RecordCrossNodeEvent(kind string) {
 		kind = "event"
 	}
 	m.state.crossNodeEvents[kind]++
+}
+
+func (m *ContractMetrics) RecordContextBudget(tokensEstimated, budgetLimit int) {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.contextTokensEstimated = int64(tokensEstimated)
+	m.state.contextBudgetLimit = int64(budgetLimit)
+}
+
+func (m *ContractMetrics) IncrementContextCompactions() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.contextCompactionsTotal++
+}
+
+func (m *ContractMetrics) IncrementContextCompactionFailures() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.contextCompactionFailuresTotal++
+}
+
+func (m *ContractMetrics) RecordReasoningPolicy(mode string, isNative bool) {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	if mode == "" {
+		mode = "none"
+	}
+	if m.state.reasoningPolicySelected == nil {
+		m.state.reasoningPolicySelected = make(map[string]uint64)
+	}
+	m.state.reasoningPolicySelected[mode]++
+	if m.state.reasoningModeNativeOrEmulated == nil {
+		m.state.reasoningModeNativeOrEmulated = make(map[string]uint64)
+	}
+	if isNative {
+		m.state.reasoningModeNativeOrEmulated["native"]++
+	} else {
+		m.state.reasoningModeNativeOrEmulated["emulated"]++
+	}
+}
+
+func (m *ContractMetrics) IncrementContinuations() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.continuationsTotal++
+}
+
+func (m *ContractMetrics) IncrementContinuationExhausted() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.continuationExhaustedTotal++
+}
+
+func (m *ContractMetrics) IncrementStreamIdleTimeouts() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.streamIdleTimeoutsTotal++
+}
+
+func (m *ContractMetrics) IncrementCompletionVerifierPass() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.completionVerifierPassTotal++
+}
+
+func (m *ContractMetrics) IncrementCompletionVerifierRetry() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.completionVerifierRetryTotal++
+}
+
+func (m *ContractMetrics) IncrementCompletionVerifierBlocked() {
+	if m == nil || m.state == nil {
+		return
+	}
+	m.state.mu.Lock()
+	defer m.state.mu.Unlock()
+	m.state.completionVerifierBlockedTotal++
 }
 
 func (c *opCounter) snapshot() OperationMetrics {

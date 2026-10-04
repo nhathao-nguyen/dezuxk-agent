@@ -65,6 +65,7 @@ type MemoryService interface {
 	StoreArchival(ctx context.Context, key, content string, tags []string) error
 	SearchArchival(ctx context.Context, query string, topK int) ([]domain.MemorySearchResult, error)
 	CompactConversation(ctx context.Context, messages []domain.OpenAIMessage, threshold int) ([]domain.OpenAIMessage, error)
+	CompactWithBudget(ctx context.Context, messages []domain.OpenAIMessage, budget domain.ContextBudget) ([]domain.OpenAIMessage, error)
 }
 
 // SubagentSupervisor giao diện điều phối và phân bổ nhiệm vụ cho các sub-agents biệt lập

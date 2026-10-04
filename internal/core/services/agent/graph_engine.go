@@ -21,7 +21,7 @@ import (
 
 var reJSONBlock = regexp.MustCompile(`(?s)` + "```" + `(?:json)?\s*([\{\[].*?[\}\]])\s*` + "```")
 
-// GraphEngine điều phối State Machine theo triết lý LangGraph (PLAN -> EXECUTE -> VERIFY -> FIX)
+// GraphEngine điều phối State Machine theo triết lý LangGraph (PLAN -> EXECUTE -> VERIFY -> FIX -> COMPLETION_VERIFY -> COMPLETE)
 type GraphEngine struct {
 	chatUseCase    ports.ChatUseCase
 	tools          ports.ToolRegistry
@@ -29,6 +29,7 @@ type GraphEngine struct {
 	approval       ports.ApprovalProvider
 	policyEngine   ports.ToolExecutionService
 	runner         *Runner
+	verifier       *CompletionVerifier
 	maxFixRetries  int
 }
 
@@ -50,8 +51,27 @@ func NewGraphEngine(
 		checkpointRepo: checkpointRepo,
 		approval:       approval,
 		runner:         runner,
+		verifier:       NewCompletionVerifier(),
 		maxFixRetries:  maxFixRetries,
 	}
+}
+
+// SetCompletionVerifier thiết lập CompletionVerifier thẩm định hoàn tất chu trình đồ thị
+func (g *GraphEngine) SetCompletionVerifier(v *CompletionVerifier) {
+	g.verifier = v
+}
+
+func (g *GraphEngine) getVerifier() *CompletionVerifier {
+	if g.verifier != nil {
+		return g.verifier
+	}
+	return NewCompletionVerifier()
+}
+
+func (g *GraphEngine) resolvePolicy(goal string, model string) ReasoningPolicy {
+	profile := DetectTaskComplexity(goal, "")
+	caps := domain.GetCapabilities(model)
+	return ResolveReasoningPolicy(caps, profile, nil)
 }
 
 // SetPolicyEngine thiết lập engine chính sách kiểm soát toàn diện lời gọi công cụ
@@ -205,7 +225,7 @@ func (g *GraphEngine) executeWorkflow(ctx context.Context, state *domain.AgentGr
 		case domain.NodeKindExecute:
 			step := state.Plan.GetCurrentStep()
 			if step == nil {
-				state.CurrentNode = domain.NodeKindComplete
+				state.CurrentNode = domain.NodeKindCompletionVerify
 				continue
 			}
 
@@ -221,7 +241,7 @@ func (g *GraphEngine) executeWorkflow(ctx context.Context, state *domain.AgentGr
 		case domain.NodeKindVerify:
 			step := state.Plan.GetCurrentStep()
 			if step == nil {
-				state.CurrentNode = domain.NodeKindComplete
+				state.CurrentNode = domain.NodeKindCompletionVerify
 				continue
 			}
 
@@ -240,7 +260,7 @@ func (g *GraphEngine) executeWorkflow(ctx context.Context, state *domain.AgentGr
 					state.Plan.CurrentStepIndex++
 					state.CurrentNode = domain.NodeKindExecute
 				} else {
-					state.CurrentNode = domain.NodeKindComplete
+					state.CurrentNode = domain.NodeKindCompletionVerify
 				}
 			} else {
 				step.Status = domain.StepStatusFailed
@@ -251,7 +271,7 @@ func (g *GraphEngine) executeWorkflow(ctx context.Context, state *domain.AgentGr
 		case domain.NodeKindFix:
 			step := state.Plan.GetCurrentStep()
 			if step == nil {
-				state.CurrentNode = domain.NodeKindComplete
+				state.CurrentNode = domain.NodeKindCompletionVerify
 				continue
 			}
 
@@ -272,6 +292,70 @@ func (g *GraphEngine) executeWorkflow(ctx context.Context, state *domain.AgentGr
 			}
 
 			state.CurrentNode = domain.NodeKindVerify
+			g.saveCheckpoint(ctx, state, opts)
+
+		case domain.NodeKindCompletionVerify:
+			if opts.OnProgress != nil {
+				opts.OnProgress(0, "node_completion_verify", "[COMPLETION VERIFY] Đang đối chiếu Original Goal + Constraints + Plan + Evidence...")
+			}
+			vResult := g.getVerifier().VerifyGoalAndPlan(ctx, state.Goal, &state.Plan, &state.AgentState, opts, state.CompletionRounds)
+			if vResult.Status == StatusComplete {
+				if g.runner != nil && g.runner.metrics != nil {
+					g.runner.metrics.IncrementCompletionVerifierPass()
+				}
+				state.CurrentNode = domain.NodeKindComplete
+				g.saveCheckpoint(ctx, state, opts)
+				continue
+			}
+
+			if vResult.Status == StatusBlocked {
+				if g.runner != nil && g.runner.metrics != nil {
+					g.runner.metrics.IncrementCompletionVerifierBlocked()
+				}
+				state.CurrentNode = domain.NodeKindFailed
+				state.Error = fmt.Sprintf("Nhiệm vụ bị chặn (BLOCKED): %s", vResult.Reason)
+				g.saveCheckpoint(ctx, state, opts)
+				return state, fmt.Errorf("%s", state.Error)
+			}
+
+			if g.runner != nil && g.runner.metrics != nil {
+				g.runner.metrics.IncrementCompletionVerifierRetry()
+			}
+
+			state.CompletionRounds++
+			maxRounds := g.maxFixRetries
+			if maxRounds <= 0 {
+				maxRounds = 3
+			}
+			if state.CompletionRounds > maxRounds {
+				state.CurrentNode = domain.NodeKindFailed
+				state.Error = fmt.Sprintf("Nhiệm vụ chưa hoàn tất sau %d vòng bổ sung sửa chữa: %s", state.CompletionRounds, vResult.Reason)
+				g.saveCheckpoint(ctx, state, opts)
+				return state, fmt.Errorf("%s", state.Error)
+			}
+
+			if len(vResult.RepairPlanSteps) > 0 {
+				if opts.OnProgress != nil {
+					opts.OnProgress(0, "completion_repair", fmt.Sprintf("[COMPLETION VERIFY] Bổ sung %d bước khắc phục yêu cầu còn thiếu...", len(vResult.RepairPlanSteps)))
+				}
+				state.Plan.Steps = append(state.Plan.Steps, vResult.RepairPlanSteps...)
+				state.Plan.CurrentStepIndex = len(state.Plan.Steps) - len(vResult.RepairPlanSteps)
+				state.CurrentNode = domain.NodeKindExecute
+			} else if vResult.Unverified || vResult.TestFailed || vResult.LinterFailed {
+				repairStep := domain.PlanStep{
+					ID:                  len(state.Plan.Steps) + 1,
+					Title:               "Kiểm chứng & Khắc phục hoàn tất",
+					Description:         vResult.SuggestedPrompt,
+					VerificationCommand: "go test -v ./...",
+					Status:              domain.StepStatusPending,
+					UpdatedAt:           time.Now(),
+				}
+				state.Plan.Steps = append(state.Plan.Steps, repairStep)
+				state.Plan.CurrentStepIndex = len(state.Plan.Steps) - 1
+				state.CurrentNode = domain.NodeKindExecute
+			} else {
+				state.CurrentNode = domain.NodeKindComplete
+			}
 			g.saveCheckpoint(ctx, state, opts)
 
 		case domain.NodeKindComplete:
@@ -305,12 +389,22 @@ func (g *GraphEngine) nodePlan(ctx context.Context, state *domain.AgentGraphStat
 		osGuide += "On Linux/macOS, use 'test -f <file>' to check file existence, 'go build', 'go run main.go', 'go test -v ./...'."
 	}
 
+	policy := g.resolvePolicy(state.Goal, opts.Model)
+	minSteps := policy.MinPlanningDepth
+	maxSteps := policy.MaxPlanningDepth
+	if minSteps <= 0 {
+		minSteps = 1
+	}
+	if maxSteps < minSteps {
+		maxSteps = minSteps + 2
+	}
+
 	planPrompt := fmt.Sprintf(`You are the Chief Software Architect.
 Goal: %s
 Workspace: %s
 %s
 
-Break down this goal into a clear, minimal, verifiable sequence of steps (1 to 4 steps).
+Break down this goal into a clear, minimal, verifiable sequence of steps (%d to %d steps).
 CRITICAL RULES FOR VERIFICATION COMMANDS:
 1. Verification commands MUST BE READ-ONLY / TEST CHECKS (e.g. "go build", "go test -v ./...", "go run main.go", "Test-Path go.mod").
 2. NEVER use mutating or initialization commands (like "go mod init", "npm init", "mkdir") as verification commands, because running them again will fail if the resource was already created!
@@ -328,7 +422,7 @@ You MUST respond strictly with a valid JSON object matching this schema:
       "verification_cmd": "read-only command to verify this step"
     }
   ]
-}`, state.Goal, opts.Workspace, osGuide, opts.Workspace, opts.Workspace, opts.Workspace)
+}`, state.Goal, opts.Workspace, osGuide, minSteps, maxSteps, opts.Workspace, opts.Workspace, opts.Workspace)
 
 	chatReq := &domain.OpenAIChatRequest{
 		Model: opts.Model,
@@ -458,7 +552,12 @@ func (g *GraphEngine) nodeExecute(ctx context.Context, state *domain.AgentGraphS
 		step.ID, step.Title, step.Description)
 
 	stepOpts := opts
-	stepOpts.MaxSteps = 15 // Tối đa 15 sub-step cho mỗi step
+	policy := g.resolvePolicy(state.Goal, opts.Model)
+	if policy.StepExecutionBudget > 0 {
+		stepOpts.MaxSteps = policy.StepExecutionBudget
+	} else {
+		stepOpts.MaxSteps = 15
+	}
 
 	resState, err := g.runner.Run(ctx, execGoal, stepOpts)
 	if err != nil {
@@ -577,7 +676,12 @@ MANDATORY INSTRUCTIONS:
 		step.ID, step.Title, cleanCmd, step.ErrorOutput, opts.Workspace, filesListStr)
 
 	stepOpts := opts
-	stepOpts.MaxSteps = 15
+	policy := g.resolvePolicy(state.Goal, opts.Model)
+	if policy.StepExecutionBudget > 0 {
+		stepOpts.MaxSteps = policy.StepExecutionBudget
+	} else {
+		stepOpts.MaxSteps = 15
+	}
 	stepOpts.RequireAction = true
 
 	resState, err := g.runner.Run(ctx, fixGoal, stepOpts)

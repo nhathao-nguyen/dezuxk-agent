@@ -3,8 +3,11 @@ package google_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"dezuxk-gateway/internal/adapters/outbound/google"
 )
@@ -383,5 +386,134 @@ func TestReadGeminiStreamWithThinking(t *testing.T) {
 	}
 	if reply.ConversationID != "c_thk" {
 		t.Errorf("expected conversation ID c_thk, got %q", reply.ConversationID)
+	}
+}
+
+func TestStream_IdleTimeout_Triggered(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	ctx := google.WithStreamIdleTimeout(context.Background(), 50*time.Millisecond)
+	tracker := google.NewStreamMetricsTracker()
+	ctx = google.WithStreamMetricsTracker(ctx, tracker)
+
+	// Send one line, then hang
+	go func() {
+		sampleLine := `[["wrb.fr","assistant.lamda.BardFrontendService","[null,[\"c_1\",\"r_1\"],null,null,[[\"rc_1\",[\"Hello!\"]]]]"]]` + "\n"
+		_, _ = pw.Write([]byte(sampleLine))
+		// Do not write anything further, keep pipe open
+	}()
+
+	var received []string
+	_, err := google.ReadGeminiStreamWithThinking(
+		ctx,
+		pr,
+		nil,
+		func(delta, convID string) error {
+			received = append(received, delta)
+			return nil
+		},
+		nil,
+	)
+
+	if err == nil {
+		t.Fatalf("expected idle timeout error, got nil")
+	}
+	if !errors.Is(err, google.ErrStreamIdleTimeout) && !strings.Contains(err.Error(), "idle timeout") {
+		t.Errorf("expected ErrStreamIdleTimeout, got: %v", err)
+	}
+	snap := tracker.Snapshot()
+	if snap.TimeoutKind != "idle" {
+		t.Errorf("expected TimeoutKind idle, got %s", snap.TimeoutKind)
+	}
+}
+
+func TestStream_SlowActiveStream_DoesNotTimeout(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+
+	// Short idle timeout: 80ms
+	ctx := google.WithStreamIdleTimeout(context.Background(), 80*time.Millisecond)
+	tracker := google.NewStreamMetricsTracker()
+	ctx = google.WithStreamMetricsTracker(ctx, tracker)
+
+	// Write 5 chunks with 25ms pause between each (within the 80ms idle window)
+	go func() {
+		defer pw.Close()
+		for i := 1; i <= 5; i++ {
+			text := strings.Repeat("A", i)
+			inner := []interface{}{
+				nil, []interface{}{"c_slow", "r_slow"}, nil, nil,
+				[]interface{}{[]interface{}{"rc_slow", []interface{}{text}}},
+			}
+			b, _ := json.Marshal(inner)
+			line, _ := json.Marshal([][]interface{}{{"wrb.fr", "assistant.lamda.BardFrontendService", string(b)}})
+			_, _ = pw.Write(append(line, '\n'))
+			time.Sleep(25 * time.Millisecond)
+		}
+	}()
+
+	var finalTokens []string
+	reply, err := google.ReadGeminiStreamWithThinking(
+		ctx,
+		pr,
+		nil,
+		func(delta, convID string) error {
+			finalTokens = append(finalTokens, delta)
+			return nil
+		},
+		nil,
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error for active slow stream: %v", err)
+	}
+	if reply.Text != "AAAAA" {
+		t.Errorf("expected final text AAAAA, got %q", reply.Text)
+	}
+	snap := tracker.Snapshot()
+	if snap.TimeoutKind != "" {
+		t.Errorf("expected no timeout kind, got %q", snap.TimeoutKind)
+	}
+	if !snap.UpstreamEOF {
+		t.Errorf("expected UpstreamEOF true")
+	}
+	if snap.TokensEmitted != 5 {
+		t.Errorf("expected 5 tokens emitted, got %d", snap.TokensEmitted)
+	}
+}
+
+func TestStream_LargeLinesAndRobustness(t *testing.T) {
+	// Line with 150KB of content
+	largeContent := strings.Repeat("0123456789abcdef", 10000)
+	inner := []interface{}{
+		nil, []interface{}{"c_large", "r_large"}, nil, nil,
+		[]interface{}{[]interface{}{"rc_large", []interface{}{largeContent}}},
+	}
+	b, _ := json.Marshal(inner)
+	line, _ := json.Marshal([][]interface{}{{"wrb.fr", "assistant.lamda.BardFrontendService", string(b)}})
+
+	// Stream contains prefix, large line, and a final line without trailing newline
+	rawStream := strings.Join([]string{
+		")]}'",
+		"99999",
+		string(line),
+	}, "\n")
+
+	reply, err := google.ReadGeminiStreamWithThinking(
+		context.Background(),
+		strings.NewReader(rawStream),
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("failed reading large stream: %v", err)
+	}
+	if reply.Text != largeContent {
+		t.Errorf("expected largeContent length %d, got %d", len(largeContent), len(reply.Text))
+	}
+	if reply.ConversationID != "c_large" {
+		t.Errorf("expected conversation ID c_large, got %q", reply.ConversationID)
 	}
 }

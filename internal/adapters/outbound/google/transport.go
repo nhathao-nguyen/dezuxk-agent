@@ -48,10 +48,19 @@ type GoogleTransportAdapter struct {
 }
 
 func NewGoogleTransportAdapter(cfg *config.Config) ports.UpstreamGoogleTransport {
+	short := 20 * time.Second
+	stream := 1800 * time.Second
+	connect := 10 * time.Second
+	if cfg != nil {
+		short = cfg.Server.ShortTimeout()
+		stream = cfg.Server.StreamTimeout()
+		connect = cfg.Server.ConnectTimeout()
+	}
+
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
+			Timeout:   connect,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
@@ -60,22 +69,17 @@ func NewGoogleTransportAdapter(cfg *config.Config) ports.UpstreamGoogleTransport
 		MaxConnsPerHost:       50,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
 	}
 
-	short := 20 * time.Second
-	stream := 300 * time.Second
-	if cfg != nil {
-		short = cfg.Server.ShortTimeout()
-		stream = cfg.Server.StreamTimeout()
-	}
 	return &GoogleTransportAdapter{
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   stream,
+			Timeout:   0, // Timeout = 0 để tránh Client.Timeout hủy ngang stream đọc dữ liệu dài; timeout được kiểm soát bởi context và stream idle detection
 		},
 		flowHost:      DefaultFlowOrigin,
 		geminiHost:    DefaultGeminiOrigin,
@@ -96,7 +100,7 @@ func (a *GoogleTransportAdapter) BoundShort(ctx context.Context) (context.Contex
 }
 
 func (a *GoogleTransportAdapter) BoundStream(ctx context.Context) (context.Context, context.CancelFunc) {
-	limit := 300 * time.Second
+	limit := 1800 * time.Second
 	if a != nil && a.streamTimeout > 0 {
 		limit = a.streamTimeout
 	}
@@ -267,6 +271,7 @@ func (a *GoogleTransportAdapter) getClient(account *domain.ManagedAccount) *http
 		MaxConnsPerHost:       50,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -275,7 +280,7 @@ func (a *GoogleTransportAdapter) getClient(account *domain.ManagedAccount) *http
 
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   a.streamTimeout,
+		Timeout:   0,
 	}
 	a.proxyClients[proxyStr] = client
 	a.proxyAccess[proxyStr] = time.Now()

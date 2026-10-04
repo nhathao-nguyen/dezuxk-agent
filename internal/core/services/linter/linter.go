@@ -187,52 +187,60 @@ func CheckWorkspace(ctx context.Context, workspace string) (summary string, hasE
 	})
 
 	if hasGoFiles {
-		// Chạy go vet ./...
-		vetCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		defer cancel()
-
-		var cmdVet *exec.Cmd
 		if hasGoMod {
-			cmdVet = exec.CommandContext(vetCtx, "go", "vet", "./...")
+			// Chạy go vet ./...
+			vetCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+
+			cmdVet := exec.CommandContext(vetCtx, "go", "vet", "./...")
+			cmdVet.Dir = absWS
+			var vetBuf bytes.Buffer
+			cmdVet.Stdout = &vetBuf
+			cmdVet.Stderr = &vetBuf
+			_ = cmdVet.Run()
+
+			vetOut := strings.TrimSpace(vetBuf.String())
+			if vetOut != "" && !strings.Contains(vetOut, "no Go files") {
+				issues = append(issues, fmt.Sprintf("go vet:\n%s", vetOut))
+				hasError = true
+			}
+
+			// Kiểm tra go build
+			buildCtx, cancelBuild := context.WithTimeout(ctx, 10*time.Second)
+			defer cancelBuild()
+
+			nullDevice := "NUL"
+			if runtime.GOOS != "windows" {
+				nullDevice = "/dev/null"
+			}
+
+			cmdBuild := exec.CommandContext(buildCtx, "go", "build", "-o", nullDevice, "./...")
+			cmdBuild.Dir = absWS
+			var buildBuf bytes.Buffer
+			cmdBuild.Stdout = &buildBuf
+			cmdBuild.Stderr = &buildBuf
+			buildErr := cmdBuild.Run()
+			buildOut := strings.TrimSpace(buildBuf.String())
+			if buildErr != nil && buildOut != "" && !strings.Contains(buildOut, "no Go files") {
+				issues = append(issues, fmt.Sprintf("go build lỗi biên dịch:\n%s", buildOut))
+				hasError = true
+			}
 		} else {
-			cmdVet = exec.CommandContext(vetCtx, "go", "vet", ".")
-		}
-		cmdVet.Dir = absWS
-		var vetBuf bytes.Buffer
-		cmdVet.Stdout = &vetBuf
-		cmdVet.Stderr = &vetBuf
-		_ = cmdVet.Run()
-
-		vetOut := strings.TrimSpace(vetBuf.String())
-		if vetOut != "" && !strings.Contains(vetOut, "no Go files") {
-			issues = append(issues, fmt.Sprintf("go vet:\n%s", vetOut))
-			hasError = true
-		}
-
-		// Kiểm tra go build
-		buildCtx, cancelBuild := context.WithTimeout(ctx, 10*time.Second)
-		defer cancelBuild()
-
-		nullDevice := "NUL"
-		if runtime.GOOS != "windows" {
-			nullDevice = "/dev/null"
-		}
-
-		var cmdBuild *exec.Cmd
-		if hasGoMod {
-			cmdBuild = exec.CommandContext(buildCtx, "go", "build", "-o", nullDevice, "./...")
-		} else {
-			cmdBuild = exec.CommandContext(buildCtx, "go", "build", "-o", nullDevice, ".")
-		}
-		cmdBuild.Dir = absWS
-		var buildBuf bytes.Buffer
-		cmdBuild.Stdout = &buildBuf
-		cmdBuild.Stderr = &buildBuf
-		buildErr := cmdBuild.Run()
-		buildOut := strings.TrimSpace(buildBuf.String())
-		if buildErr != nil && buildOut != "" && !strings.Contains(buildOut, "no Go files") {
-			issues = append(issues, fmt.Sprintf("go build lỗi biên dịch:\n%s", buildOut))
-			hasError = true
+			// Không có go.mod: Kiểm tra cú pháp AST cho từng file .go
+			fset := token.NewFileSet()
+			_ = filepath.Walk(absWS, func(p string, info os.FileInfo, err error) error {
+				if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(info.Name(), ".go") {
+					return nil
+				}
+				content, readErr := os.ReadFile(p)
+				if readErr == nil {
+					if _, parseErr := parser.ParseFile(fset, p, content, parser.AllErrors); parseErr != nil {
+						issues = append(issues, fmt.Sprintf("Lỗi cú pháp tại %s: %v", info.Name(), parseErr))
+						hasError = true
+					}
+				}
+				return nil
+			})
 		}
 	}
 

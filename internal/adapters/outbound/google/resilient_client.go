@@ -107,7 +107,7 @@ func (c *ResilientUpstreamClient) BoundStream(ctx context.Context) (context.Cont
 	if c.underlying != nil {
 		return c.underlying.BoundStream(ctx)
 	}
-	return domain.BoundContext(ctx, 300*time.Second)
+	return domain.BoundContext(ctx, 1800*time.Second)
 }
 
 // DoRequest thực thi request với đầy đủ bảo vệ resilience

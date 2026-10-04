@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dezuxk-gateway/internal/adapters/outbound/google"
 	"dezuxk-gateway/internal/core/domain"
@@ -84,4 +85,55 @@ func TestGoogleTransportAdapter_DynamicTargetHost(t *testing.T) {
 			t.Errorf("expected Origin %s, got %s", ts.URL, capturedReq.Header.Get("Origin"))
 		}
 	})
+}
+
+func TestGoogleTransportAdapter_DirectAndProxyParity(t *testing.T) {
+	adapter := google.NewGoogleTransportAdapter(nil)
+	googleAdapter, ok := adapter.(*google.GoogleTransportAdapter)
+	if !ok {
+		t.Fatalf("expected *GoogleTransportAdapter")
+	}
+
+	directClient := googleAdapter.ClientForAccount(nil)
+	if directClient.Timeout != 0 {
+		t.Errorf("expected direct client.Timeout = 0 for streaming resilience, got %v", directClient.Timeout)
+	}
+
+	directTr, ok := directClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected direct Transport to be *http.Transport")
+	}
+	if directTr.ResponseHeaderTimeout != 30*time.Second {
+		t.Errorf("expected direct ResponseHeaderTimeout 30s, got %v", directTr.ResponseHeaderTimeout)
+	}
+	if directTr.IdleConnTimeout != 90*time.Second {
+		t.Errorf("expected direct IdleConnTimeout 90s, got %v", directTr.IdleConnTimeout)
+	}
+	if directTr.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("expected direct TLSHandshakeTimeout 10s, got %v", directTr.TLSHandshakeTimeout)
+	}
+
+	// Proxy client
+	proxyAcc := &domain.ManagedAccount{
+		ID:       "acc-proxy",
+		ProxyURL: "http://127.0.0.1:8888",
+	}
+	proxyClient := googleAdapter.ClientForAccount(proxyAcc)
+	if proxyClient.Timeout != 0 {
+		t.Errorf("expected proxy client.Timeout = 0 for streaming resilience, got %v", proxyClient.Timeout)
+	}
+
+	proxyTr, ok := proxyClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected proxy Transport to be *http.Transport")
+	}
+	if proxyTr.ResponseHeaderTimeout != 30*time.Second {
+		t.Errorf("expected proxy ResponseHeaderTimeout 30s, got %v", proxyTr.ResponseHeaderTimeout)
+	}
+	if proxyTr.IdleConnTimeout != 90*time.Second {
+		t.Errorf("expected proxy IdleConnTimeout 90s, got %v", proxyTr.IdleConnTimeout)
+	}
+	if proxyTr.TLSHandshakeTimeout != 10*time.Second {
+		t.Errorf("expected proxy TLSHandshakeTimeout 10s, got %v", proxyTr.TLSHandshakeTimeout)
+	}
 }

@@ -15,7 +15,7 @@ import (
 	"dezuxk-gateway/internal/adapters/outbound/sandbox"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
-	"dezuxk-gateway/internal/core/services/linter"
+	"dezuxk-gateway/internal/core/services"
 	"dezuxk-gateway/internal/core/services/policy"
 )
 
@@ -44,6 +44,10 @@ type Runner struct {
 	projectContext     string
 	modelRegistry      *domain.ModelRegistry
 	tenantSettingsRepo ports.TenantRuntimeSettingsRepository
+	budgetMgr          *services.ContextBudgetManager
+	evidenceStore      *EvidenceStore
+	verifier           *CompletionVerifier
+	metrics            *domain.ContractMetrics
 }
 
 // NewRunner khởi tạo một Agent Runner
@@ -53,6 +57,11 @@ func NewRunner(chatUseCase ports.ChatUseCase, tools ports.ToolRegistry, approval
 		tools:       tools,
 		approval:    approval,
 	}
+}
+
+// SetMetrics liên kết contract metrics cho Runner
+func (r *Runner) SetMetrics(m *domain.ContractMetrics) {
+	r.metrics = m
 }
 
 // SetKeyUseCase thiết lập KeyUseCase phục vụ kiểm soát hạn ngạch và tính cước
@@ -111,6 +120,42 @@ func (r *Runner) SetModelRegistry(mr *domain.ModelRegistry) {
 
 func (r *Runner) SetTenantSettingsRepository(repo ports.TenantRuntimeSettingsRepository) {
 	r.tenantSettingsRepo = repo
+}
+
+// SetContextBudgetManager thiết lập bộ quản lý ngân sách ngữ cảnh thích ứng
+func (r *Runner) SetContextBudgetManager(mgr *services.ContextBudgetManager) {
+	r.budgetMgr = mgr
+}
+
+func (r *Runner) getBudgetManager() *services.ContextBudgetManager {
+	if r.budgetMgr != nil {
+		return r.budgetMgr
+	}
+	return services.NewContextBudgetManager(nil)
+}
+
+// SetEvidenceStore thiết lập kho lưu trữ bằng chứng thô L5
+func (r *Runner) SetEvidenceStore(s *EvidenceStore) {
+	r.evidenceStore = s
+}
+
+func (r *Runner) getEvidenceStore() *EvidenceStore {
+	if r.evidenceStore != nil {
+		return r.evidenceStore
+	}
+	return NewEvidenceStore()
+}
+
+// SetCompletionVerifier thiết lập bộ thẩm định độ tin cậy và sự hoàn thành của Agent
+func (r *Runner) SetCompletionVerifier(v *CompletionVerifier) {
+	r.verifier = v
+}
+
+func (r *Runner) getVerifier() *CompletionVerifier {
+	if r.verifier != nil {
+		return r.verifier
+	}
+	return NewCompletionVerifier()
 }
 
 var _ ports.AgentRunner = (*Runner)(nil)
@@ -239,6 +284,10 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		ctx = domain.ContextWithTenantIdentity(ctx, identity)
 	}
 
+	complexity := DetectTaskComplexity(goal, opts.CustomPrompt)
+	if opts.MaxSteps <= 0 {
+		opts.MaxSteps = complexity.InitialStepBudget
+	}
 	opts.MaxSteps = identity.EffectiveMaxSteps(opts.MaxSteps)
 	if identity.EnforceSandbox {
 		opts.UseSandbox = true
@@ -249,10 +298,14 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	if identity.RequireApproval {
 		opts.Supervised = true
 	}
+	if complexity.RequiresAction {
+		opts.RequireAction = true
+	}
 
 	if opts.MaxSteps <= 0 {
 		opts.MaxSteps = 25
 	}
+	allowedExtensions := complexity.MaxAllowedStepExtensions
 	if opts.MaxToolCalls <= 0 {
 		opts.MaxToolCalls = 50
 	}
@@ -488,10 +541,40 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			}
 		}
 
-		// Tự động nén ngữ cảnh nếu vượt quá 12 tin nhắn (Tier 2 Recall Memory)
-		if r.memorySvc != nil && len(state.Messages) > 12 {
-			if compacted, err := r.memorySvc.CompactConversation(execCtx, state.Messages, 12); err == nil {
-				state.Messages = compacted
+		// Kiểm soát ngân sách Token động thích ứng theo từng model (Token-aware Context Budget Manager)
+		caps := domain.GetCapabilities(opts.Model)
+		if r.modelRegistry != nil {
+			if regCaps, ok := r.modelRegistry.ResolveCapabilities(opts.Model); ok {
+				caps = regCaps
+			}
+		}
+		budget := r.getBudgetManager().CalculateBudget(caps, state.Messages, openAITools, &domain.OpenAIChatRequest{Model: opts.Model})
+		if r.metrics != nil {
+			r.metrics.RecordContextBudget(budget.CurrentPromptTokens, budget.UsableContextBudget)
+		}
+
+		profile := DetectTaskComplexity(goal, opts.CustomPrompt)
+		policy := ResolveReasoningPolicy(caps, profile, &domain.OpenAIChatRequest{Model: opts.Model})
+		if r.metrics != nil {
+			r.metrics.RecordReasoningPolicy(policy.Mode, policy.IsNative)
+		}
+
+		if opts.OnProgress != nil && (budget.Watermark >= domain.WatermarkYellow || step == 1) {
+			opts.OnProgress(step, "budget_check", fmt.Sprintf("Token Budget: %s (%d/%d tokens, còn lại: %d)",
+				budget.Watermark, budget.CurrentPromptTokens, budget.UsableContextBudget, budget.RemainingBudget))
+		}
+
+		if r.memorySvc != nil {
+			// Kích hoạt compaction khi budget yêu cầu (dựa trên token và watermark, không dựa trên số lượng tin nhắn)
+			if budget.CompactionRequired || budget.CompactionRecommended || budget.EmergencyCompactionRequired {
+				if compacted, err := r.memorySvc.CompactWithBudget(execCtx, state.Messages, budget); err == nil && len(compacted) > 0 {
+					state.Messages = compacted
+					if r.metrics != nil {
+						r.metrics.IncrementContextCompactions()
+					}
+				} else if err != nil && r.metrics != nil {
+					r.metrics.IncrementContextCompactionFailures()
+				}
 			}
 		}
 
@@ -541,58 +624,59 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			opts.OnProgress(step, "reasoning", assistantMsg.ReasoningContent)
 		}
 
-		// Nếu mô hình không gọi công cụ nào
+		// Nếu mô hình không gọi công cụ nào -> Kích hoạt Response Completion Verifier
 		if len(assistantMsg.ToolCalls) == 0 {
-			// Kiểm tra nếu RequireAction được bật:
-			// Cần kiểm tra xem đã có thao tác sửa đổi file thực tế (replace_file_content hoặc write_file) nào được thực thi chưa
-			hasModified := false
-			for _, prevStep := range state.Steps {
-				for _, tc := range prevStep.ToolCalls {
-					if tc.Function.Name == "replace_file_content" || tc.Function.Name == "write_file" {
-						hasModified = true
-						break
-					}
+			vRes := r.getVerifier().Verify(execCtx, goal, state, assistantMsg, opts)
+			if vRes.Status == StatusComplete {
+				if r.metrics != nil {
+					r.metrics.IncrementCompletionVerifierPass()
 				}
-				if hasModified {
-					break
+				state.IsCompleted = true
+				state.StopReason = domain.StopReasonCompleted
+				state.FinalAnswer = assistantMsg.Content
+				state.Steps = append(state.Steps, stepRecord)
+				state.Messages = append(state.Messages, assistantMsg)
+
+				if opts.OnProgress != nil {
+					opts.OnProgress(step, "completed", "Nhiệm vụ đã hoàn thành xuất sắc!")
 				}
+				return state, nil
 			}
 
-			if opts.RequireAction && !hasModified {
+			if vRes.Status == StatusBlocked {
+				if r.metrics != nil {
+					r.metrics.IncrementCompletionVerifierBlocked()
+				}
+				state.StopReason = domain.StopReasonVerificationFailed
+				state.Error = vRes.Reason
+				state.FinalAnswer = assistantMsg.Content
+				state.Steps = append(state.Steps, stepRecord)
+				return state, nil
+			}
+
+			if r.metrics != nil {
+				r.metrics.IncrementCompletionVerifierRetry()
+			}
+
+			// vRes.Status == StatusIncomplete, StatusNeedsVerification, hoặc StatusNeedsMoreTools
+			if step < opts.MaxSteps {
+				state.Steps = append(state.Steps, stepRecord)
 				state.Messages = append(state.Messages, assistantMsg)
 				state.Messages = append(state.Messages, domain.OpenAIMessage{
 					Role:    "user",
-					Content: "[ACTION REQUIRED]: You must use 'replace_file_content' or 'write_file' to modify the code and apply the fix. Plain text explanations or only reading files without applying changes is strictly prohibited. Use tools to modify the code now.",
+					Content: vRes.SuggestedPrompt,
 				})
 				if opts.OnProgress != nil {
-					opts.OnProgress(step, "enforce_action", "Mô hình trả về text mà chưa áp dụng sửa code -> Yêu cầu gọi công cụ sửa tệp.")
+					opts.OnProgress(step, "verify_continuation", fmt.Sprintf("Thẩm định hoàn tất phát hiện chưa đạt (%s: %s). Yêu cầu mô hình tiếp tục xử lý.", vRes.Status, vRes.Reason))
 				}
 				continue
 			}
 
-			// Tự động chạy compiler check / linter trước khi cho phép báo cáo hoàn tất
-			summary, hasLintError := linter.CheckWorkspace(execCtx, opts.Workspace)
-			if hasLintError && step < opts.MaxSteps {
-				state.Messages = append(state.Messages, assistantMsg)
-				state.Messages = append(state.Messages, domain.OpenAIMessage{
-					Role:    "user",
-					Content: fmt.Sprintf("[LỖI BIÊN DỊCH / LINTER TRƯỚC KHI HOÀN TẤT]: Không thể hoàn tất vì mã nguồn còn lỗi cú pháp/biên dịch:\n%s\nHãy sử dụng các công cụ để sửa lỗi và đảm bảo mã nguồn biên dịch thành công trước khi hoàn thành.", summary),
-				})
-				if opts.OnProgress != nil {
-					opts.OnProgress(step, "linter_fail", "Phát hiện lỗi biên dịch trước khi hoàn tất -> Yêu cầu mô hình sửa lỗi.")
-				}
-				continue
-			}
-
-			state.IsCompleted = true
-			state.StopReason = domain.StopReasonCompleted
+			state.IsCompleted = false
+			state.StopReason = domain.StopReasonMaxStepsReached
 			state.FinalAnswer = assistantMsg.Content
+			state.Error = fmt.Sprintf("Chưa thể hoàn tất nhiệm vụ trong %d bước: %s", opts.MaxSteps, vRes.Reason)
 			state.Steps = append(state.Steps, stepRecord)
-			state.Messages = append(state.Messages, assistantMsg)
-
-			if opts.OnProgress != nil {
-				opts.OnProgress(step, "completed", "Nhiệm vụ đã hoàn thành xuất sắc!")
-			}
 			return state, nil
 		}
 
@@ -794,11 +878,24 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 				consecutiveFailures = 0
 			}
 
+			// Lưu trữ dữ liệu thô vào L5 Evidence Store nếu kích thước lớn và nén inline context
+			inlineOutput := CompactToolOutputIfNeeded(
+				r.getEvidenceStore(),
+				toolName,
+				toolArgs,
+				toolOutput,
+				step,
+				execErr != nil,
+			)
+			if inlineOutput != toolOutput && opts.OnProgress != nil {
+				opts.OnProgress(step, "evidence_stored", fmt.Sprintf("Dữ liệu thô của [%s] (%d bytes) đã được lưu vào L5 Raw Evidence Store", toolName, len(toolOutput)))
+			}
+
 			stepRecord.ToolResults = append(stepRecord.ToolResults, toolOutput)
 			state.Messages = append(state.Messages, domain.OpenAIMessage{
 				Role:       "tool",
 				ToolCallID: tc.ID,
-				Content:    toolOutput,
+				Content:    inlineOutput,
 			})
 
 			if opts.OnProgress != nil {
@@ -823,6 +920,20 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			_ = r.checkpointRepo.SaveCheckpoint(execCtx, cp)
 			if opts.OnProgress != nil {
 				opts.OnProgress(step, "checkpoint", fmt.Sprintf("Checkpoint tại bước %d đã được lưu bền vững", step))
+			}
+		}
+
+		// Dynamic Step Budget Extension: mở rộng có kiểm soát nếu sắp hết bước nhưng đang tiến triển tốt
+		if step == opts.MaxSteps && allowedExtensions > 0 && repeatedToolCount <= 1 && consecutiveFailures == 0 {
+			extend := 5
+			if extend > allowedExtensions {
+				extend = allowedExtensions
+			}
+			opts.MaxSteps += extend
+			state.MaxSteps = opts.MaxSteps
+			allowedExtensions -= extend
+			if opts.OnProgress != nil {
+				opts.OnProgress(step, "step_budget_extended", fmt.Sprintf("Gia hạn thêm %d bước thực thi (Độ phức tạp: %s, còn lại %d bước gia hạn)", extend, complexity.Level, allowedExtensions))
 			}
 		}
 	}

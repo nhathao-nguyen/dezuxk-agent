@@ -295,6 +295,8 @@ func (l *lazyStreamWriter) Write(p []byte) (int, error) {
 		l.w.Header().Set("X-Accel-Buffering", "no")
 		l.headersSent = true
 	}
+	rc := http.NewResponseController(l.w)
+	_ = rc.SetWriteDeadline(time.Time{})
 	return l.w.Write(p)
 }
 
@@ -302,6 +304,8 @@ func (l *lazyStreamWriter) Flush() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.flusher != nil && l.headersSent {
+		rc := http.NewResponseController(l.w)
+		_ = rc.SetWriteDeadline(time.Time{})
 		l.flusher.Flush()
 	}
 }
