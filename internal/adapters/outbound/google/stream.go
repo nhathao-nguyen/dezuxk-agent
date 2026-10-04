@@ -165,7 +165,7 @@ func CleanInternalPlaceholders(text string) string {
 }
 
 // ErrStreamIdleTimeout báo hiệu luồng stream không nhận được byte mới từ Google upstream quá khoảng thời gian idle
-var ErrStreamIdleTimeout = errors.New("stream idle timeout: no data received from upstream within idle window")
+var ErrStreamIdleTimeout = domain.ErrStreamIdleTimeout
 
 type streamIdleTimeoutKey struct{}
 type streamMetricsTrackerKey struct{}
@@ -1258,6 +1258,9 @@ func ReadGeminiStreamWithThinking(
 			}
 			if errors.Is(err, ErrStreamIdleTimeout) || err == ErrStreamIdleTimeout {
 				tracker.SetTimeoutKind("idle")
+				if metrics != nil {
+					metrics.IncrementStreamIdleTimeouts()
+				}
 				return reply, err
 			}
 			return reply, err

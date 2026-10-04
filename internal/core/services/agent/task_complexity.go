@@ -290,7 +290,7 @@ func ResolveReasoningPolicy(
 		isNative = true
 	} else if caps.SupportsThinking() && mode != "none" {
 		isNative = true
-	} else if mode != "none" && budget > 0 {
+	} else if mode != "none" && (budget > 0 || effort != "none") {
 		// Mô hình không hỗ trợ native thinking -> Giả lập ở cấp prompt (EMULATED)
 		isEmulated = true
 		isNative = false
@@ -309,5 +309,103 @@ func ResolveReasoningPolicy(
 		IsNative:             isNative,
 		IsEmulated:           isEmulated,
 		EmulationPrompt:      emulationPrompt,
+	}
+}
+
+// ApplyReasoningPolicy áp dụng chính sách suy luận thích ứng lên OpenAIChatRequest dựa trên năng lực mô hình
+func ApplyReasoningPolicy(req *domain.OpenAIChatRequest, policy ReasoningPolicy, caps domain.ModelCapabilities) {
+	if req == nil {
+		return
+	}
+
+	// 1. Tôn trọng chỉ định tường minh từ client (precedence: explicit client/request > agent adaptive policy > safe defaults)
+	clientHasEffort := strings.TrimSpace(req.ReasoningEffort) != ""
+	clientHasThinking := req.Thinking != nil
+	clientHasBudget := (req.ThinkingBudget != nil && *req.ThinkingBudget > 0) || (req.BudgetTokens != nil && *req.BudgetTokens > 0)
+
+	// Nếu client đã tắt thinking tường minh
+	if clientHasThinking && !*req.Thinking {
+		req.ReasoningEffort = "none"
+		req.ThinkingBudget = nil
+		req.BudgetTokens = nil
+		return
+	}
+	if clientHasEffort && strings.EqualFold(req.ReasoningEffort, "none") {
+		falseVal := false
+		req.Thinking = &falseVal
+		req.ThinkingBudget = nil
+		req.BudgetTokens = nil
+		return
+	}
+
+	// 2. Nếu mô hình hỗ trợ Native Reasoning và policy native
+	if policy.IsNative {
+		if !clientHasEffort && caps.SupportsReasoningEffort() && policy.Effort != "" && policy.Effort != "none" {
+			req.ReasoningEffort = policy.Effort
+		}
+		if !clientHasBudget && caps.SupportsNativeThinkingBudget() && policy.BudgetTokens > 0 {
+			b := policy.BudgetTokens
+			req.ThinkingBudget = &b
+		}
+		if !clientHasThinking && caps.SupportsThinking() {
+			if policy.Mode != "none" && policy.Effort != "none" {
+				trueVal := true
+				req.Thinking = &trueVal
+			} else {
+				falseVal := false
+				req.Thinking = &falseVal
+			}
+		}
+		if policy.Mode == "none" || policy.Effort == "none" {
+			if !clientHasEffort && caps.SupportsReasoningEffort() {
+				req.ReasoningEffort = "none"
+			}
+			if !clientHasThinking && caps.SupportsThinking() {
+				falseVal := false
+				req.Thinking = &falseVal
+			}
+		}
+	} else if policy.IsEmulated {
+		// 3. Emulated Reasoning: không fake các trường native thinking nếu model không hỗ trợ
+		if !caps.SupportsThinking() && !clientHasThinking {
+			falseVal := false
+			req.Thinking = &falseVal
+		}
+		if !caps.SupportsNativeThinkingBudget() && !clientHasBudget {
+			req.ThinkingBudget = nil
+			req.BudgetTokens = nil
+		}
+		if !caps.SupportsReasoningEffort() && !clientHasEffort {
+			req.ReasoningEffort = ""
+		}
+
+		// Tiêm emulation prompt vào request một cách có kiểm soát (ephemeral, đúng 1 lần)
+		if policy.EmulationPrompt != "" {
+			alreadyInjected := false
+			for _, m := range req.Messages {
+				if strings.Contains(m.Content, "[REASONING EMULATION") {
+					alreadyInjected = true
+					break
+				}
+			}
+			if !alreadyInjected {
+				emulatedMsg := domain.OpenAIMessage{
+					Role:    "system",
+					Content: policy.EmulationPrompt,
+				}
+				req.Messages = append([]domain.OpenAIMessage{emulatedMsg}, req.Messages...)
+			}
+		}
+	} else {
+		// Model không hỗ trợ hoặc policy none
+		if !caps.SupportsThinking() && !clientHasThinking {
+			falseVal := false
+			req.Thinking = &falseVal
+		}
+		if !caps.SupportsReasoningEffort() && !clientHasEffort {
+			if policy.Effort == "none" && caps.SupportsReasoningEffort() {
+				req.ReasoningEffort = "none"
+			}
+		}
 	}
 }

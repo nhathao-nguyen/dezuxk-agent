@@ -2,10 +2,17 @@ package services_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"dezuxk-gateway/internal/adapters/outbound/google"
 	"dezuxk-gateway/internal/core/domain"
 	"dezuxk-gateway/internal/core/ports"
 	"dezuxk-gateway/internal/core/services"
@@ -381,6 +388,364 @@ func TestStreamOverlapDeduplicator(t *testing.T) {
 		flushed := dedup.Flush()
 		if flushed != "Short" {
 			t.Errorf("expected flushed content 'Short', got %q", flushed)
+		}
+	})
+}
+
+type multiRoundStreamCodec struct {
+	mu           sync.Mutex
+	rounds       []domain.GeminiReply
+	deltas       [][]string
+	currentRound int
+}
+
+func (m *multiRoundStreamCodec) MaterializeChat(account *domain.ManagedAccount, payload domain.GeminiPayloadBuilder) (domain.OutboundAttempt, error) {
+	return domain.OutboundAttempt{
+		Path:        "/test",
+		Body:        "test",
+		ContentType: "application/x-www-form-urlencoded",
+	}, nil
+}
+
+func (m *multiRoundStreamCodec) DematerializeChat(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onDelta func(delta, convID string) error) (domain.GeminiReply, error) {
+	return m.DematerializeChatStream(ctx, resp, metrics, onDelta, nil)
+}
+
+func (m *multiRoundStreamCodec) DematerializeChatStream(ctx context.Context, resp *http.Response, metrics *domain.ContractMetrics, onContent func(delta, convID string) error, onReasoning func(delta, convID string) error) (domain.GeminiReply, error) {
+	m.mu.Lock()
+	rIndex := m.currentRound
+	m.currentRound++
+	m.mu.Unlock()
+
+	if rIndex >= len(m.rounds) {
+		return domain.GeminiReply{Text: "default fallback", ConversationID: "c_def"}, nil
+	}
+	reply := m.rounds[rIndex]
+	if rIndex < len(m.deltas) {
+		for _, d := range m.deltas[rIndex] {
+			if onContent != nil {
+				if err := onContent(d, reply.ConversationID); err != nil {
+					return reply, err
+				}
+			}
+		}
+	}
+	return reply, nil
+}
+
+func TestStreamAutoContinuation_Section16(t *testing.T) {
+	// Test A: 2 generations with finish_reason=length then stop -> combined output "Part one...Part two." with only 1 final [DONE].
+	t.Run("TestA_TwoGenerations_SingleFinalDone", func(t *testing.T) {
+		mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+		repo := &mockSessionRepo{}
+		metrics := domain.NewContractMetrics()
+		codec := &multiRoundStreamCodec{
+			rounds: []domain.GeminiReply{
+				{Text: "Part one... (continued...)", ConversationID: "c_stream_a"},
+				{Text: "Part two. All done.", ConversationID: "c_stream_a"},
+			},
+			deltas: [][]string{
+				{"Part one... (continued...)"},
+				{"Part two. All done."},
+			},
+		}
+		chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+
+		var buf strings.Builder
+		flushed := false
+		flusher := func() { flushed = true }
+
+		req := &domain.OpenAIChatRequest{
+			Model: "gemini-3.8-flash",
+			Messages: []domain.OpenAIMessage{
+				{Role: "user", Content: "Tell story"},
+			},
+		}
+
+		err := chatService.ExecuteChatStream(context.Background(), req, &buf, flusher)
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+		if !flushed {
+			t.Errorf("expected flusher to be called")
+		}
+
+		out := buf.String()
+		if !strings.Contains(out, "Part one...") {
+			t.Errorf("expected stream to contain Part one..., got: %s", out)
+		}
+		if !strings.Contains(out, "Part two. All done.") {
+			t.Errorf("expected stream to contain Part two. All done., got: %s", out)
+		}
+
+		// Verify EXACTLY 1 [DONE] at the very end
+		doneCount := strings.Count(out, "data: [DONE]\n\n")
+		if doneCount != 1 {
+			t.Fatalf("expected exactly 1 'data: [DONE]', found %d", doneCount)
+		}
+		if !strings.HasSuffix(strings.TrimSpace(out), "data: [DONE]") {
+			t.Errorf("expected stream to end with 'data: [DONE]'")
+		}
+		if codec.currentRound != 2 {
+			t.Errorf("expected 2 rounds executed, got %d", codec.currentRound)
+		}
+	})
+
+	// Test B: Overlap deduplication across chunk boundary -> "The Redis coordination layer handles locks." without duplicate "coordination"
+	t.Run("TestB_OverlapDeduplication_AcrossBoundary", func(t *testing.T) {
+		prior := "The Redis coordination layer "
+		dedup := services.NewStreamOverlapDeduplicator(prior)
+
+		// First incoming chunk repeats tail
+		d1 := dedup.ProcessDelta("coordination layer ")
+		if d1 != "" {
+			t.Errorf("expected buffering of overlap, got %q", d1)
+		}
+
+		// Second chunk introduces fresh text
+		d2 := dedup.ProcessDelta("handles locks efficiently.")
+		if !strings.Contains(d2, "handles locks efficiently.") {
+			t.Errorf("expected clean suffix pass-through, got %q", d2)
+		}
+
+		// Merged text check
+		merged := services.MergeContinuation(prior, "coordination layer handles locks.")
+		expected := "The Redis coordination layer handles locks."
+		if merged != expected {
+			t.Errorf("expected %q, got %q", expected, merged)
+		}
+		if strings.Count(merged, "coordination") != 1 {
+			t.Errorf("expected exactly 1 'coordination', got %d in %q", strings.Count(merged, "coordination"), merged)
+		}
+	})
+
+	// Test C: Unclosed markdown block completed by round 2
+	t.Run("TestC_UnclosedMarkdownBlock_Completed", func(t *testing.T) {
+		mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+		repo := &mockSessionRepo{}
+		metrics := domain.NewContractMetrics()
+		codec := &multiRoundStreamCodec{
+			rounds: []domain.GeminiReply{
+				{Text: "Here is the code:\n```go\nfunc Main() {\n\tprintln(1)\n", ConversationID: "c_stream_c"},
+				{Text: "\tprintln(1)\n}\n```\nDone!", ConversationID: "c_stream_c"},
+			},
+			deltas: [][]string{
+				{"Here is the code:\n```go\nfunc Main() {\n\tprintln(1)\n"},
+				{"\tprintln(1)\n}\n```\nDone!"},
+			},
+		}
+		chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+
+		var buf strings.Builder
+		err := chatService.ExecuteChatStream(context.Background(), &domain.OpenAIChatRequest{
+			Model: "gemini-3.8-flash",
+			Messages: []domain.OpenAIMessage{
+				{Role: "user", Content: "Write go func"},
+			},
+		}, &buf, nil)
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+
+		out := buf.String()
+		if !strings.Contains(out, "```go") || !strings.Contains(out, "println(1)") || !strings.Contains(out, "Done!") {
+			t.Errorf("expected full completed markdown block, got: %s", out)
+		}
+		if codec.currentRound != 2 {
+			t.Errorf("expected 2 rounds to complete markdown block, got %d", codec.currentRound)
+		}
+	})
+
+	// Test D: Incomplete JSON closed by round 2
+	t.Run("TestD_IncompleteJSON_Closed", func(t *testing.T) {
+		mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+		repo := &mockSessionRepo{}
+		metrics := domain.NewContractMetrics()
+		codec := &multiRoundStreamCodec{
+			rounds: []domain.GeminiReply{
+				{Text: "{\n  \"status\": \"success\",\n  \"items\": [1, 2,", ConversationID: "c_stream_d"},
+				{Text: " 3, 4]\n}", ConversationID: "c_stream_d"},
+			},
+			deltas: [][]string{
+				{"{\n  \"status\": \"success\",\n  \"items\": [1, 2,"},
+				{" 3, 4]\n}"},
+			},
+		}
+		chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+
+		var buf strings.Builder
+		err := chatService.ExecuteChatStream(context.Background(), &domain.OpenAIChatRequest{
+			Model: "gemini-3.8-flash",
+			Messages: []domain.OpenAIMessage{
+				{Role: "user", Content: "Generate json"},
+			},
+			ResponseFormat: "json_object",
+		}, &buf, nil)
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+
+		out := buf.String()
+		if !strings.Contains(out, "status") || !strings.Contains(out, "success") || !strings.Contains(out, "3, 4") {
+			t.Errorf("expected completed JSON, got: %s", out)
+		}
+		if codec.currentRound != 2 {
+			t.Errorf("expected 2 rounds to complete JSON, got %d", codec.currentRound)
+		}
+	})
+
+	// Test E: Max continuation exhaustion -> stops at maxCont with finish_reason length and continuation_exhausted_total++
+	t.Run("TestE_MaxContinuationExhaustion", func(t *testing.T) {
+		mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+		repo := &mockSessionRepo{}
+		metrics := domain.NewContractMetrics()
+		codec := &multiRoundStreamCodec{
+			rounds: []domain.GeminiReply{
+				{Text: "Part 1 (continued...)", ConversationID: "c_stream_e"},
+				{Text: "Part 2 (continued...)", ConversationID: "c_stream_e"},
+				{Text: "Part 3 (continued...)", ConversationID: "c_stream_e"},
+				{Text: "Part 4 (continued...)", ConversationID: "c_stream_e"},
+			},
+			deltas: [][]string{
+				{"Part 1 (continued...)"},
+				{"Part 2 (continued...)"},
+				{"Part 3 (continued...)"},
+				{"Part 4 (continued...)"},
+			},
+		}
+		chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+		chatService.SetContinuationService(services.NewContinuationService(services.AutoContinuationConfig{
+			Enabled:          true,
+			MaxContinuations: 2,
+		}))
+		chatService.SetMetrics(metrics)
+
+		var buf strings.Builder
+		err := chatService.ExecuteChatStream(context.Background(), &domain.OpenAIChatRequest{
+			Model: "gemini-3.8-flash",
+			Messages: []domain.OpenAIMessage{
+				{Role: "user", Content: "Never ending story"},
+			},
+		}, &buf, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Initial round + 2 continuations = 3 rounds total
+		if codec.currentRound != 3 {
+			t.Errorf("expected exactly 3 rounds (1 initial + 2 continuations), got %d", codec.currentRound)
+		}
+
+		out := buf.String()
+		// Final finish_reason must be "length"
+		if !strings.Contains(out, `"finish_reason":"length"`) {
+			t.Errorf("expected final finish_reason 'length' on exhaustion, got: %s", out)
+		}
+
+		snap := metrics.Snapshot()
+		if snap.ContinuationsTotal != 2 {
+			t.Errorf("expected ContinuationsTotal = 2, got %d", snap.ContinuationsTotal)
+		}
+		if snap.ContinuationExhaustedTotal != 1 {
+			t.Errorf("expected ContinuationExhaustedTotal = 1, got %d", snap.ContinuationExhaustedTotal)
+		}
+	})
+
+	// Test F: Client disconnect (ctx.Done()) cancels upstream, no subsequent continuation
+	t.Run("TestF_ClientDisconnect_CancelsUpstream", func(t *testing.T) {
+		mr := domain.NewModelRegistry(domain.GetGeminiCatalog())
+		repo := &mockSessionRepo{}
+		metrics := domain.NewContractMetrics()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Client disconnected immediately
+
+		codec := &multiRoundStreamCodec{
+			rounds: []domain.GeminiReply{
+				{Text: "Part 1 (continued...)", ConversationID: "c_stream_f"},
+			},
+			deltas: [][]string{
+				{"Part 1 (continued...)"},
+			},
+		}
+		chatService := services.NewChatService(mr, repo, emptyTransport{}, codec, metrics)
+
+		var buf strings.Builder
+		err := chatService.ExecuteChatStream(ctx, &domain.OpenAIChatRequest{
+			Model: "gemini-3.8-flash",
+			Messages: []domain.OpenAIMessage{
+				{Role: "user", Content: "Story"},
+			},
+		}, &buf, nil)
+
+		if err == nil || (!errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "canceled")) {
+			t.Errorf("expected context.Canceled error, got: %v", err)
+		}
+	})
+
+	// Test G: Slow stream with chunks before idle deadline -> no idle timeout
+	t.Run("TestG_SlowStream_DoesNotIdleTimeout", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		defer pr.Close()
+
+		ctx := google.WithStreamIdleTimeout(context.Background(), 100*time.Millisecond)
+		tracker := google.NewStreamMetricsTracker()
+		ctx = google.WithStreamMetricsTracker(ctx, tracker)
+
+		go func() {
+			defer pw.Close()
+			for i := 1; i <= 3; i++ {
+				text := fmt.Sprintf("chunk%d", i)
+				inner := []any{
+					nil, []any{"c_slow", "r_slow"}, nil, nil,
+					[]any{[]any{"rc_slow", []any{text}}},
+				}
+				b, _ := json.Marshal(inner)
+				line, _ := json.Marshal([][]any{{"wrb.fr", "assistant.lamda.BardFrontendService", string(b)}})
+				_, _ = pw.Write(append(line, '\n'))
+				time.Sleep(30 * time.Millisecond) // within 100ms idle window
+			}
+		}()
+
+		var deltas []string
+		reply, err := google.ReadGeminiStreamWithThinking(ctx, pr, nil, func(d, c string) error {
+			deltas = append(deltas, d)
+			return nil
+		}, nil)
+
+		if err != nil {
+			t.Fatalf("unexpected error on slow stream: %v", err)
+		}
+		if reply.Text != "chunk3" && !strings.Contains(reply.Text, "chunk") {
+			t.Errorf("unexpected reply text: %q", reply.Text)
+		}
+	})
+
+	// Test H: Stream idle timeout -> ErrStreamIdleTimeout and stream_idle_timeouts_total++
+	t.Run("TestH_StreamIdleTimeout_IncrementsMetric", func(t *testing.T) {
+		pr, pw := io.Pipe()
+		defer pr.Close()
+
+		ctx := google.WithStreamIdleTimeout(context.Background(), 50*time.Millisecond)
+		metrics := domain.NewContractMetrics()
+
+		go func() {
+			sampleLine := `[["wrb.fr","assistant.lamda.BardFrontendService","[null,[\"c_h\",\"r_h\"],null,null,[[\"rc_h\",[\"Hello\"]]]]"]]` + "\n"
+			_, _ = pw.Write([]byte(sampleLine))
+			// Hang indefinitely
+		}()
+
+		_, err := google.ReadGeminiStreamWithThinking(ctx, pr, metrics, nil, nil)
+		if err == nil {
+			t.Fatalf("expected stream idle timeout, got nil")
+		}
+		if !errors.Is(err, domain.ErrStreamIdleTimeout) && !strings.Contains(err.Error(), "idle timeout") {
+			t.Errorf("expected ErrStreamIdleTimeout, got: %v", err)
+		}
+
+		snap := metrics.Snapshot()
+		if snap.StreamIdleTimeoutsTotal != 1 {
+			t.Errorf("expected StreamIdleTimeoutsTotal = 1, got %d", snap.StreamIdleTimeoutsTotal)
 		}
 	})
 }

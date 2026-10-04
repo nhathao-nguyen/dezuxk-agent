@@ -30,6 +30,7 @@ type GraphEngine struct {
 	policyEngine   ports.ToolExecutionService
 	runner         *Runner
 	verifier       *CompletionVerifier
+	metrics        *domain.ContractMetrics
 	maxFixRetries  int
 }
 
@@ -56,6 +57,14 @@ func NewGraphEngine(
 	}
 }
 
+// SetMetrics liên kết contract metrics cho GraphEngine
+func (g *GraphEngine) SetMetrics(m *domain.ContractMetrics) {
+	g.metrics = m
+	if g.runner != nil {
+		g.runner.SetMetrics(m)
+	}
+}
+
 // SetCompletionVerifier thiết lập CompletionVerifier thẩm định hoàn tất chu trình đồ thị
 func (g *GraphEngine) SetCompletionVerifier(v *CompletionVerifier) {
 	g.verifier = v
@@ -68,10 +77,10 @@ func (g *GraphEngine) getVerifier() *CompletionVerifier {
 	return NewCompletionVerifier()
 }
 
-func (g *GraphEngine) resolvePolicy(goal string, model string) ReasoningPolicy {
+func (g *GraphEngine) resolvePolicy(goal string, model string, req *domain.OpenAIChatRequest) ReasoningPolicy {
 	profile := DetectTaskComplexity(goal, "")
 	caps := domain.GetCapabilities(model)
-	return ResolveReasoningPolicy(caps, profile, nil)
+	return ResolveReasoningPolicy(caps, profile, req)
 }
 
 // SetPolicyEngine thiết lập engine chính sách kiểm soát toàn diện lời gọi công cụ
@@ -389,7 +398,17 @@ func (g *GraphEngine) nodePlan(ctx context.Context, state *domain.AgentGraphStat
 		osGuide += "On Linux/macOS, use 'test -f <file>' to check file existence, 'go build', 'go run main.go', 'go test -v ./...'."
 	}
 
-	policy := g.resolvePolicy(state.Goal, opts.Model)
+	clientReq := &domain.OpenAIChatRequest{
+		Model:           opts.Model,
+		ReasoningEffort: opts.ReasoningEffort,
+		Thinking:        opts.Thinking,
+		ThinkingBudget:  opts.ThinkingBudget,
+	}
+	policy := g.resolvePolicy(state.Goal, opts.Model, clientReq)
+	caps := domain.GetCapabilities(opts.Model)
+	if g.metrics != nil {
+		g.metrics.RecordReasoningPolicy(policy.Mode, policy.IsNative)
+	}
 	minSteps := policy.MinPlanningDepth
 	maxSteps := policy.MaxPlanningDepth
 	if minSteps <= 0 {
@@ -430,7 +449,11 @@ You MUST respond strictly with a valid JSON object matching this schema:
 			{Role: "system", Content: "You are an expert system planner. Always respond with valid JSON."},
 			{Role: "user", Content: planPrompt},
 		},
+		ReasoningEffort: opts.ReasoningEffort,
+		Thinking:        opts.Thinking,
+		ThinkingBudget:  opts.ThinkingBudget,
 	}
+	ApplyReasoningPolicy(chatReq, policy, caps)
 
 	resp, err := g.chatUseCase.ExecuteChatSync(ctx, chatReq)
 	if err != nil {
@@ -552,7 +575,13 @@ func (g *GraphEngine) nodeExecute(ctx context.Context, state *domain.AgentGraphS
 		step.ID, step.Title, step.Description)
 
 	stepOpts := opts
-	policy := g.resolvePolicy(state.Goal, opts.Model)
+	clientReq := &domain.OpenAIChatRequest{
+		Model:           opts.Model,
+		ReasoningEffort: opts.ReasoningEffort,
+		Thinking:        opts.Thinking,
+		ThinkingBudget:  opts.ThinkingBudget,
+	}
+	policy := g.resolvePolicy(state.Goal, opts.Model, clientReq)
 	if policy.StepExecutionBudget > 0 {
 		stepOpts.MaxSteps = policy.StepExecutionBudget
 	} else {
@@ -676,7 +705,13 @@ MANDATORY INSTRUCTIONS:
 		step.ID, step.Title, cleanCmd, step.ErrorOutput, opts.Workspace, filesListStr)
 
 	stepOpts := opts
-	policy := g.resolvePolicy(state.Goal, opts.Model)
+	clientReq := &domain.OpenAIChatRequest{
+		Model:           opts.Model,
+		ReasoningEffort: opts.ReasoningEffort,
+		Thinking:        opts.Thinking,
+		ThinkingBudget:  opts.ThinkingBudget,
+	}
+	policy := g.resolvePolicy(state.Goal, opts.Model, clientReq)
 	if policy.StepExecutionBudget > 0 {
 		stepOpts.MaxSteps = policy.StepExecutionBudget
 	} else {

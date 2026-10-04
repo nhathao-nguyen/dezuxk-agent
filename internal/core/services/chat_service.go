@@ -68,6 +68,13 @@ func NewChatService(
 	}
 }
 
+func (s *ChatService) SetMetrics(m *domain.ContractMetrics) {
+	s.metrics = m
+	if s.continuationSvc != nil {
+		s.continuationSvc.SetMetrics(m)
+	}
+}
+
 func (s *ChatService) SetContinuationService(cs *ContinuationService) {
 	s.continuationSvc = cs
 	if s.continuationSvc != nil && s.metrics != nil {
@@ -417,9 +424,10 @@ func (s *ChatService) streamRound(
 	flusher func(),
 	flushedToClient *bool,
 ) error {
-	ctx, cancel := boundStream(s.upstream, ctx)
-	defer cancel()
-	resp, err := s.postGemini(ctx, account, modelDesc, req)
+	reqCtx := ctx
+	roundCtx, roundCancel := boundStream(s.upstream, reqCtx)
+	defer roundCancel()
+	resp, err := s.postGemini(roundCtx, account, modelDesc, req)
 	if err != nil {
 		return err
 	}
@@ -436,8 +444,8 @@ func (s *ChatService) streamRound(
 
 	onContent := func(delta, cID string) error {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-reqCtx.Done():
+			return reqCtx.Err()
 		default:
 		}
 		if cID != "" {
@@ -449,8 +457,8 @@ func (s *ChatService) streamRound(
 
 	onReasoning := func(delta, cID string) error {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-reqCtx.Done():
+			return reqCtx.Err()
 		default:
 		}
 		if delta == "" {
@@ -490,7 +498,7 @@ func (s *ChatService) streamRound(
 		return nil
 	}
 
-	reply, err := s.wire.DematerializeChatStream(ctx, resp, s.metrics.Bind(domain.OpChatCompletions), onContent, onReasoning)
+	reply, err := s.wire.DematerializeChatStream(roundCtx, resp, s.metrics.Bind(domain.OpChatCompletions), onContent, onReasoning)
 	if conversationID == "" {
 		conversationID = reply.ConversationID
 		filter.SetConversationID(conversationID)
@@ -499,6 +507,12 @@ func (s *ChatService) streamRound(
 		err = flushErr
 	}
 	if err != nil {
+		if reqCtx.Err() != nil {
+			return reqCtx.Err()
+		}
+		if errors.Is(err, domain.ErrStreamIdleTimeout) {
+			return err
+		}
 		return normalizeWireErr(err)
 	}
 
@@ -627,13 +641,16 @@ func (s *ChatService) streamRound(
 		stopReason = "length"
 	}
 
-	canContinue := !IsNoContinuation(ctx) && s.continuationSvc != nil && len(toolCalls) == 0
+	canContinue := !IsNoContinuation(reqCtx) && s.continuationSvc != nil && s.continuationSvc.cfg.Enabled && len(toolCalls) == 0 && reqCtx.Err() == nil
 	if canContinue {
 		expectedFormat := extractExpectedFormat(req.ResponseFormat)
 		state := s.continuationSvc.detector.Analyze(reply.Text, stopReason, expectedFormat)
 		if !state.IsComplete {
 			currentFullText := reply.Text
 			currentConversationID := conversationID
+			if currentConversationID == "" {
+				currentConversationID = reply.ConversationID
+			}
 			currentResponseID := reply.ResponseID
 			currentChoiceID := reply.ChoiceID
 			continuationsDone := 0
@@ -642,11 +659,19 @@ func (s *ChatService) streamRound(
 				maxCont = 3
 			}
 
-			for continuationsDone < maxCont && !state.IsComplete {
-				if ctx.Err() != nil {
-					return ctx.Err()
+			taskGoal := ""
+			for i := len(req.Messages) - 1; i >= 0; i-- {
+				if req.Messages[i].Role == "user" && strings.TrimSpace(req.Messages[i].Content) != "" {
+					taskGoal = req.Messages[i].Content
+					break
 				}
-				contPrompt := BuildContinuationPrompt("", currentFullText, state)
+			}
+
+			for continuationsDone < maxCont && !state.IsComplete {
+				if reqCtx.Err() != nil {
+					return reqCtx.Err()
+				}
+				contPrompt := BuildContinuationPrompt(taskGoal, currentFullText, state)
 				nextReq := *req
 				nextReq.Messages = append([]domain.OpenAIMessage{}, req.Messages...)
 				nextReq.Messages = append(nextReq.Messages, domain.OpenAIMessage{
@@ -663,18 +688,21 @@ func (s *ChatService) streamRound(
 					nextReq.ChoiceID = currentChoiceID
 				}
 
-				nextResp, postErr := s.postGemini(ctx, account, modelDesc, &nextReq)
+				contCtx, contCancel := boundStream(s.upstream, reqCtx)
+				nextResp, postErr := s.postGemini(contCtx, account, modelDesc, &nextReq)
 				if postErr != nil {
+					contCancel()
 					break
 				}
 
 				dedup := NewStreamOverlapDeduplicator(currentFullText)
 				var nextFullTextBuilder strings.Builder
+				var streamWriteErr error
 
 				onContContent := func(delta, cID string) error {
 					select {
-					case <-ctx.Done():
-						return ctx.Err()
+					case <-reqCtx.Done():
+						return reqCtx.Err()
 					default:
 					}
 					if cID != "" {
@@ -697,7 +725,10 @@ func (s *ChatService) streamRound(
 							}},
 						}
 						if b, err := json.Marshal(chunk); err == nil {
-							_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+							if _, wErr := fmt.Fprintf(streamWriter, "data: %s\n\n", b); wErr != nil {
+								streamWriteErr = wErr
+								return wErr
+							}
 							if flusher != nil {
 								flusher()
 							}
@@ -713,10 +744,19 @@ func (s *ChatService) streamRound(
 					return nil
 				}
 
-				contReply, dematErr := s.wire.DematerializeChatStream(ctx, nextResp, s.metrics.Bind(domain.OpChatCompletions), onContContent, onContReasoning)
+				contReply, dematErr := s.wire.DematerializeChatStream(contCtx, nextResp, s.metrics.Bind(domain.OpChatCompletions), onContContent, onContReasoning)
 				if nextResp.Body != nil {
 					_ = nextResp.Body.Close()
 				}
+				contCancel()
+
+				if streamWriteErr != nil {
+					return streamWriteErr
+				}
+				if reqCtx.Err() != nil {
+					return reqCtx.Err()
+				}
+
 				if remaining := dedup.Flush(); remaining != "" {
 					nextFullTextBuilder.WriteString(remaining)
 					chunk := domain.OpenAIChatResponse{
@@ -733,14 +773,25 @@ func (s *ChatService) streamRound(
 						}},
 					}
 					if b, err := json.Marshal(chunk); err == nil {
-						_, _ = fmt.Fprintf(streamWriter, "data: %s\n\n", b)
+						if _, wErr := fmt.Fprintf(streamWriter, "data: %s\n\n", b); wErr != nil {
+							return wErr
+						}
 						if flusher != nil {
 							flusher()
+						}
+						if flushedToClient != nil {
+							*flushedToClient = true
 						}
 					}
 				}
 
 				if dematErr != nil {
+					if errors.Is(dematErr, context.Canceled) || reqCtx.Err() != nil {
+						return reqCtx.Err()
+					}
+					if errors.Is(dematErr, domain.ErrStreamIdleTimeout) {
+						return dematErr
+					}
 					break
 				}
 

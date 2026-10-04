@@ -548,20 +548,38 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 				caps = regCaps
 			}
 		}
-		budget := r.getBudgetManager().CalculateBudget(caps, state.Messages, openAITools, &domain.OpenAIChatRequest{Model: opts.Model})
-		if r.metrics != nil {
-			r.metrics.RecordContextBudget(budget.CurrentPromptTokens, budget.UsableContextBudget)
-		}
 
 		profile := DetectTaskComplexity(goal, opts.CustomPrompt)
-		policy := ResolveReasoningPolicy(caps, profile, &domain.OpenAIChatRequest{Model: opts.Model})
+		clientReq := &domain.OpenAIChatRequest{
+			Model:           opts.Model,
+			ReasoningEffort: opts.ReasoningEffort,
+			Thinking:        opts.Thinking,
+			ThinkingBudget:  opts.ThinkingBudget,
+		}
+		policy := ResolveReasoningPolicy(caps, profile, clientReq)
 		if r.metrics != nil {
 			r.metrics.RecordReasoningPolicy(policy.Mode, policy.IsNative)
 		}
 
+		chatReq := &domain.OpenAIChatRequest{
+			Model:           opts.Model,
+			Messages:        append([]domain.OpenAIMessage{}, state.Messages...),
+			Tools:           openAITools,
+			Stream:          false,
+			ReasoningEffort: opts.ReasoningEffort,
+			Thinking:        opts.Thinking,
+			ThinkingBudget:  opts.ThinkingBudget,
+		}
+		ApplyReasoningPolicy(chatReq, policy, caps)
+
+		budget := r.getBudgetManager().CalculateBudgetWithComplexity(caps, state.Messages, openAITools, chatReq, string(profile.Level))
+		if r.metrics != nil {
+			r.metrics.RecordContextBudget(budget.CurrentPromptTokens, budget.UsableContextBudget)
+		}
+
 		if opts.OnProgress != nil && (budget.Watermark >= domain.WatermarkYellow || step == 1) {
-			opts.OnProgress(step, "budget_check", fmt.Sprintf("Token Budget: %s (%d/%d tokens, còn lại: %d)",
-				budget.Watermark, budget.CurrentPromptTokens, budget.UsableContextBudget, budget.RemainingBudget))
+			opts.OnProgress(step, "budget_check", fmt.Sprintf("Token Budget: %s (%d/%d tokens, còn lại: %d, reasoning reserve: %d)",
+				budget.Watermark, budget.CurrentPromptTokens, budget.UsableContextBudget, budget.RemainingBudget, budget.ReasoningReserveTokens))
 		}
 
 		if r.memorySvc != nil {
@@ -569,6 +587,8 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 			if budget.CompactionRequired || budget.CompactionRecommended || budget.EmergencyCompactionRequired {
 				if compacted, err := r.memorySvc.CompactWithBudget(execCtx, state.Messages, budget); err == nil && len(compacted) > 0 {
 					state.Messages = compacted
+					chatReq.Messages = append([]domain.OpenAIMessage{}, state.Messages...)
+					ApplyReasoningPolicy(chatReq, policy, caps)
 					if r.metrics != nil {
 						r.metrics.IncrementContextCompactions()
 					}
@@ -576,13 +596,6 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 					r.metrics.IncrementContextCompactionFailures()
 				}
 			}
-		}
-
-		chatReq := &domain.OpenAIChatRequest{
-			Model:    opts.Model,
-			Messages: state.Messages,
-			Tools:    openAITools,
-			Stream:   false,
 		}
 
 		resp, err := r.chatUseCase.ExecuteChatSync(execCtx, chatReq)

@@ -182,12 +182,13 @@ func (m *ContextBudgetManager) CalculateBudgetPlan(input ContextBudgetInput) dom
 	}
 }
 
-// CalculateBudget tính toán phân bổ ngân sách token chi tiết (tương thích ngược)
-func (m *ContextBudgetManager) CalculateBudget(
+// CalculateBudgetWithComplexity tính toán phân bổ ngân sách token chi tiết kèm task complexity
+func (m *ContextBudgetManager) CalculateBudgetWithComplexity(
 	caps domain.ModelCapabilities,
 	messages []domain.OpenAIMessage,
 	tools []domain.OpenAITool,
 	req *domain.OpenAIChatRequest,
+	complexity string,
 ) domain.ContextBudget {
 	var reqMaxTokens *int
 	var reasoningBudget *int
@@ -210,6 +211,7 @@ func (m *ContextBudgetManager) CalculateBudget(
 		RequestedOutputTokens: reqMaxTokens,
 		ReasoningBudget:       reasoningBudget,
 		ReasoningEffort:       reasoningEffort,
+		TaskComplexity:        complexity,
 	})
 
 	return domain.ContextBudget{
@@ -233,14 +235,22 @@ func (m *ContextBudgetManager) CalculateBudget(
 		UserRequestTokens:           plan.UserRequestTokens,
 		AvailableHistoryTokens:      plan.AvailableHistoryTokens,
 		RemainingBudget:             plan.RemainingBudget,
-		UtilizationRatio:            plan.UtilizationRatio,
-		Watermark:                   plan.Watermark,
-		CompactionRecommended:       plan.CompactionRequired,
 		CompactionRequired:          plan.CompactionRequired,
+		CompactionRecommended:       plan.CompactionRequired,
 		EmergencyCompactionRequired: plan.EmergencyCompactionRequired,
-		CompactionTargetTokens:      plan.CompactionTargetTokens,
 		RecommendedKeepRecent:       plan.RecommendedKeepRecent,
+		Watermark:                   plan.Watermark,
 	}
+}
+
+// CalculateBudget tính toán phân bổ ngân sách token chi tiết (tương thích ngược)
+func (m *ContextBudgetManager) CalculateBudget(
+	caps domain.ModelCapabilities,
+	messages []domain.OpenAIMessage,
+	tools []domain.OpenAITool,
+	req *domain.OpenAIChatRequest,
+) domain.ContextBudget {
+	return m.CalculateBudgetWithComplexity(caps, messages, tools, req, "")
 }
 
 func (m *ContextBudgetManager) determineAdaptiveOutputLimit(
@@ -313,7 +323,12 @@ func (m *ContextBudgetManager) determineAdaptiveReasoningReserve(
 	case "medium":
 		return 2048
 	case "high":
+		if complexity == "deep" {
+			return 8192
+		}
 		return 4096
+	case "deep":
+		return 8192
 	}
 
 	// Ngân sách suy luận thích ứng theo task complexity

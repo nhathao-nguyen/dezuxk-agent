@@ -2,9 +2,13 @@ package domain
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrStreamIdleTimeout báo hiệu luồng stream không nhận được byte mới từ upstream quá khoảng thời gian idle
+var ErrStreamIdleTimeout = errors.New("stream idle timeout: no data received from upstream within idle window")
 
 type GeminiAttachment struct {
 	StorageToken string `json:"storage_token"`

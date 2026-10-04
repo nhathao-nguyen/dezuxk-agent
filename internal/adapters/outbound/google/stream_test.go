@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"dezuxk-gateway/internal/adapters/outbound/google"
+	"dezuxk-gateway/internal/core/domain"
 )
 
 func TestParseEnvelopeChunk_FullMeta(t *testing.T) {
@@ -396,6 +397,7 @@ func TestStream_IdleTimeout_Triggered(t *testing.T) {
 	ctx := google.WithStreamIdleTimeout(context.Background(), 50*time.Millisecond)
 	tracker := google.NewStreamMetricsTracker()
 	ctx = google.WithStreamMetricsTracker(ctx, tracker)
+	metrics := domain.NewContractMetrics()
 
 	// Send one line, then hang
 	go func() {
@@ -408,7 +410,7 @@ func TestStream_IdleTimeout_Triggered(t *testing.T) {
 	_, err := google.ReadGeminiStreamWithThinking(
 		ctx,
 		pr,
-		nil,
+		metrics,
 		func(delta, convID string) error {
 			received = append(received, delta)
 			return nil
@@ -425,6 +427,10 @@ func TestStream_IdleTimeout_Triggered(t *testing.T) {
 	snap := tracker.Snapshot()
 	if snap.TimeoutKind != "idle" {
 		t.Errorf("expected TimeoutKind idle, got %s", snap.TimeoutKind)
+	}
+	mSnap := metrics.Snapshot()
+	if mSnap.StreamIdleTimeoutsTotal != 1 {
+		t.Errorf("expected StreamIdleTimeoutsTotal = 1, got %d", mSnap.StreamIdleTimeoutsTotal)
 	}
 }
 

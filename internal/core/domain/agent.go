@@ -82,6 +82,9 @@ type AgentRunOptions struct {
 	UseSandbox             bool                 `json:"use_sandbox,omitempty"`    // Tự động tạo git worktree sandbox (.dezuxk/worktrees/<task_id>)
 	AutoMerge              bool                 `json:"auto_merge,omitempty"`     // Tự động merge vào nhánh chính khi hoàn tất thành công
 	InitialState           *AgentState          `json:"initial_state,omitempty"`  // Trạng thái Agent khởi điểm khi phục hồi từ Checkpoint (Resume)
+	ReasoningEffort        string               `json:"reasoning_effort,omitempty"`
+	Thinking               *bool                `json:"thinking,omitempty"`
+	ThinkingBudget         *int                 `json:"thinking_budget,omitempty"`
 	OnProgress             StepProgressCallback `json:"-"`
 }
 
