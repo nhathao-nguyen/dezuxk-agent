@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -186,8 +187,8 @@ func (r *SqliteSessionRepository) migrate() error {
 
 func (r *SqliteSessionRepository) loadPersistedSessions() error {
 	rows, err := r.db.Query(`
-		SELECT id, email, cookies_json, gemini_sn_token, user_agent, 
-		       COALESCE(proxy, ''), credits_balance, tier, is_healthy, updated_at,
+		SELECT id, COALESCE(email, ''), COALESCE(cookies_json, ''), COALESCE(gemini_sn_token, ''), COALESCE(user_agent, ''), 
+		       COALESCE(proxy, ''), COALESCE(credits_balance, 0), COALESCE(tier, 1), COALESCE(is_healthy, 1), updated_at,
 		       COALESCE(success_count, 0), COALESCE(failure_count, 0),
 		       COALESCE(consecutive_failures, 0), COALESCE(health_score, 1.0),
 		       COALESCE(count_429, 0), COALESCE(count_403, 0),
@@ -200,6 +201,7 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 	}
 	defer rows.Close()
 
+	migrationRewrites := make(map[string][2]string)
 	for rows.Next() {
 		var id, email, cookiesJSON, geminiSN, ua, proxy, healthStatus, cdStr string
 		var credits, tier, healthyInt int
@@ -222,11 +224,42 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 		}
 
 		cookieMap := make(map[string]string)
-		decBytes, decErr := r.vault.Decrypt(cookiesJSON)
-		if decErr == nil {
-			_ = json.Unmarshal(decBytes, &cookieMap)
-		} else {
-			_ = json.Unmarshal([]byte(cookiesJSON), &cookieMap)
+		var needsMigrationRewrite bool
+
+		if cookiesJSON != "" {
+			decBytes, decErr := r.vault.DecryptStrict(cookiesJSON)
+			if decErr == nil {
+				if err := json.Unmarshal(decBytes, &cookieMap); err != nil {
+					return fmt.Errorf("không thể giải mã JSON cookies sau khi decrypt cho session %s: %w", id, err)
+				}
+			} else {
+				// Thử nhận diện legacy plaintext JSON (chỉ để phục vụ migration 1 lần)
+				if strings.HasPrefix(strings.TrimSpace(cookiesJSON), "{") {
+					if err := json.Unmarshal([]byte(cookiesJSON), &cookieMap); err == nil {
+						needsMigrationRewrite = true
+					} else {
+						log.Printf("[Session Repo Error] Cookies cho session %s không được mã hóa hợp lệ và không thể parse legacy plaintext: %v", id, decErr)
+					}
+				} else {
+					log.Printf("[Session Repo Error] Không thể giải mã cookies cho session %s (sai master key hoặc hỏng dữ liệu): %v", id, decErr)
+				}
+			}
+		}
+
+		decryptedSN := geminiSN
+		if geminiSN != "" {
+			if r.vault.IsEncrypted(geminiSN) {
+				snBytes, snErr := r.vault.DecryptStrict(geminiSN)
+				if snErr == nil {
+					decryptedSN = string(snBytes)
+				} else {
+					log.Printf("[Session Repo Error] Không thể giải mã gemini_sn_token cho session %s: %v", id, snErr)
+					decryptedSN = ""
+				}
+			} else {
+				// Legacy plaintext SN token - cần rewrite
+				needsMigrationRewrite = true
+			}
 		}
 
 		var cdUntil time.Time
@@ -241,7 +274,7 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 			ID:                  id,
 			Email:               email,
 			Jar:                 domain.NewCookieJar(cookieMap),
-			GeminiSNlM0e:        geminiSN,
+			GeminiSNlM0e:        decryptedSN,
 			UserAgent:           ua,
 			ProxyURL:            proxy,
 			Tier:                tier,
@@ -258,12 +291,29 @@ func (r *SqliteSessionRepository) loadPersistedSessions() error {
 			HealthScore:         healthScore,
 		}
 
+		if needsMigrationRewrite {
+			cBytes, _ := json.Marshal(cookieMap)
+			if encCookies, encErr := r.vault.Encrypt(cBytes); encErr == nil {
+				var encSN string
+				if decryptedSN != "" {
+					encSN, _ = r.vault.Encrypt([]byte(decryptedSN))
+				}
+				migrationRewrites[id] = [2]string{encCookies, encSN}
+			}
+		}
+
 		r.accounts[id] = acc
 		r.order = append(r.order, id)
 		r.promote(acc)
 	}
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	rows.Close()
+
+	// Thực hiện migration rewrites sau khi đã đóng rows để tránh deadlock trên single writer SQLite
+	for id, pair := range migrationRewrites {
+		_, _ = r.db.Exec(`UPDATE sessions SET cookies_json = ?, gemini_sn_token = ? WHERE id = ?`, pair[0], pair[1], id)
 	}
 
 	// Nạp các alert gần đây
@@ -308,14 +358,29 @@ func (r *SqliteSessionRepository) Save(ctx context.Context, account *domain.Mana
 
 	// Đồng bộ bền vững vào SQLite với kho mã hóa Vault (Encryption at Rest)
 	cookiesMap := account.Jar.ToMap()
-	cookiesBytes, _ := json.Marshal(cookiesMap)
+	cookiesBytes, err := json.Marshal(cookiesMap)
+	if err != nil {
+		return fmt.Errorf("không thể mã hóa cookies thành JSON: %w", err)
+	}
+	if r.vault == nil {
+		return fmt.Errorf("vault chưa được khởi tạo, từ chối lưu phiên")
+	}
 	cookiesStored, encErr := r.vault.Encrypt(cookiesBytes)
 	if encErr != nil {
-		cookiesStored = string(cookiesBytes)
+		return fmt.Errorf("lỗi mã hóa cookies với vault: %w (từ chối lưu plaintext)", encErr)
+	}
+
+	var snStored string
+	if account.GeminiSNlM0e != "" {
+		encryptedSN, snErr := r.vault.Encrypt([]byte(account.GeminiSNlM0e))
+		if snErr != nil {
+			return fmt.Errorf("lỗi mã hóa gemini_sn_token với vault: %w", snErr)
+		}
+		snStored = encryptedSN
 	}
 
 	healthyInt := 0
-	if account.IsHealthy {
+	if account.IsAccountHealthy() {
 		healthyInt = 1
 	}
 
@@ -347,14 +412,15 @@ func (r *SqliteSessionRepository) Save(ctx context.Context, account *domain.Mana
 		cooldown_until = excluded.cooldown_until,
 		health_status = excluded.health_status;
 	`
+	cdUntil := account.GetCooldownUntil()
 	cdUntilStr := ""
-	if !account.CooldownUntil.IsZero() {
-		cdUntilStr = account.CooldownUntil.Format(time.RFC3339)
+	if !cdUntil.IsZero() {
+		cdUntilStr = cdUntil.Format(time.RFC3339)
 	}
-	_, err := r.db.ExecContext(ctx, query,
-		account.ID, account.Email, cookiesStored, account.GeminiSNlM0e,
+	_, err = r.db.ExecContext(ctx, query,
+		account.ID, account.Email, cookiesStored, snStored,
 		account.UserAgent, account.ProxyURL, 0,
-		account.Tier, healthyInt, time.Now(),
+		account.GetTier(), healthyInt, time.Now(),
 		account.SuccessCount, account.FailureCount,
 		account.ConsecutiveFailures, account.GetHealthScore(),
 		account.Count429, account.Count403,
@@ -433,7 +499,7 @@ func (r *SqliteSessionRepository) usable(acc *domain.ManagedAccount, service dom
 	if limit <= 0 {
 		limit = DefaultMaxInFlightPerAccount
 	}
-	if acc.InFlightReqs >= int64(limit) {
+	if acc.GetInFlight() >= int64(limit) {
 		return false
 	}
 	return true
@@ -483,7 +549,7 @@ func (r *SqliteSessionRepository) GetAvailableForModel(ctx context.Context, serv
 			}
 			bestAcc, err := strat.Select(ctx, candidates)
 			if err == nil && bestAcc != nil {
-				bestAcc.InFlightReqs++
+				bestAcc.IncInFlight()
 				r.cursor = (r.cursor + 1) % n
 				r.mu.Unlock()
 				return bestAcc, nil
@@ -499,7 +565,7 @@ func (r *SqliteSessionRepository) GetAvailableForModel(ctx context.Context, serv
 			}
 			allBusy := false
 			for _, id := range r.order {
-				if a := r.accounts[id]; a != nil && a.InFlightReqs >= int64(limit) {
+				if a := r.accounts[id]; a != nil && a.GetInFlight() >= int64(limit) {
 					allBusy = true
 					break
 				}
@@ -536,9 +602,7 @@ func (r *SqliteSessionRepository) Release(account *domain.ManagedAccount, err er
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if account.InFlightReqs > 0 {
-		account.InFlightReqs--
-	}
+	account.DecInFlight()
 
 	// Trường hợp yêu cầu thành công: Ghi nhận success và hồi phục điểm sức khỏe
 	if err == nil {

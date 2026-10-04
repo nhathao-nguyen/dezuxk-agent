@@ -82,6 +82,7 @@ services:
       - DEZUXK_MASTER_KEY=cluster_dev_master_key_32bytes_sec
       - DEZUXK_RATE_LIMIT_MAX_REQUESTS=30
       - DEZUXK_RATE_LIMIT_WINDOW_SECONDS=60
+      - DEZUXK_PROFILES_CONTROL_PLANE_ENABLED=true
     depends_on:
       postgres:
         condition: service_healthy
@@ -130,6 +131,7 @@ services:
       - DEZUXK_MASTER_KEY=cluster_dev_master_key_32bytes_sec
       - DEZUXK_RATE_LIMIT_MAX_REQUESTS=30
       - DEZUXK_RATE_LIMIT_WINDOW_SECONDS=60
+      - DEZUXK_PROFILES_CONTROL_PLANE_ENABLED=false
     depends_on:
       postgres:
         condition: service_healthy
@@ -178,6 +180,7 @@ services:
       - DEZUXK_MASTER_KEY=cluster_dev_master_key_32bytes_sec
       - DEZUXK_RATE_LIMIT_MAX_REQUESTS=30
       - DEZUXK_RATE_LIMIT_WINDOW_SECONDS=60
+      - DEZUXK_PROFILES_CONTROL_PLANE_ENABLED=false
     depends_on:
       postgres:
         condition: service_healthy

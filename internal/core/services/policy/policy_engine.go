@@ -44,6 +44,7 @@ type PolicyEngine struct {
 	approval    ports.ApprovalProvider
 	semaphores  map[string]chan struct{} // tenant_id -> semaphore channel
 	maxToolRuns int
+	tenantRepo  ports.TenantRuntimeSettingsRepository
 }
 
 // NewPolicyEngine khởi tạo PolicyEngine
@@ -65,6 +66,13 @@ func (p *PolicyEngine) SetApprovalProvider(app ports.ApprovalProvider) {
 	p.approval = app
 }
 
+// SetTenantSettingsRepository cập nhật repository cài đặt của tenant
+func (p *PolicyEngine) SetTenantSettingsRepository(repo ports.TenantRuntimeSettingsRepository) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.tenantRepo = repo
+}
+
 // ValidateToolExecution kiểm tra trước tính hợp lệ của lời gọi công cụ mà không thực thi
 func (p *PolicyEngine) ValidateToolExecution(ctx context.Context, toolName string, argsJSON string) error {
 	toolName = strings.TrimSpace(toolName)
@@ -82,7 +90,28 @@ func (p *PolicyEngine) ValidateToolExecution(ctx context.Context, toolName strin
 		identity = domain.DefaultRestrictedIdentity()
 	}
 
-	// 1. Kiểm tra quyền của Tenant đối với công cụ này
+	// 1. Kiểm tra chính sách AllowedTools từ TenantRuntimeSettings
+	if p.tenantRepo != nil && identity.TenantID != "" {
+		if ts, err := p.tenantRepo.Get(ctx, identity.TenantID); err == nil && ts != nil && len(ts.AllowedTools) > 0 {
+			allowed := false
+			for _, pat := range ts.AllowedTools {
+				pat = strings.TrimSpace(pat)
+				if pat == "*" || pat == toolName {
+					allowed = true
+					break
+				}
+				if strings.HasSuffix(pat, "*") && strings.HasPrefix(toolName, strings.TrimSuffix(pat, "*")) {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("%w: công cụ %q không nằm trong danh mục AllowedTools của tenant %q", ErrUnauthorizedTool, toolName, identity.TenantID)
+			}
+		}
+	}
+
+	// 2. Kiểm tra quyền của Tenant đối với công cụ này
 	if !identity.IsToolAllowed(toolName) {
 		return fmt.Errorf("%w: công cụ %q không nằm trong danh mục được phép hoặc thiếu scope", ErrUnauthorizedTool, toolName)
 	}

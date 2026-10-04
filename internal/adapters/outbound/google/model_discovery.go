@@ -20,6 +20,12 @@ type GoogleModelDiscoveryProvider struct {
 	rpcRegistry *domain.RpcRegistry
 }
 
+var (
+	ErrDiscoveryProtocolDrift = fmt.Errorf("discovery_protocol_drift")
+	ErrDiscoveryUpstreamError = fmt.Errorf("discovery_upstream_error")
+	ErrDiscoveryEmptyResponse = fmt.Errorf("discovery_empty_response")
+)
+
 var _ ports.ModelDiscoveryProvider = (*GoogleModelDiscoveryProvider)(nil)
 
 func NewGoogleModelDiscoveryProvider(upstream ports.UpstreamGoogleTransport, rpcRegistry *domain.RpcRegistry) *GoogleModelDiscoveryProvider {
@@ -66,17 +72,17 @@ func (p *GoogleModelDiscoveryProvider) DiscoverModels(ctx context.Context, accou
 		"application/x-www-form-urlencoded;charset=UTF-8",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi kết nối Google discovery RPC (otAQ7b): %w", err)
+		return nil, fmt.Errorf("%w: lỗi kết nối Google discovery RPC (otAQ7b): %v", ErrDiscoveryUpstreamError, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("google discovery RPC (otAQ7b) trả về HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("%w: google discovery RPC (otAQ7b) trả về HTTP %d", ErrDiscoveryUpstreamError, resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("lỗi đọc thân phản hồi otAQ7b: %w", err)
+		return nil, fmt.Errorf("%w: lỗi đọc thân phản hồi otAQ7b: %v", ErrDiscoveryUpstreamError, err)
 	}
 
 	return ParseUpstreamDiscoveryResponse(string(bodyBytes), account.Tier)
@@ -86,7 +92,7 @@ func (p *GoogleModelDiscoveryProvider) DiscoverModels(ctx context.Context, accou
 func ParseUpstreamDiscoveryResponse(raw string, accountTier int) ([]domain.ModelDescriptor, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return nil, fmt.Errorf("phản hồi discovery rỗng")
+		return nil, fmt.Errorf("%w: phản hồi discovery rỗng", ErrDiscoveryEmptyResponse)
 	}
 
 	// 1. Loại bỏ tiền tố XSSI )]}'
@@ -121,12 +127,11 @@ func ParseUpstreamDiscoveryResponse(raw string, accountTier int) ([]domain.Model
 	// 3. Phân tích danh sách mô hình từ payload đã bóc tách
 	models, err := parseModelsFromPayload(innerPayload, accountTier)
 	if err != nil {
-		// Fallback kiểm tra xem có thông tin Tier (Free/Pro) để suy luận mô hình tương thích không
-		return fallbackModelsFromTier(raw, accountTier)
+		return nil, fmt.Errorf("%w: lỗi phân tích cú pháp upstream payload: %v", ErrDiscoveryProtocolDrift, err)
 	}
 
 	if len(models) == 0 {
-		return fallbackModelsFromTier(raw, accountTier)
+		return nil, fmt.Errorf("%w: payload không chứa models hợp lệ từ otAQ7b", ErrDiscoveryProtocolDrift)
 	}
 
 	return models, nil
@@ -269,103 +274,4 @@ func inferCapabilities(name, id string) []domain.ModelCapability {
 		caps = append(caps, domain.CapCode)
 	}
 	return caps
-}
-
-func fallbackModelsFromTier(raw string, accountTier int) ([]domain.ModelDescriptor, error) {
-	tierInfo, err := domain.ParseAccountTierResponse(raw)
-	if err != nil && accountTier <= 0 {
-		return nil, fmt.Errorf("không thể suy luận models từ payload discovery: %w", err)
-	}
-
-	effectiveTier := accountTier
-	if tierInfo != nil {
-		if tierInfo.TierCode == "GOOGLE_ONE_AI_PREMIUM" || tierInfo.TierCode == "GOOGLE_AI_PRO" {
-			effectiveTier = 2
-		} else if tierInfo.TierCode == "WORKSPACE_ENTERPRISE" {
-			effectiveTier = 3
-		}
-	}
-
-	now := time.Now()
-	// Luôn có ít nhất Flash và Flash-Lite cho mọi tài khoản Google Gemini
-	models := []domain.ModelDescriptor{
-		{
-			ID:                domain.CanonicalModelID("3.5 Flash-Lite", domain.ServiceGemini),
-			DisplayName:       "3.5 Flash-Lite",
-			TargetService:     domain.ServiceGemini,
-			Capabilities:      []domain.ModelCapability{domain.CapChat},
-			InternalBackendID: "3.5 Flash-Lite",
-			ModeID:            domain.ModeIDFlashLite,
-			ModelTierCode:     1,
-			IsActive:          true,
-			Source:            "upstream_discovery",
-			FirstSeenAt:       now,
-			LastSeenAt:        now,
-			UpdatedAt:         now,
-		},
-		{
-			ID:                domain.CanonicalModelID("3.8 Flash", domain.ServiceGemini),
-			DisplayName:       "3.8 Flash (Default)",
-			TargetService:     domain.ServiceGemini,
-			Capabilities:      []domain.ModelCapability{domain.CapChat},
-			InternalBackendID: "3.8 Flash",
-			ModeID:            domain.ModeIDFlash,
-			ModelTierCode:     1,
-			IsActive:          true,
-			Source:            "upstream_discovery",
-			FirstSeenAt:       now,
-			LastSeenAt:        now,
-			UpdatedAt:         now,
-		},
-		{
-			ID:                domain.CanonicalModelID("3.8 Flash Thinking", domain.ServiceGemini),
-			DisplayName:       "3.8 Flash Thinking",
-			TargetService:     domain.ServiceGemini,
-			Capabilities:      []domain.ModelCapability{domain.CapChat, domain.CapThinking},
-			InternalBackendID: "3.8 Flash",
-			ModeID:            domain.ModeIDFlash,
-			ModelTierCode:     1,
-			IsActive:          true,
-			Source:            "upstream_discovery",
-			FirstSeenAt:       now,
-			LastSeenAt:        now,
-			UpdatedAt:         now,
-		},
-	}
-
-	// Tài khoản Pro / Enterprise mở khóa Pro & Thinking
-	if effectiveTier >= 2 {
-		models = append(models,
-			domain.ModelDescriptor{
-				ID:                domain.CanonicalModelID("3.1 Pro", domain.ServiceGemini),
-				DisplayName:       "3.1 Pro",
-				TargetService:     domain.ServiceGemini,
-				Capabilities:      []domain.ModelCapability{domain.CapChat},
-				InternalBackendID: "3.1 Pro",
-				ModeID:            domain.ModeIDPro,
-				ModelTierCode:     3,
-				IsActive:          true,
-				Source:            "upstream_discovery",
-				FirstSeenAt:       now,
-				LastSeenAt:        now,
-				UpdatedAt:         now,
-			},
-			domain.ModelDescriptor{
-				ID:                domain.CanonicalModelID("3.1 Pro Thinking", domain.ServiceGemini),
-				DisplayName:       "3.1 Pro Thinking",
-				TargetService:     domain.ServiceGemini,
-				Capabilities:      []domain.ModelCapability{domain.CapChat, domain.CapThinking},
-				InternalBackendID: "3.1 Pro",
-				ModeID:            domain.ModeIDPro,
-				ModelTierCode:     3,
-				IsActive:          true,
-				Source:            "upstream_discovery",
-				FirstSeenAt:       now,
-				LastSeenAt:        now,
-				UpdatedAt:         now,
-			},
-		)
-	}
-
-	return models, nil
 }

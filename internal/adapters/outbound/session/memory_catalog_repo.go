@@ -13,6 +13,7 @@ type MemoryModelCatalogRepository struct {
 	mu            sync.RWMutex
 	models        map[string]domain.ModelDescriptor
 	accountModels map[string]map[string]domain.AccountModelEligibility // accountID -> modelID -> eligibility
+	generation    int64
 }
 
 var _ ports.ModelCatalogRepository = (*MemoryModelCatalogRepository)(nil)
@@ -21,6 +22,7 @@ func NewMemoryModelCatalogRepository() *MemoryModelCatalogRepository {
 	return &MemoryModelCatalogRepository{
 		models:        make(map[string]domain.ModelDescriptor),
 		accountModels: make(map[string]map[string]domain.AccountModelEligibility),
+		generation:    1,
 	}
 }
 
@@ -74,6 +76,13 @@ func (r *MemoryModelCatalogRepository) UpsertAccountModels(ctx context.Context, 
 	if _, ok := r.accountModels[accountID]; !ok {
 		r.accountModels[accountID] = make(map[string]domain.AccountModelEligibility)
 	}
+
+	// Snapshot semantics: đánh dấu tất cả models cũ của account là unavailable
+	for mID, el := range r.accountModels[accountID] {
+		el.IsAvailable = false
+		r.accountModels[accountID][mID] = el
+	}
+
 	now := time.Now()
 	for _, mID := range modelIDs {
 		r.accountModels[accountID][mID] = domain.AccountModelEligibility{
@@ -125,4 +134,17 @@ func (r *MemoryModelCatalogRepository) MarkStaleModels(ctx context.Context, stal
 		}
 	}
 	return count, nil
+}
+
+func (r *MemoryModelCatalogRepository) GetCatalogGeneration(ctx context.Context, service domain.ServiceKind) (int64, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.generation, nil
+}
+
+func (r *MemoryModelCatalogRepository) IncrementCatalogGeneration(ctx context.Context, service domain.ServiceKind) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.generation++
+	return r.generation, nil
 }

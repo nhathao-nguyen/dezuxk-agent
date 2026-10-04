@@ -259,6 +259,29 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		})
 	})
 
+	isAccountUsableForChatModel := func(acc *domain.ManagedAccount, modelID string) bool {
+		if acc == nil || !acc.IsAccountHealthy() || !acc.ServiceReady(domain.ServiceGemini) {
+			return false
+		}
+		if acc.Jar == nil || !acc.Jar.HasKey("__Secure-1PSID") {
+			return false
+		}
+		st := acc.GetHealthStatus()
+		if st == domain.HealthStatusUnavailable || st == domain.HealthStatusAuthExpired || st == domain.HealthStatusQuotaExhausted {
+			return false
+		}
+		if acc.IsInCooldown() {
+			return false
+		}
+		if _, inCool := acc.ActiveCooldown(domain.ServiceGemini); inCool {
+			return false
+		}
+		if !acc.SupportsModel(modelID) {
+			return false
+		}
+		return true
+	}
+
 	// 6. Readiness Check (Readiness Probe - Kiểm tra khả năng phục vụ lưu lượng thực tế)
 	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -273,32 +296,6 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 
 		isTestMode := os.Getenv("DEZUXK_TEST_MODE") == "true" && (deps.Config == nil || !deps.Config.IsProduction())
-		isProd := deps.Config != nil && deps.Config.IsProduction()
-
-		if deps.ModelRegistry == nil || deps.ModelRegistry.Count() == 0 {
-			if isTestMode {
-				checks["models"] = "ok (test_mode)"
-			} else {
-				checks["models"] = "no active models registered"
-				isReady = false
-			}
-		} else if isProd {
-			hasChatModel := false
-			for _, m := range deps.ModelRegistry.List() {
-				if m.HasCapability(domain.CapChat) {
-					hasChatModel = true
-					break
-				}
-			}
-			if !hasChatModel {
-				checks["models"] = "no active chat models registered"
-				isReady = false
-			} else {
-				checks["models"] = "ok"
-			}
-		} else {
-			checks["models"] = "ok"
-		}
 
 		// 1. Kiểm tra cơ sở dữ liệu lưu trữ bắt buộc (PostgreSQL / SQLite)
 		if deps.SessionRepo == nil {
@@ -335,32 +332,60 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 			}
 		}
 
-		// Kiểm tra trạng thái tài khoản khả dụng nếu có session repo
-		if deps.SessionRepo != nil {
-			accounts := deps.SessionRepo.ListAll(r.Context())
-			hasUsable := false
-			for _, acc := range accounts {
-				if acc != nil && acc.GetHealthStatus() != domain.HealthStatusUnavailable {
-					hasUsable = true
-					break
-				}
-			}
-			if !hasUsable {
-				if isTestMode {
-					checks["accounts"] = "ok (test_mode)"
-				} else {
-					checks["accounts"] = "all upstream accounts are degraded or unavailable"
-					isReady = false
-				}
+		// 2. Unified Eligibility Check: ∃ active chat model M AND ∃ account A usable & eligible for M
+		if deps.ModelRegistry == nil || deps.ModelRegistry.Count() == 0 {
+			if isTestMode {
+				checks["models"] = "ok (test_mode)"
 			} else {
-				checks["accounts"] = "ok"
+				checks["models"] = "no active models registered"
+				isReady = false
 			}
-		} else {
+		}
+
+		if deps.SessionRepo == nil {
 			if isTestMode {
 				checks["accounts"] = "ok (test_mode)"
 			} else {
 				checks["accounts"] = "session repository not initialized"
 				isReady = false
+			}
+		}
+
+		if deps.ModelRegistry != nil && deps.SessionRepo != nil {
+			models := deps.ModelRegistry.List()
+			accounts := deps.SessionRepo.ListAll(r.Context())
+
+			hasEligiblePair := false
+			for _, m := range models {
+				if !m.IsActive || !m.HasCapability(domain.CapChat) {
+					continue
+				}
+				for _, acc := range accounts {
+					if isAccountUsableForChatModel(acc, m.ID) {
+						hasEligiblePair = true
+						break
+					}
+				}
+				if hasEligiblePair {
+					break
+				}
+			}
+
+			if !hasEligiblePair {
+				if isTestMode {
+					checks["readiness_pair"] = "ok (test_mode)"
+					checks["models"] = "ok (test_mode)"
+					checks["accounts"] = "ok (test_mode)"
+				} else {
+					checks["readiness_pair"] = "no active chat model with an eligible healthy account"
+					checks["models"] = "no eligible chat model"
+					checks["accounts"] = "no healthy eligible account for active models"
+					isReady = false
+				}
+			} else {
+				checks["readiness_pair"] = "ok"
+				checks["models"] = "ok"
+				checks["accounts"] = "ok"
 			}
 		}
 
@@ -480,28 +505,45 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 	}
 
 	// Admin Authentication & Overview APIs
-	r.Post("/v1/admin/auth/login", adminHandler.HandleLogin)
-	r.Post("/v1/admin/auth/logout", adminHandler.HandleLogout)
-	r.Route("/v1/admin/overview", func(ov chi.Router) {
-		if adminCfg != nil && adminCfg.IsEnabled() {
+	if adminCfg != nil && adminCfg.IsEnabled() {
+		r.Post("/v1/admin/auth/login", adminHandler.HandleLogin)
+		r.Post("/v1/admin/auth/logout", adminHandler.HandleLogout)
+		r.Route("/v1/admin/overview", func(ov chi.Router) {
 			ov.Use(AdminAuthMiddleware(*adminCfg))
+			ov.Get("/", adminHandler.HandleOverview)
+		})
+	} else {
+		disabledAdminHandler := func(w http.ResponseWriter, r *http.Request) {
+			http.NotFound(w, r)
 		}
-		ov.Get("/", adminHandler.HandleOverview)
-	})
+		r.Post("/v1/admin/auth/login", disabledAdminHandler)
+		r.Post("/v1/admin/auth/logout", disabledAdminHandler)
+		r.Route("/v1/admin/overview", func(ov chi.Router) {
+			ov.HandleFunc("/*", disabledAdminHandler)
+		})
+	}
 
 	// Admin Runtime Management APIs (Requirement 29 & 65)
 	runtimeAdminHandler := NewAdminRuntimeHandler(deps.ModelDiscoveryService, deps.ModelCatalogRepo, deps.SessionRepo, deps.ModelRegistry, deps.Metrics)
-	mountRuntimeAdmin := func(rt chi.Router) {
-		if adminCfg != nil && adminCfg.IsEnabled() {
+	if adminCfg != nil && adminCfg.IsEnabled() {
+		mountRuntimeAdmin := func(rt chi.Router) {
 			rt.Use(AdminAuthMiddleware(*adminCfg))
+			rt.Post("/models/refresh", runtimeAdminHandler.HandleRefresh)
+			rt.Get("/models", runtimeAdminHandler.HandleListRuntimeModels)
+			rt.Get("/accounts", runtimeAdminHandler.HandleListRuntimeAccounts)
+			rt.Get("/catalog/status", runtimeAdminHandler.HandleCatalogStatus)
 		}
-		rt.Post("/models/refresh", runtimeAdminHandler.HandleRefresh)
-		rt.Get("/models", runtimeAdminHandler.HandleListRuntimeModels)
-		rt.Get("/accounts", runtimeAdminHandler.HandleListRuntimeAccounts)
-		rt.Get("/catalog/status", runtimeAdminHandler.HandleCatalogStatus)
+		r.Route("/admin/runtime", mountRuntimeAdmin)
+		r.Route("/v1/admin/runtime", mountRuntimeAdmin)
+	} else {
+		mountDisabledRuntime := func(rt chi.Router) {
+			rt.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
+				http.NotFound(w, r)
+			})
+		}
+		r.Route("/admin/runtime", mountDisabledRuntime)
+		r.Route("/v1/admin/runtime", mountDisabledRuntime)
 	}
-	r.Route("/admin/runtime", mountRuntimeAdmin)
-	r.Route("/v1/admin/runtime", mountRuntimeAdmin)
 
 	// 5. Mount /v1 Routes - Khóa chặt chỉ phục vụ các endpoint đã hoàn tất hợp đồng Facade
 	r.Route("/v1", func(v1 chi.Router) {
@@ -719,15 +761,31 @@ func BuildRouter(deps RouterDependencies) http.Handler {
 		}
 
 		// Profile Management (Quản lý Profile cục bộ - Yêu cầu quyền Quản trị viên)
-		if profileHandler != nil {
+		if profileHandler != nil || (deps.Config != nil && !deps.Config.Profiles.IsControlPlaneEnabled()) {
 			v1.Route("/profiles", func(prof chi.Router) {
 				prof.Use(RequireAdmin)
-				prof.Get("/", profileHandler.HandleListProfiles)
-				prof.Post("/", profileHandler.HandleCreateProfile)
-				prof.Post("/{id}/launch", profileHandler.HandleLaunchChrome)
-				prof.Post("/{id}/sync", profileHandler.HandleSyncCDP)
-				prof.Post("/{id}/ingest", profileHandler.HandleIngestCookies)
-				prof.Put("/{id}/proxy", profileHandler.HandleSetProxy)
+				if deps.Config != nil && !deps.Config.Profiles.IsControlPlaneEnabled() {
+					prof.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"error": map[string]any{
+								"message": "Node này không phải là profile control plane owner. Thao tác Chrome profile cục bộ bị từ chối.",
+								"type":    "permission_denied",
+								"code":    "profile_control_plane_disabled",
+							},
+						})
+					})
+					return
+				}
+				if profileHandler != nil {
+					prof.Get("/", profileHandler.HandleListProfiles)
+					prof.Post("/", profileHandler.HandleCreateProfile)
+					prof.Post("/{id}/launch", profileHandler.HandleLaunchChrome)
+					prof.Post("/{id}/sync", profileHandler.HandleSyncCDP)
+					prof.Post("/{id}/ingest", profileHandler.HandleIngestCookies)
+					prof.Put("/{id}/proxy", profileHandler.HandleSetProxy)
+				}
 			})
 		}
 

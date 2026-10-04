@@ -125,6 +125,8 @@ type ModelCatalogRepository interface {
 	ListAccountModels(ctx context.Context, accountID string) ([]domain.AccountModelEligibility, error)
 	ListEligibleAccountsForModel(ctx context.Context, modelID string) ([]string, error)
 	MarkStaleModels(ctx context.Context, staleBefore time.Time) (int64, error)
+	GetCatalogGeneration(ctx context.Context, service domain.ServiceKind) (int64, error)
+	IncrementCatalogGeneration(ctx context.Context, service domain.ServiceKind) (int64, error)
 }
 
 // TenantRuntimeSettingsRepository quản lý lưu trữ cấu hình động phân lập theo từng Tenant trên PostgreSQL

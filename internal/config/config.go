@@ -46,10 +46,13 @@ type Config struct {
 }
 
 type RuntimeCatalogConfig struct {
-	Enabled         *bool         `yaml:"enabled"`
-	RefreshInterval time.Duration `yaml:"refresh_interval"`
-	StaleAfter      time.Duration `yaml:"stale_after"`
-	DeprecateAfter  time.Duration `yaml:"deprecate_after"`
+	Enabled              *bool         `yaml:"enabled"`
+	RefreshInterval      time.Duration `yaml:"refresh_interval"`
+	StaleAfter           time.Duration `yaml:"stale_after"`
+	DeprecateAfter       time.Duration `yaml:"deprecate_after"`
+	DiscoveryConcurrency int           `yaml:"discovery_concurrency"`
+	PerAccountTimeout    time.Duration `yaml:"per_account_timeout"`
+	GlobalTimeout        time.Duration `yaml:"global_timeout"`
 }
 
 func (r RuntimeCatalogConfig) IsEnabled() bool {
@@ -78,6 +81,27 @@ func (r RuntimeCatalogConfig) GetDeprecateAfter() time.Duration {
 		return r.DeprecateAfter
 	}
 	return 24 * time.Hour
+}
+
+func (r RuntimeCatalogConfig) GetDiscoveryConcurrency() int {
+	if r.DiscoveryConcurrency > 0 {
+		return r.DiscoveryConcurrency
+	}
+	return 5
+}
+
+func (r RuntimeCatalogConfig) GetPerAccountTimeout() time.Duration {
+	if r.PerAccountTimeout > 0 {
+		return r.PerAccountTimeout
+	}
+	return 20 * time.Second
+}
+
+func (r RuntimeCatalogConfig) GetGlobalTimeout() time.Duration {
+	if r.GlobalTimeout > 0 {
+		return r.GlobalTimeout
+	}
+	return 2 * time.Minute
 }
 
 type ModelSelectionConfig struct {
@@ -216,9 +240,17 @@ func (s ServerConfig) StreamTimeout() time.Duration {
 }
 
 type ProfilesConfig struct {
-	BaseDir      string `yaml:"base_dir"`       // Thư mục chứa các profile Chrome riêng biệt (mỗi tài khoản 1 folder)
-	ChromeBinary string `yaml:"chrome_binary"`  // Đường dẫn tới file thực thi Chrome
-	CDPPortStart int    `yaml:"cdp_port_start"` // Cổng khởi đầu cho remote debugging Chrome (mặc định 9222)
+	BaseDir             string `yaml:"base_dir"`              // Thư mục chứa các profile Chrome riêng biệt (mỗi tài khoản 1 folder)
+	ChromeBinary        string `yaml:"chrome_binary"`         // Đường dẫn tới file thực thi Chrome
+	CDPPortStart        int    `yaml:"cdp_port_start"`        // Cổng khởi đầu cho remote debugging Chrome (mặc định 9222)
+	ControlPlaneEnabled *bool  `yaml:"control_plane_enabled"` // Node này có quyền điều khiển Chrome profiles cục bộ hay không
+}
+
+func (p ProfilesConfig) IsControlPlaneEnabled() bool {
+	if p.ControlPlaneEnabled != nil {
+		return *p.ControlPlaneEnabled
+	}
+	return true
 }
 
 type MediaConfig struct {
@@ -796,6 +828,25 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if pd := os.Getenv("DEZUXK_PROFILES_DIR"); pd != "" {
 		cfg.Profiles.BaseDir = pd
+	}
+	if cpe := os.Getenv("DEZUXK_PROFILES_CONTROL_PLANE_ENABLED"); cpe != "" {
+		val := (cpe == "true" || cpe == "1")
+		cfg.Profiles.ControlPlaneEnabled = &val
+	}
+	if rcConc := os.Getenv("DEZUXK_RUNTIME_CATALOG_CONCURRENCY"); rcConc != "" {
+		if c, err := strconv.Atoi(rcConc); err == nil && c > 0 {
+			cfg.RuntimeCatalog.DiscoveryConcurrency = c
+		}
+	}
+	if rcAccTimeout := os.Getenv("DEZUXK_RUNTIME_CATALOG_ACCOUNT_TIMEOUT"); rcAccTimeout != "" {
+		if d, err := time.ParseDuration(rcAccTimeout); err == nil && d > 0 {
+			cfg.RuntimeCatalog.PerAccountTimeout = d
+		}
+	}
+	if rcGlobalTimeout := os.Getenv("DEZUXK_RUNTIME_CATALOG_GLOBAL_TIMEOUT"); rcGlobalTimeout != "" {
+		if d, err := time.ParseDuration(rcGlobalTimeout); err == nil && d > 0 {
+			cfg.RuntimeCatalog.GlobalTimeout = d
+		}
 	}
 	if dp := os.Getenv("DEZUXK_DATABASE_PATH"); dp != "" {
 		cfg.Storage.DatabasePath = dp

@@ -61,8 +61,8 @@ func TestScanAndDiscoverLoadsReadyWithoutOrigin(t *testing.T) {
 	if extractor.calls != 0 {
 		t.Fatalf("origin calls extract=%d", extractor.calls)
 	}
-	if models.Count() == 0 {
-		t.Fatal("local catalogs were not activated")
+	if models.Count() != 0 {
+		t.Fatal("local catalogs must not be activated statically in production scan")
 	}
 	acc, err := repo.FindByID(context.Background(), "acc")
 	if err != nil {

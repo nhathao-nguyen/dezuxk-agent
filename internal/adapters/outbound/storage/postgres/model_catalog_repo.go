@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"dezuxk-gateway/internal/core/domain"
@@ -78,8 +79,13 @@ func (r *PostgresModelCatalogRepository) UpsertModels(ctx context.Context, model
 			source = "discovery"
 		}
 
+		upstreamID := m.UpstreamModelID
+		if upstreamID == "" {
+			upstreamID = m.InternalBackendID
+		}
+
 		_, err := tx.Exec(ctx, query,
-			m.ID, string(m.TargetService), m.InternalBackendID, m.DisplayName, m.InternalBackendID, m.ModeID,
+			m.ID, string(m.TargetService), upstreamID, m.DisplayName, m.InternalBackendID, m.ModeID,
 			m.ModelTierCode, string(capBytes), string(metaBytes), m.IsActive, source,
 			firstSeen, lastSeen, updatedAt,
 		)
@@ -138,6 +144,9 @@ func (r *PostgresModelCatalogRepository) ListModels(ctx context.Context, service
 			return nil, fmt.Errorf("lỗi scan runtime_models: %w", err)
 		}
 		m.TargetService = domain.ServiceKind(srv)
+		if upID != nil {
+			m.UpstreamModelID = *upID
+		}
 		if bkID != nil {
 			m.InternalBackendID = *bkID
 		}
@@ -177,6 +186,12 @@ func (r *PostgresModelCatalogRepository) UpsertAccountModels(ctx context.Context
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// 1. Transactional snapshot: đánh dấu toàn bộ model trước đây của account là unavailable
+	if _, err := tx.Exec(ctx, `UPDATE account_models SET is_available = false WHERE account_id = $1`, accountID); err != nil {
+		return fmt.Errorf("lỗi vô hiệu hóa snapshot cũ account_models: %w", err)
+	}
+
+	// 2. Kích hoạt và cập nhật các model quan sát thấy trong chu kỳ discovery hiện tại
 	query := `
 	INSERT INTO account_models (account_id, model_id, is_available, is_eligible, last_seen_at)
 	VALUES ($1, $2, true, $3, NOW())
@@ -267,4 +282,48 @@ func (r *PostgresModelCatalogRepository) MarkStaleModels(ctx context.Context, st
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
+}
+
+func (r *PostgresModelCatalogRepository) GetCatalogGeneration(ctx context.Context, service domain.ServiceKind) (int64, error) {
+	if r.pool == nil {
+		return 0, fmt.Errorf("pgxpool không khả dụng")
+	}
+	srvKey := string(service)
+	if srvKey == "" {
+		srvKey = "global"
+	}
+	var gen int64
+	query := `SELECT generation FROM runtime_catalog_state WHERE service = $1;`
+	err := r.pool.QueryRow(ctx, query, srvKey).Scan(&gen)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return 1, nil
+		}
+		return 0, err
+	}
+	return gen, nil
+}
+
+func (r *PostgresModelCatalogRepository) IncrementCatalogGeneration(ctx context.Context, service domain.ServiceKind) (int64, error) {
+	if r.pool == nil {
+		return 0, fmt.Errorf("pgxpool không khả dụng")
+	}
+	srvKey := string(service)
+	if srvKey == "" {
+		srvKey = "global"
+	}
+	var newGen int64
+	query := `
+	INSERT INTO runtime_catalog_state (service, generation, updated_at)
+	VALUES ($1, 1, NOW())
+	ON CONFLICT (service) DO UPDATE SET
+		generation = runtime_catalog_state.generation + 1,
+		updated_at = NOW()
+	RETURNING generation;
+	`
+	err := r.pool.QueryRow(ctx, query, srvKey).Scan(&newGen)
+	if err != nil {
+		return 0, fmt.Errorf("lỗi tăng generation danh mục mô hình: %w", err)
+	}
+	return newGen, nil
 }

@@ -47,12 +47,21 @@ type ProfileManager struct {
 	client        *http.Client
 	vault         *Vault
 	quotaUseCase  ports.GeminiQuotaUseCase
+	eventBus      ports.EventBus
 }
+
+const TopicAccountChanged = "runtime.account.changed"
 
 func (pm *ProfileManager) SetQuotaUseCase(qu ports.GeminiQuotaUseCase) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.quotaUseCase = qu
+}
+
+func (pm *ProfileManager) SetEventBus(eb ports.EventBus) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.eventBus = eb
 }
 
 type StoredProfileSession struct {
@@ -62,6 +71,7 @@ type StoredProfileSession struct {
 	Cookies          map[string]string `json:"cookies,omitempty"`
 	EncryptedCookies string            `json:"encrypted_cookies,omitempty"`
 	GeminiSNlM0e     string            `json:"gemini_sn_token,omitempty"`
+	EncryptedSN      string            `json:"encrypted_sn,omitempty"`
 	UserAgent        string            `json:"user_agent"`
 	GeminiQuota      string            `json:"gemini_quota,omitempty"`
 	Tier             int               `json:"tier,omitempty"`
@@ -167,7 +177,7 @@ func (pm *ProfileManager) ScanAndDiscover(ctx context.Context) ([]*domain.Profil
 				prof.Proxy = sess.Proxy
 				cookies := sess.Cookies
 				if sess.EncryptedCookies != "" && pm.vault != nil {
-					if decBytes, decErr := pm.vault.Decrypt(sess.EncryptedCookies); decErr == nil {
+					if decBytes, decErr := pm.vault.DecryptStrict(sess.EncryptedCookies); decErr == nil {
 						var decMap map[string]string
 						if json.Unmarshal(decBytes, &decMap) == nil {
 							cookies = decMap
@@ -175,18 +185,36 @@ func (pm *ProfileManager) ScanAndDiscover(ctx context.Context) ([]*domain.Profil
 					}
 				}
 
-				// Tự động nâng cấp mã hóa Vault AES-256-GCM nếu file session trên đĩa còn lưu cookie dạng plaintext
+				geminiSN := sess.GeminiSNlM0e
+				if sess.EncryptedSN != "" && pm.vault != nil {
+					if decBytes, decErr := pm.vault.DecryptStrict(sess.EncryptedSN); decErr == nil {
+						geminiSN = string(decBytes)
+					}
+				}
+
+				// Tự động nâng cấp mã hóa Vault AES-256-GCM nếu file session trên đĩa còn lưu cookie hoặc SN token dạng plaintext
+				migrated := false
 				if sess.EncryptedCookies == "" && len(sess.Cookies) > 0 && pm.vault != nil {
 					if rawBytes, err := json.Marshal(sess.Cookies); err == nil {
 						if enc, err := pm.vault.Encrypt(rawBytes); err == nil {
 							sess.EncryptedCookies = enc
 							sess.Cookies = nil // Loại bỏ cookie plaintext khỏi đĩa
-							sess.UpdatedAt = time.Now()
-							if updatedData, err := json.MarshalIndent(sess, "", "  "); err == nil {
-								_ = os.WriteFile(sessionPath, updatedData, 0600)
-								log.Printf("[Profile %s] Đã tự động nâng cấp mã hóa Vault AES-256-GCM cho session.json trên đĩa", profileID)
-							}
+							migrated = true
 						}
+					}
+				}
+				if sess.EncryptedSN == "" && sess.GeminiSNlM0e != "" && pm.vault != nil {
+					if enc, err := pm.vault.Encrypt([]byte(sess.GeminiSNlM0e)); err == nil {
+						sess.EncryptedSN = enc
+						sess.GeminiSNlM0e = "" // Loại bỏ plaintext SN token khỏi đĩa
+						migrated = true
+					}
+				}
+				if migrated {
+					sess.UpdatedAt = time.Now()
+					if updatedData, err := json.MarshalIndent(sess, "", "  "); err == nil {
+						_ = os.WriteFile(sessionPath, updatedData, 0600)
+						log.Printf("[Profile %s] Đã tự động nâng cấp mã hóa Vault AES-256-GCM cho session.json trên đĩa", profileID)
 					}
 				}
 
@@ -205,14 +233,17 @@ func (pm *ProfileManager) ScanAndDiscover(ctx context.Context) ([]*domain.Profil
 							Email:        sess.Email,
 							ProxyURL:     sess.Proxy,
 							Jar:          jar,
-							GeminiSNlM0e: sess.GeminiSNlM0e,
+							GeminiSNlM0e: geminiSN,
 							UserAgent:    sess.UserAgent,
 							Tier:         tier,
 							IsHealthy:    true,
 							LastRefresh:  time.Now(),
 						}
 
-						_ = pm.sessionRepo.Save(ctx, acc)
+						if saveErr := pm.sessionRepo.Save(ctx, acc); saveErr != nil {
+							log.Printf("[Profile %s Warning] Không thể lưu session đã nạp: %v", profileID, saveErr)
+							continue
+						}
 						prof.IsLoggedIn = true
 						prof.HasGemini = true
 						if sess.GeminiQuota != "" {
@@ -220,8 +251,7 @@ func (pm *ProfileManager) ScanAndDiscover(ctx context.Context) ([]*domain.Profil
 						} else {
 							prof.GeminiQuota = "100%"
 						}
-
-						pm.modelRegistry.ActivateServiceModels(domain.ServiceGemini, domain.GetGeminiCatalog())
+						// Không kích hoạt model tĩnh - để discovery động đồng bộ từ upstream và PostgreSQL
 					}
 				}
 			}
@@ -574,37 +604,62 @@ func (pm *ProfileManager) IngestLiveCookiesWithProxy(
 
 	// Lưu vào file session.json trong thư mục profile riêng biệt
 	profileDir := filepath.Join(pm.baseDir, profileID)
-	_ = os.MkdirAll(profileDir, 0755)
-
-	pm.modelRegistry.ActivateServiceModels(domain.ServiceGemini, domain.GetGeminiCatalog())
-
-	// Mã hóa cookies trước khi ghi vào session.json
-	var encCookies string
-	if pm.vault != nil {
-		if rawBytes, err := json.Marshal(rawCookies); err == nil {
-			if enc, err := pm.vault.Encrypt(rawBytes); err == nil {
-				encCookies = enc
-			}
-		}
+	if err := os.MkdirAll(profileDir, 0755); err != nil {
+		return nil, fmt.Errorf("không thể tạo thư mục profile: %w", err)
 	}
 
-	// Lưu phiên an toàn vào session.json
+	if pm.vault == nil {
+		return nil, fmt.Errorf("vault nil: từ chối lưu session.json plaintext")
+	}
+
+	// Mã hóa cookies an toàn trước khi ghi xuống đĩa (Fail Closed)
+	rawBytes, err := json.Marshal(rawCookies)
+	if err != nil {
+		return nil, fmt.Errorf("lỗi serialize cookies: %w", err)
+	}
+	encCookies, encErr := pm.vault.Encrypt(rawBytes)
+	if encErr != nil {
+		return nil, fmt.Errorf("không thể mã hóa cookies an toàn: %w (từ chối ghi raw cookies)", encErr)
+	}
+
+	var encSN string
+	if account.GeminiSNlM0e != "" {
+		snEnc, snErr := pm.vault.Encrypt([]byte(account.GeminiSNlM0e))
+		if snErr != nil {
+			return nil, fmt.Errorf("không thể mã hóa Gemini SN token an toàn: %w", snErr)
+		}
+		encSN = snEnc
+	}
+
+	// Lưu phiên an toàn vào session.json (không chứa raw cookies hay plaintext SN token)
 	storedSess := StoredProfileSession{
 		ProfileID:        profileID,
 		Email:            email,
 		Proxy:            effectiveProxy,
 		EncryptedCookies: encCookies,
-		GeminiSNlM0e:     account.GeminiSNlM0e,
+		EncryptedSN:      encSN,
 		UserAgent:        userAgent,
 		GeminiQuota:      "",
 		Tier:             account.Tier,
 		UpdatedAt:        time.Now(),
 	}
-	if encCookies == "" {
-		storedSess.Cookies = rawCookies
+
+	data, err := json.MarshalIndent(storedSess, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("lỗi serialize session.json: %w", err)
 	}
-	if data, err := json.MarshalIndent(storedSess, "", "  "); err == nil {
-		_ = os.WriteFile(filepath.Join(profileDir, "session.json"), data, 0600)
+	if err := os.WriteFile(filepath.Join(profileDir, "session.json"), data, 0600); err != nil {
+		return nil, fmt.Errorf("lỗi ghi session.json: %w", err)
+	}
+
+	// Phát sự kiện account thay đổi qua Redis EventBus để leader node làm mới danh mục và eligibility
+	if pm.eventBus != nil {
+		evData, _ := json.Marshal(map[string]any{
+			"account_id": profileID,
+			"email":      email,
+			"timestamp":  time.Now(),
+		})
+		_ = pm.eventBus.Publish(ctx, TopicAccountChanged, evData)
 	}
 
 	// Cập nhật trạng thái Profile

@@ -102,12 +102,19 @@ func TestHealthEndpointDoesNotLeakAlerts(t *testing.T) {
 	models.Register(domain.ModelDescriptor{
 		ID:            "gemini-3.8-flash",
 		TargetService: domain.ServiceGemini,
+		Capabilities:  []domain.ModelCapability{domain.CapChat},
+		IsActive:      true,
 	})
-	sessionRepo.Save(context.Background(), &domain.ManagedAccount{
-		ID:           "acc-usable-1",
-		Email:        "user@corp.com",
-		HealthStatus: domain.HealthStatusHealthy,
-	})
+	acc := &domain.ManagedAccount{
+		ID:              "acc-usable-1",
+		Email:           "user@corp.com",
+		HealthStatus:    domain.HealthStatusHealthy,
+		IsHealthy:       true,
+		Jar:             domain.NewCookieJar(map[string]string{"__Secure-1PSID": "test-sid"}),
+		SupportedModels: []string{"gemini-3.8-flash"},
+	}
+	_ = acc.MoveService(domain.ServiceGemini, domain.StateReady)
+	sessionRepo.Save(context.Background(), acc)
 
 	recReady := httptest.NewRecorder()
 	reqReady := httptest.NewRequest(http.MethodGet, "/ready", nil)

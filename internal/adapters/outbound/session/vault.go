@@ -107,8 +107,15 @@ func (v *Vault) Encrypt(plaintext []byte) (string, error) {
 	return EncryptedPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
+var ErrNotEncrypted = errors.New("dữ liệu không có tiền tố mã hóa enc:v1")
+
+// IsEncrypted kiểm tra xem một chuỗi có mang tiền tố mã hóa hợp lệ enc:v1: không
+func (v *Vault) IsEncrypted(cipherStr string) bool {
+	return strings.HasPrefix(cipherStr, EncryptedPrefix)
+}
+
 // Decrypt giải mã chuỗi. Nếu chuỗi KHÔNG có tiền tố enc:v1:,
-// Vault coi đây là dữ liệu plaintext cũ để giữ tương thích ngược 100%.
+// Vault coi đây là dữ liệu plaintext cũ để giữ tương thích ngược khi đọc ban đầu.
 func (v *Vault) Decrypt(cipherStr string) ([]byte, error) {
 	if cipherStr == "" {
 		return []byte{}, nil
@@ -119,6 +126,22 @@ func (v *Vault) Decrypt(cipherStr string) ([]byte, error) {
 		return []byte(cipherStr), nil
 	}
 
+	return v.decryptEncrypted(cipherStr)
+}
+
+// DecryptStrict chỉ giải mã các chuỗi đã mã hóa hợp lệ (mang tiền tố enc:v1:).
+// Trả về ErrNotEncrypted nếu chuỗi là plaintext cũ.
+func (v *Vault) DecryptStrict(cipherStr string) ([]byte, error) {
+	if cipherStr == "" {
+		return []byte{}, nil
+	}
+	if !strings.HasPrefix(cipherStr, EncryptedPrefix) {
+		return nil, ErrNotEncrypted
+	}
+	return v.decryptEncrypted(cipherStr)
+}
+
+func (v *Vault) decryptEncrypted(cipherStr string) ([]byte, error) {
 	rawB64 := strings.TrimPrefix(cipherStr, EncryptedPrefix)
 	data, err := base64.StdEncoding.DecodeString(rawB64)
 	if err != nil {

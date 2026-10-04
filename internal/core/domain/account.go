@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -410,6 +411,99 @@ type AccountModelEligibility struct {
 	LastSeenAt  time.Time `json:"last_seen_at"`
 }
 
+func (a *ManagedAccount) GetInFlight() int64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.InFlightReqs
+}
+
+func (a *ManagedAccount) IncInFlight() int64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.InFlightReqs++
+	return a.InFlightReqs
+}
+
+func (a *ManagedAccount) DecInFlight() int64 {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.InFlightReqs > 0 {
+		a.InFlightReqs--
+	}
+	return a.InFlightReqs
+}
+
+func (a *ManagedAccount) GetTier() int {
+	if a == nil {
+		return 1
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.Tier <= 0 {
+		return 1
+	}
+	return a.Tier
+}
+
+func (a *ManagedAccount) SetTier(tier int) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Tier = tier
+}
+
+func (a *ManagedAccount) IsAccountHealthy() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.IsHealthy
+}
+
+func (a *ManagedAccount) SetAccountHealthy(healthy bool) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.IsHealthy = healthy
+}
+
+func (a *ManagedAccount) SetHealthStatus(status AccountHealthStatus) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.HealthStatus = status
+	if status == HealthStatusHealthy {
+		a.IsHealthy = true
+	} else if status == HealthStatusUnavailable || status == HealthStatusAuthExpired {
+		a.IsHealthy = false
+	}
+}
+
+func (a *ManagedAccount) GetCooldownUntil() time.Time {
+	if a == nil {
+		return time.Time{}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.CooldownUntil
+}
+
 func (a *ManagedAccount) SetSupportedModels(models []string) {
 	if a == nil {
 		return
@@ -431,6 +525,16 @@ func (a *ManagedAccount) GetSupportedModels() []string {
 	return res
 }
 
+var allowUnverifiedCompatibilityMode atomic.Bool
+
+func SetAllowUnverifiedCompatibilityMode(allow bool) {
+	allowUnverifiedCompatibilityMode.Store(allow)
+}
+
+func GetAllowUnverifiedCompatibilityMode() bool {
+	return allowUnverifiedCompatibilityMode.Load()
+}
+
 func (a *ManagedAccount) SupportsModel(modelID string) bool {
 	if a == nil {
 		return false
@@ -443,7 +547,7 @@ func (a *ManagedAccount) SupportsModel(modelID string) bool {
 
 	cleaned := strings.ToLower(strings.TrimSpace(modelID))
 
-	// 1. Nếu có danh sách SupportedModels rõ ràng
+	// 1. Nếu có danh sách SupportedModels rõ ràng từ upstream discovery
 	if len(a.SupportedModels) > 0 {
 		for _, m := range a.SupportedModels {
 			mClean := strings.ToLower(strings.TrimSpace(m))
@@ -454,8 +558,12 @@ func (a *ManagedAccount) SupportsModel(modelID string) bool {
 		return false
 	}
 
-	// 2. Nếu chưa có danh sách cụ thể, dựa trên Tier:
-	// Free (Tier 1): không hỗ trợ các model Pro (có tier >= 2 hoặc backend Pro)
+	// 2. UNKNOWN eligibility: Nếu SupportedModels rỗng, trong production KHÔNG được assume support.
+	if !allowUnverifiedCompatibilityMode.Load() {
+		return false
+	}
+
+	// Heuristic cũ chỉ chạy khi explicit bật Compatibility Mode
 	if a.Tier <= 1 {
 		if strings.Contains(cleaned, "pro") {
 			return false

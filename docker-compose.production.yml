@@ -107,6 +107,7 @@ services:
       - .env.production
     environment:
       DEZUXK_CLUSTER_NODE_ID: gateway-node-a
+      DEZUXK_PROFILES_CONTROL_PLANE_ENABLED: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -146,6 +147,7 @@ services:
       - .env.production
     environment:
       DEZUXK_CLUSTER_NODE_ID: gateway-node-b
+      DEZUXK_PROFILES_CONTROL_PLANE_ENABLED: "false"
     depends_on:
       postgres:
         condition: service_healthy
@@ -185,6 +187,7 @@ services:
       - .env.production
     environment:
       DEZUXK_CLUSTER_NODE_ID: gateway-node-c
+      DEZUXK_PROFILES_CONTROL_PLANE_ENABLED: "false"
     depends_on:
       postgres:
         condition: service_healthy

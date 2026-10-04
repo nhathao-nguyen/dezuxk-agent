@@ -215,7 +215,7 @@ Working Directory: %s
 	}
 
 	if r.memorySvc != nil {
-		core := r.memorySvc.GetCoreMemory()
+		core := r.memorySvc.GetCoreMemoryForContext(ctx)
 		if core != nil {
 			prompt = prompt + "\n\n" + core.FormatPrompt()
 		}
@@ -360,9 +360,29 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 	}
 	defer finalizeSandbox()
 
+	var tenantAllowedTools []string
+	if r.tenantSettingsRepo != nil && strings.TrimSpace(identity.TenantID) != "" {
+		if ts, err := r.tenantSettingsRepo.Get(execCtx, identity.TenantID); err == nil && ts != nil {
+			tenantAllowedTools = ts.AllowedTools
+		}
+	}
+
 	var openAITools []domain.OpenAITool
 	if r.tools != nil {
-		openAITools = r.tools.ToOpenAITools()
+		allTools := r.tools.ToOpenAITools()
+		if len(tenantAllowedTools) > 0 {
+			allowedMap := make(map[string]bool)
+			for _, t := range tenantAllowedTools {
+				allowedMap[strings.TrimSpace(t)] = true
+			}
+			for _, t := range allTools {
+				if allowedMap[t.Function.Name] || allowedMap["*"] {
+					openAITools = append(openAITools, t)
+				}
+			}
+		} else {
+			openAITools = allTools
+		}
 	}
 
 	var lastToolSig string
@@ -574,6 +594,30 @@ func (r *Runner) Run(ctx context.Context, goal string, opts domain.AgentRunOptio
 		for _, tc := range assistantMsg.ToolCalls {
 			toolName := tc.Function.Name
 			toolArgs := tc.Function.Arguments
+
+			// 0. Kiểm tra quyền AllowedTools của Tenant trước execution (Execution Defense-in-Depth)
+			if len(tenantAllowedTools) > 0 {
+				allowed := false
+				for _, at := range tenantAllowedTools {
+					at = strings.TrimSpace(at)
+					if at == "*" || at == toolName {
+						allowed = true
+						break
+					}
+					if strings.HasSuffix(at, "*") && strings.HasPrefix(toolName, strings.TrimSuffix(at, "*")) {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					denyMsg := fmt.Sprintf("DENY: Công cụ [%s] bị từ chối thực thi do không nằm trong AllowedTools của tenant %s", toolName, identity.TenantID)
+					state.StopReason = domain.StopReasonVerificationFailed
+					state.Error = denyMsg
+					stepRecord.ToolResults = append(stepRecord.ToolResults, denyMsg)
+					state.Steps = append(state.Steps, stepRecord)
+					return state, fmt.Errorf("công cụ [%s] bị từ chối bởi chính sách AllowedTools của tenant", toolName)
+				}
+			}
 
 			// 1. Kiểm tra vòng lặp vô hạn (Loop Detection)
 			sig := fmt.Sprintf("%s:%s", toolName, strings.TrimSpace(toolArgs))

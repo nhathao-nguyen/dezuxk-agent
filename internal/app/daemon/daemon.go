@@ -127,7 +127,7 @@ func Run(configPath string, portOverride int) error {
 	// Khôi phục danh mục mô hình bền vững từ PostgreSQL / Storage Repository vào local cache
 	if infra.ModelCatalog != nil {
 		persistedModels, err := infra.ModelCatalog.ListModels(context.Background(), "")
-		if err == nil && len(persistedModels) > 0 {
+		if err == nil {
 			modelRegistry.ReplaceAll(persistedModels)
 			log.Printf("[Model Registry] Đã nạp %d mô hình khả dụng từ cơ sở dữ liệu bền vững", len(persistedModels))
 		}
@@ -172,6 +172,9 @@ func Run(configPath string, portOverride int) error {
 	profileManager, err := session.NewProfileManager(cfg, sessionRepo, modelRegistry, tokenExtractor, vault)
 	if err != nil {
 		return fmt.Errorf("lỗi khởi tạo Profile Manager: %w", err)
+	}
+	if infra.EventBus != nil {
+		profileManager.SetEventBus(infra.EventBus)
 	}
 
 	// 6. Quét các thư mục profile đã có trong profiles/
@@ -252,6 +255,9 @@ func Run(configPath string, portOverride int) error {
 	)
 	discoverySvc.SetRefreshInterval(cfg.RuntimeCatalog.GetRefreshInterval())
 	discoverySvc.SetStaleThreshold(cfg.RuntimeCatalog.GetStaleAfter())
+	discoverySvc.SetDiscoveryConcurrency(cfg.RuntimeCatalog.GetDiscoveryConcurrency())
+	discoverySvc.SetPerAccountTimeout(cfg.RuntimeCatalog.GetPerAccountTimeout())
+	discoverySvc.SetGlobalTimeout(cfg.RuntimeCatalog.GetGlobalTimeout())
 
 	chatService := services.NewChatService(modelRegistry, sessionRepo, upstreamTransport, wire, metrics)
 	chatService.SetRpcRegistry(rpcRegistry)
@@ -313,6 +319,9 @@ func Run(configPath string, portOverride int) error {
 	toolRegistry := tools.NewToolRegistry()
 	tools.RegisterDefaultTools(toolRegistry, ".")
 	policyEngine := policy.NewPolicyEngine(toolRegistry, nil)
+	if infra.TenantSettings != nil {
+		policyEngine.SetTenantSettingsRepository(infra.TenantSettings)
+	}
 	agentRunner := agent.NewRunner(chatService, toolRegistry, nil)
 	agentRunner.SetPolicyEngine(policyEngine)
 	agentRunner.SetKeyUseCase(keyService)
@@ -445,6 +454,13 @@ func Run(configPath string, portOverride int) error {
 			infra.LeaderCoord.RegisterJob("model-discovery", func(leaderCtx context.Context) {
 				discoverySvc.SetIsLeader(true)
 				defer discoverySvc.SetIsLeader(false)
+				log.Println("[Model Discovery Leader] Node trở thành leader, bắt đầu discovery Google upstream...")
+				if discRes, dErr := discoverySvc.DiscoverAndSync(leaderCtx); dErr != nil {
+					log.Printf("[Model Discovery Leader] Startup discovery warning: %v", dErr)
+				} else {
+					log.Printf("[Model Discovery Leader] Startup discovery completed: %d accounts scanned, %d succeeded, %d failed, %d models updated",
+						discRes.AccountsScanned, discRes.AccountsSucceeded, discRes.AccountsFailed, discRes.ModelsUpdated)
+				}
 				<-leaderCtx.Done()
 			})
 		}
@@ -455,19 +471,16 @@ func Run(configPath string, portOverride int) error {
 		if cfg.RuntimeCatalog.IsEnabled() {
 			discoverySvc.SetIsLeader(true)
 			_ = discoverySvc.Start(goldenCtx)
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				if discRes, dErr := discoverySvc.DiscoverAndSync(goldenCtx); dErr != nil {
+					log.Printf("[Model Discovery] Startup discovery warning: %v", dErr)
+				} else {
+					log.Printf("[Model Discovery] Startup discovery completed: %d accounts scanned, %d succeeded, %d failed, %d models updated",
+						discRes.AccountsScanned, discRes.AccountsSucceeded, discRes.AccountsFailed, discRes.ModelsUpdated)
+				}
+			}()
 		}
-	}
-
-	if cfg.RuntimeCatalog.IsEnabled() {
-		go func() {
-			time.Sleep(500 * time.Millisecond)
-			if discRes, dErr := discoverySvc.DiscoverAndSync(goldenCtx); dErr != nil {
-				log.Printf("[Model Discovery] Startup discovery warning: %v", dErr)
-			} else {
-				log.Printf("[Model Discovery] Startup discovery completed: %d accounts scanned, %d models seen, %d added, %d updated",
-					discRes.AccountsScanned, discRes.ModelsSeen, discRes.ModelsAdded, discRes.ModelsUpdated)
-			}
-		}()
 	}
 	startStartupTierDiscovery(goldenCtx, sessionRepo, geminiQuotaService)
 

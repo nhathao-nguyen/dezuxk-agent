@@ -24,6 +24,11 @@ type multiAccountSessionRepo struct {
 }
 
 func newMultiAccountRepo(accounts ...*domain.ManagedAccount) *multiAccountSessionRepo {
+	for _, acc := range accounts {
+		if len(acc.GetSupportedModels()) == 0 {
+			acc.SetSupportedModels([]string{"gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.8-pro"})
+		}
+	}
 	return &multiAccountSessionRepo{
 		accounts: accounts,
 		releases: make(map[string]int),

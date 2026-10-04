@@ -327,7 +327,8 @@ func TestPostgres_ModelCatalogAndTenantSettings(t *testing.T) {
 			DisplayName:       "PG Test Flash",
 			TargetService:     domain.ServiceGemini,
 			Capabilities:      []domain.ModelCapability{domain.CapChat},
-			InternalBackendID: "PG Test Flash",
+			UpstreamModelID:   "upstream-flash-x",
+			InternalBackendID: "backend-flash-y",
 			ModelTierCode:     1,
 			IsActive:          true,
 			Source:            "upstream_discovery",
@@ -340,7 +341,8 @@ func TestPostgres_ModelCatalogAndTenantSettings(t *testing.T) {
 			DisplayName:       "PG Test Pro",
 			TargetService:     domain.ServiceGemini,
 			Capabilities:      []domain.ModelCapability{domain.CapChat, domain.CapThinking},
-			InternalBackendID: "PG Test Pro",
+			UpstreamModelID:   "upstream-pro-x",
+			InternalBackendID: "backend-pro-y",
 			ModelTierCode:     3,
 			IsActive:          true,
 			Source:            "upstream_discovery",
@@ -362,28 +364,70 @@ func TestPostgres_ModelCatalogAndTenantSettings(t *testing.T) {
 		t.Fatalf("Kỳ vọng ít nhất 2 models, nhận %d", len(list))
 	}
 
-	// 2. Account-models eligibility
-	accID := "pg-test-account-1"
-	if err := catalogRepo.UpsertAccountModels(ctx, accID, []string{"pg-test-model-flash"}, true); err != nil {
-		t.Fatalf("UpsertAccountModels thất bại: %v", err)
+	// Kiểm tra round-trip không bị gộp/alias upstream_id và backend_id
+	var flashFound bool
+	for _, m := range list {
+		if m.ID == "pg-test-model-flash" {
+			flashFound = true
+			if m.UpstreamModelID != "upstream-flash-x" || m.InternalBackendID != "backend-flash-y" {
+				t.Fatalf("Round-trip upstream_id/backend_id mismatch: got upstream=%q backend=%q, want upstream-flash-x and backend-flash-y", m.UpstreamModelID, m.InternalBackendID)
+			}
+		}
+	}
+	if !flashFound {
+		t.Fatalf("Không tìm thấy model pg-test-model-flash sau khi Upsert")
 	}
 
-	eligibleAccs, err := catalogRepo.ListEligibleAccountsForModel(ctx, "pg-test-model-flash")
-	if err != nil {
-		t.Fatalf("ListEligibleAccountsForModel thất bại: %v", err)
+	// 2. Account-models eligibility snapshot: Lần 1 phát hiện Flash & Pro
+	accID := "pg-test-account-1"
+	if err := catalogRepo.UpsertAccountModels(ctx, accID, []string{"pg-test-model-flash", "pg-test-model-pro"}, true); err != nil {
+		t.Fatalf("UpsertAccountModels lần 1 thất bại: %v", err)
 	}
-	found := false
-	for _, a := range eligibleAccs {
+
+	eligibleAccsPro, err := catalogRepo.ListEligibleAccountsForModel(ctx, "pg-test-model-pro")
+	if err != nil {
+		t.Fatalf("ListEligibleAccountsForModel pro thất bại: %v", err)
+	}
+	var foundPro bool
+	for _, a := range eligibleAccsPro {
 		if a == accID {
-			found = true
+			foundPro = true
 			break
 		}
 	}
-	if !found {
-		t.Errorf("Không tìm thấy account %s trong danh sách hỗ trợ model flash", accID)
+	if !foundPro {
+		t.Fatalf("Lần 1: Kỳ vọng account %s có quyền sử dụng model pro", accID)
 	}
 
-	// 3. MarkStaleModels
+	// Lần 2: Chỉ còn Flash (Pro biến mất khỏi upstream) -> Pro phải bị đánh dấu is_available=false
+	if err := catalogRepo.UpsertAccountModels(ctx, accID, []string{"pg-test-model-flash"}, true); err != nil {
+		t.Fatalf("UpsertAccountModels lần 2 thất bại: %v", err)
+	}
+
+	eligibleAccsProAfter, err := catalogRepo.ListEligibleAccountsForModel(ctx, "pg-test-model-pro")
+	if err != nil {
+		t.Fatalf("ListEligibleAccountsForModel pro sau lần 2 thất bại: %v", err)
+	}
+	for _, a := range eligibleAccsProAfter {
+		if a == accID {
+			t.Fatalf("Lần 2: Account %s vẫn còn trong danh sách eligible pro (stale eligibility không bị xoá/tắt)", accID)
+		}
+	}
+
+	// 3. Catalog Generation Tracking
+	gen1, err := catalogRepo.GetCatalogGeneration(ctx, domain.ServiceGemini)
+	if err != nil {
+		t.Fatalf("GetCatalogGeneration thất bại: %v", err)
+	}
+	gen2, err := catalogRepo.IncrementCatalogGeneration(ctx, domain.ServiceGemini)
+	if err != nil {
+		t.Fatalf("IncrementCatalogGeneration thất bại: %v", err)
+	}
+	if gen2 != gen1+1 {
+		t.Fatalf("Catalog generation không tăng đúng: gen1=%d, gen2=%d", gen1, gen2)
+	}
+
+	// 4. MarkStaleModels
 	staleBefore := now.Add(1 * time.Hour) // Trong tương lai, đánh dấu tất cả models thành stale
 	marked, err := catalogRepo.MarkStaleModels(ctx, staleBefore)
 	if err != nil {
@@ -397,11 +441,12 @@ func TestPostgres_ModelCatalogAndTenantSettings(t *testing.T) {
 	_ = catalogRepo.MarkAvailability(ctx, "pg-test-model-flash", true)
 	_ = catalogRepo.MarkAvailability(ctx, "pg-test-model-pro", true)
 
-	// 4. Tenant Runtime Settings
+	// 5. Tenant Runtime Settings (bao gồm StrictModel)
 	tenantSettings := &domain.TenantRuntimeSettings{
 		TenantID:            "pg-tenant-1",
 		PreferredModel:      "pg-test-model-pro",
 		ModelPolicy:         "strict",
+		StrictModel:         true,
 		Persona:             "You are a PostgreSQL test persona.",
 		ProjectContext:      "Context PG",
 		AllowedCapabilities: []domain.ModelCapability{domain.CapChat, domain.CapThinking},
@@ -419,5 +464,8 @@ func TestPostgres_ModelCatalogAndTenantSettings(t *testing.T) {
 	}
 	if gotSettings == nil || gotSettings.Persona != tenantSettings.Persona {
 		t.Fatalf("Tenant settings đọc lại không khớp: %+v", gotSettings)
+	}
+	if !gotSettings.StrictModel {
+		t.Fatalf("StrictModel không được lưu/đọc đúng (kỳ vọng true, nhận false): %+v", gotSettings)
 	}
 }

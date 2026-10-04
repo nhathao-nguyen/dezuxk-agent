@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -160,11 +162,57 @@ func (r *PostgresSessionRepository) loadPersistedSessions(ctx context.Context) e
 		}
 
 		cookieMap := make(map[string]string)
-		decBytes, decErr := r.vault.Decrypt(cookiesJSON)
-		if decErr == nil {
-			_ = json.Unmarshal(decBytes, &cookieMap)
-		} else {
-			_ = json.Unmarshal([]byte(cookiesJSON), &cookieMap)
+		var needsMigration bool
+		if cookiesJSON != "" {
+			if r.vault == nil {
+				return fmt.Errorf("vault nil: không thể giải mã session credentials cho account %s", id)
+			}
+			if r.vault.IsEncrypted(cookiesJSON) {
+				decBytes, decErr := r.vault.DecryptStrict(cookiesJSON)
+				if decErr != nil {
+					log.Printf("[Session Repo Error] Lỗi giải mã cookies cho account %s: %v", id, decErr)
+				} else if err := json.Unmarshal(decBytes, &cookieMap); err != nil {
+					return fmt.Errorf("lỗi parse JSON cookies đã giải mã cho account %s: %w", id, err)
+				}
+			} else {
+				// Legacy plaintext migration: chỉ chấp nhận nếu là JSON hợp lệ
+				trimmed := strings.TrimSpace(cookiesJSON)
+				if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+					if err := json.Unmarshal([]byte(trimmed), &cookieMap); err != nil {
+						return fmt.Errorf("lỗi parse legacy plaintext cookies cho account %s: %w", id, err)
+					}
+					needsMigration = true
+				} else {
+					log.Printf("[Session Repo Error] Cookies cho account %s không hợp lệ (không phải enc:v1: và không phải JSON hợp lệ)", id)
+				}
+			}
+		}
+
+		decryptedSN := geminiSN
+		if geminiSN != "" && r.vault != nil {
+			if r.vault.IsEncrypted(geminiSN) {
+				if decSN, decErr := r.vault.DecryptStrict(geminiSN); decErr == nil {
+					decryptedSN = string(decSN)
+				} else {
+					log.Printf("[Session Repo Error] Lỗi giải mã gemini SN token cho account %s: %v", id, decErr)
+					decryptedSN = ""
+				}
+			} else {
+				needsMigration = true
+			}
+		}
+
+		if needsMigration && r.vault != nil {
+			cBytes, _ := json.Marshal(cookieMap)
+			encC, cErr := r.vault.Encrypt(cBytes)
+			var encSN string
+			var snErr error
+			if decryptedSN != "" {
+				encSN, snErr = r.vault.Encrypt([]byte(decryptedSN))
+			}
+			if cErr == nil && snErr == nil {
+				_, _ = r.pool.Exec(ctx, `UPDATE sessions SET cookies_json = $1, gemini_sn_token = $2 WHERE id = $3`, encC, encSN, id)
+			}
 		}
 
 		var cd time.Time
@@ -176,7 +224,7 @@ func (r *PostgresSessionRepository) loadPersistedSessions(ctx context.Context) e
 			ID:                  id,
 			Email:               email,
 			Jar:                 domain.NewCookieJar(cookieMap),
-			GeminiSNlM0e:        geminiSN,
+			GeminiSNlM0e:        decryptedSN,
 			UserAgent:           ua,
 			ProxyURL:            proxy,
 			Tier:                tier,
@@ -250,16 +298,34 @@ func (r *PostgresSessionRepository) Save(ctx context.Context, account *domain.Ma
 		r.promote(account)
 	}
 
-	// Mã hóa cookies an toàn bằng AES-256-GCM trước khi lưu xuống PostgreSQL
+	if r.vault == nil {
+		return fmt.Errorf("vault chưa được khởi tạo: từ chối lưu session credentials plaintext")
+	}
+
+	// Mã hóa cookies an toàn bằng AES-256-GCM trước khi lưu xuống PostgreSQL (Fail Closed)
 	cookiesMap := account.Jar.ToMap()
-	cookiesBytes, _ := json.Marshal(cookiesMap)
+	cookiesBytes, err := json.Marshal(cookiesMap)
+	if err != nil {
+		return fmt.Errorf("lỗi serialize cookies: %w", err)
+	}
 	cookiesStored, encErr := r.vault.Encrypt(cookiesBytes)
 	if encErr != nil {
-		cookiesStored = string(cookiesBytes)
+		return fmt.Errorf("lỗi mã hóa cookies an toàn: %w (từ chối lưu plaintext)", encErr)
+	}
+
+	// Mã hóa Gemini SN token nếu có
+	var snStored string
+	rawSN := account.GetAtToken(domain.ServiceGemini)
+	if rawSN != "" {
+		encSN, snErr := r.vault.Encrypt([]byte(rawSN))
+		if snErr != nil {
+			return fmt.Errorf("lỗi mã hóa gemini SN token: %w (từ chối lưu plaintext)", snErr)
+		}
+		snStored = encSN
 	}
 
 	healthyInt := 0
-	if account.IsHealthy {
+	if account.IsAccountHealthy() {
 		healthyInt = 1
 	}
 
@@ -292,14 +358,15 @@ func (r *PostgresSessionRepository) Save(ctx context.Context, account *domain.Ma
 		health_status = EXCLUDED.health_status;
 	`
 	var cdVal *time.Time
-	if !account.CooldownUntil.IsZero() {
-		cdVal = &account.CooldownUntil
+	cd := account.GetCooldownUntil()
+	if !cd.IsZero() {
+		cdVal = &cd
 	}
 
-	_, err := r.pool.Exec(ctx, query,
-		account.ID, account.Email, cookiesStored, account.GeminiSNlM0e,
+	_, err = r.pool.Exec(ctx, query,
+		account.ID, account.Email, cookiesStored, snStored,
 		account.UserAgent, account.ProxyURL, 0,
-		account.Tier, healthyInt, time.Now(),
+		account.GetTier(), healthyInt, time.Now(),
 		account.SuccessCount, account.FailureCount, account.ConsecutiveFailures,
 		account.GetHealthScore(), account.Count429, account.Count403,
 		account.AvgLatencyMs, cdVal, string(account.GetHealthStatus()),
@@ -433,7 +500,7 @@ func (r *PostgresSessionRepository) usable(acc *domain.ManagedAccount, service d
 	if limit <= 0 {
 		limit = DefaultMaxInFlightPerAccount
 	}
-	if acc.InFlightReqs >= int64(limit) {
+	if acc.GetInFlight() >= int64(limit) {
 		return false
 	}
 	return true
@@ -482,7 +549,7 @@ func (r *PostgresSessionRepository) GetAvailableForModel(ctx context.Context, se
 			}
 			bestAcc, err := strat.Select(ctx, candidates)
 			if err == nil && bestAcc != nil {
-				bestAcc.InFlightReqs++
+				bestAcc.IncInFlight()
 				r.cursor = (r.cursor + 1) % n
 				r.mu.Unlock()
 				return bestAcc, nil
@@ -498,7 +565,7 @@ func (r *PostgresSessionRepository) GetAvailableForModel(ctx context.Context, se
 			allBusy := false
 			r.mu.Lock()
 			for _, id := range r.order {
-				if a := r.accounts[id]; a != nil && a.InFlightReqs >= int64(limit) {
+				if a := r.accounts[id]; a != nil && a.GetInFlight() >= int64(limit) {
 					allBusy = true
 					break
 				}
@@ -537,9 +604,7 @@ func (r *PostgresSessionRepository) Release(account *domain.ManagedAccount, err 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if account.InFlightReqs > 0 {
-		account.InFlightReqs--
-	}
+	account.DecInFlight()
 
 	if err == nil {
 		account.RecordSuccess()

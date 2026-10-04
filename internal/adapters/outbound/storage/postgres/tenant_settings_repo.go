@@ -32,7 +32,7 @@ func (r *PostgresTenantRuntimeSettingsRepository) Get(ctx context.Context, tenan
 
 	query := `
 	SELECT tenant_id, preferred_model, model_policy, persona, project_context,
-	       allowed_capabilities_json, allowed_tools_json, settings_json, updated_at
+	       allowed_capabilities_json, allowed_tools_json, settings_json, strict_model, updated_at
 	FROM tenant_runtime_settings
 	WHERE tenant_id = $1;
 	`
@@ -42,7 +42,7 @@ func (r *PostgresTenantRuntimeSettingsRepository) Get(ctx context.Context, tenan
 	var capsJSON, toolsJSON, settingsJSON string
 	if err := row.Scan(
 		&s.TenantID, &s.PreferredModel, &s.ModelPolicy, &s.Persona, &s.ProjectContext,
-		&capsJSON, &toolsJSON, &settingsJSON, &s.UpdatedAt,
+		&capsJSON, &toolsJSON, &settingsJSON, &s.StrictModel, &s.UpdatedAt,
 	); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil // Not found
@@ -75,10 +75,10 @@ func (r *PostgresTenantRuntimeSettingsRepository) Upsert(ctx context.Context, se
 	query := `
 	INSERT INTO tenant_runtime_settings (
 		tenant_id, preferred_model, model_policy, persona, project_context,
-		allowed_capabilities_json, allowed_tools_json, settings_json, updated_at
+		allowed_capabilities_json, allowed_tools_json, settings_json, strict_model, updated_at
 	) VALUES (
 		$1, $2, $3, $4, $5,
-		$6, $7, $8, NOW()
+		$6, $7, $8, $9, NOW()
 	) ON CONFLICT (tenant_id) DO UPDATE SET
 		preferred_model = EXCLUDED.preferred_model,
 		model_policy = EXCLUDED.model_policy,
@@ -87,12 +87,13 @@ func (r *PostgresTenantRuntimeSettingsRepository) Upsert(ctx context.Context, se
 		allowed_capabilities_json = EXCLUDED.allowed_capabilities_json,
 		allowed_tools_json = EXCLUDED.allowed_tools_json,
 		settings_json = EXCLUDED.settings_json,
+		strict_model = EXCLUDED.strict_model,
 		updated_at = NOW();
 	`
 
 	_, err := r.pool.Exec(ctx, query,
 		settings.TenantID, settings.PreferredModel, settings.ModelPolicy, settings.Persona, settings.ProjectContext,
-		string(capsBytes), string(toolsBytes), string(settingsBytes),
+		string(capsBytes), string(toolsBytes), string(settingsBytes), settings.StrictModel,
 	)
 	return err
 }
@@ -104,7 +105,7 @@ func (r *PostgresTenantRuntimeSettingsRepository) ListAll(ctx context.Context) (
 
 	query := `
 	SELECT tenant_id, preferred_model, model_policy, persona, project_context,
-	       allowed_capabilities_json, allowed_tools_json, settings_json, updated_at
+	       allowed_capabilities_json, allowed_tools_json, settings_json, strict_model, updated_at
 	FROM tenant_runtime_settings
 	ORDER BY tenant_id ASC;
 	`
@@ -120,7 +121,7 @@ func (r *PostgresTenantRuntimeSettingsRepository) ListAll(ctx context.Context) (
 		var capsJSON, toolsJSON, settingsJSON string
 		if err := rows.Scan(
 			&s.TenantID, &s.PreferredModel, &s.ModelPolicy, &s.Persona, &s.ProjectContext,
-			&capsJSON, &toolsJSON, &settingsJSON, &s.UpdatedAt,
+			&capsJSON, &toolsJSON, &settingsJSON, &s.StrictModel, &s.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}

@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"dezuxk-gateway/internal/core/domain"
@@ -11,6 +12,8 @@ import (
 )
 
 type AdminRuntimeHandler struct {
+	mu           sync.Mutex
+	lastRefresh  time.Time
 	discoverySvc *services.ModelDiscoveryService
 	catalogRepo  ports.ModelCatalogRepository
 	sessionRepo  ports.SessionRepository
@@ -36,6 +39,28 @@ func NewAdminRuntimeHandler(
 
 // HandleRefresh: POST /admin/runtime/models/refresh
 func (h *AdminRuntimeHandler) HandleRefresh(w http.ResponseWriter, r *http.Request) {
+	if !h.mu.TryLock() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "Một tiến trình làm mới danh mục mô hình đang được thực thi",
+			"code":  "refresh_in_progress",
+		})
+		return
+	}
+	defer h.mu.Unlock()
+
+	if time.Since(h.lastRefresh) < 3*time.Second {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": "Yêu cầu làm mới danh mục mô hình quá nhanh, vui lòng chờ giây lát",
+			"code":  "rate_limited",
+		})
+		return
+	}
+	h.lastRefresh = time.Now()
+
 	if h.discoverySvc == nil {
 		http.Error(w, `{"error": "model discovery service is not configured"}`, http.StatusNotImplemented)
 		return
@@ -46,7 +71,7 @@ func (h *AdminRuntimeHandler) HandleRefresh(w http.ResponseWriter, r *http.Reque
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"error":            err.Error(),
+			"error":            "Lỗi khi thực hiện discovery mô hình",
 			"accounts_scanned": res.AccountsScanned,
 			"models_seen":      res.ModelsSeen,
 		})
@@ -55,10 +80,12 @@ func (h *AdminRuntimeHandler) HandleRefresh(w http.ResponseWriter, r *http.Reque
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"accounts_scanned": res.AccountsScanned,
-		"models_seen":      res.ModelsSeen,
-		"models_added":     res.ModelsAdded,
-		"models_updated":   res.ModelsUpdated,
+		"accounts_scanned":   res.AccountsScanned,
+		"accounts_succeeded": res.AccountsSucceeded,
+		"accounts_failed":    res.AccountsFailed,
+		"models_seen":        res.ModelsSeen,
+		"models_added":       res.ModelsAdded,
+		"models_updated":     res.ModelsUpdated,
 	})
 }
 
